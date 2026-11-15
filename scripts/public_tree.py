@@ -111,12 +111,14 @@ TEST_DROP_MARKERS = (
 
 # Tests that need a tree the public repo does not carry (bench/, scripts/,
 # private skills) and build those paths from separate literals, so the marker
-# scan above cannot see them. They fail at collection and must be dropped.
+# scan above cannot see them. They fail once the private files are gone and
+# must be dropped.
 TEST_DROP_FILES = (
     "tests/test_core_bench.py",
     "tests/test_pre_copy.py",
     "tests/test_release_manifest_generator.py",
     "tests/test_rogmem_ship.py",
+    "tests/test_wipe_thick_blobs_precheck.py",
 )
 
 REQUIRED_PUBLIC = (
