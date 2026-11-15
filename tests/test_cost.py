@@ -164,12 +164,15 @@ def test_calls_page_fifty_at_a_time(tmp_path, monkeypatch):
         )
     first = cost.overview( now=now, span="24h", detail="all", page=1)
     second = cost.overview( now=now, span="24h", detail="all", page=2)
+    third = cost.overview( now=now, span="24h", detail="all", page=3)
     assert first["count"] == 51
-    assert first["pages"] == 2
-    assert len(first["rows"]) == 50
+    assert first["pages"] == 3
+    assert first["page_size"] == 20
+    assert len(first["rows"]) == 20
     assert first["rows"][0]["at"] == "11-11 11:50"
-    assert len(second["rows"]) == 1
-    assert cost.overview( now=now, span="24h", detail="all", page=9)["page"] == 2
+    assert len(second["rows"]) == 20
+    assert len(third["rows"]) == 11
+    assert cost.overview( now=now, span="24h", detail="all", page=9)["page"] == 3
 
 
 def test_a_price_row_is_complete_or_absent(tmp_path, monkeypatch):

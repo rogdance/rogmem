@@ -18,9 +18,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from rogmem.closed_span import closed_hour_keys, hour_bounds, hour_slot_sql, open_tail, partial_prefix
+
 SHANGHAI = timezone(timedelta(hours=8))
 PER_MILLION = 1_000_000
-PAGE = 50
+PAGE = 20
 WORKERS = ("初始蒸馏", "并页", "速写", "专名核对", "身份合并", "向量嵌入")
 SPANS = {"all", "24h", "7d", "30d"}
 DETAIL_SPANS = {"all", "24h", "30d"}
@@ -28,6 +30,8 @@ _WORKER: contextvars.ContextVar[str] = contextvars.ContextVar("rogmem_cost_worke
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_READY = False
 _SCHEMA_PATH: Path | None = None
+_SEAL_READY = False
+_SEAL_PATH: Path | None = None
 _CLOCK_READY = False
 _CLOCK_PATH: Path | None = None
 
@@ -326,6 +330,23 @@ CREATE TABLE IF NOT EXISTS model_calls (
 );
 CREATE INDEX IF NOT EXISTS model_calls_at ON model_calls(at);
 CREATE INDEX IF NOT EXISTS model_calls_jd ON model_calls(at_jd);
+CREATE TABLE IF NOT EXISTS call_bucket (
+  bucket TEXT NOT NULL,
+  worker TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  bare INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_tokens INTEGER NOT NULL,
+  fresh INTEGER NOT NULL,
+  cache_billed INTEGER NOT NULL,
+  metered INTEGER NOT NULL,
+  PRIMARY KEY (bucket, worker, provider_id, model)
+);
+CREATE TABLE IF NOT EXISTS call_bucket_seal (
+  bucket TEXT PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS model_prices (
   provider_id TEXT NOT NULL,
   model TEXT NOT NULL,
@@ -402,6 +423,7 @@ def migrate_call_clock(con: sqlite3.Connection) -> None:
               AND julianday(replace(trim(at), 't', 'T')) IS NOT NULL"""
     )
     con.execute("CREATE INDEX IF NOT EXISTS model_calls_jd ON model_calls(at_jd)")
+    _ensure_call_seals(con)
     _CLOCK_READY = True
     _CLOCK_PATH = path
 
@@ -712,6 +734,271 @@ def _group_sums(
     ).fetchall()
 
 
+def _ensure_call_seals(con: sqlite3.Connection) -> None:
+    """Create the hour seals. DDL stays on the writer, once per ledger file."""
+
+    global _SEAL_READY, _SEAL_PATH
+    path = _store_path()
+    if _SEAL_READY and _SEAL_PATH == path:
+        return
+    if con.in_transaction:
+        con.commit()
+    new_slot = hour_slot_sql("NEW.at")
+    old_slot = hour_slot_sql("OLD.at")
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS call_bucket (
+          bucket TEXT NOT NULL,
+          worker TEXT NOT NULL,
+          provider_id TEXT NOT NULL,
+          model TEXT NOT NULL,
+          bare INTEGER NOT NULL,
+          input_tokens INTEGER NOT NULL,
+          output_tokens INTEGER NOT NULL,
+          cache_tokens INTEGER NOT NULL,
+          fresh INTEGER NOT NULL,
+          cache_billed INTEGER NOT NULL,
+          metered INTEGER NOT NULL,
+          PRIMARY KEY (bucket, worker, provider_id, model)
+        );
+        CREATE TABLE IF NOT EXISTS call_bucket_seal (
+          bucket TEXT PRIMARY KEY
+        );
+        """
+    )
+    con.execute("DROP TRIGGER IF EXISTS model_calls_unseal_insert")
+    con.execute("DROP TRIGGER IF EXISTS model_calls_unseal_update")
+    con.execute(
+        f"""CREATE TRIGGER model_calls_unseal_insert
+            AFTER INSERT ON model_calls
+            BEGIN
+              DELETE FROM call_bucket WHERE bucket = {new_slot};
+              DELETE FROM call_bucket_seal WHERE bucket = {new_slot};
+            END"""
+    )
+    con.execute(
+        f"""CREATE TRIGGER model_calls_unseal_update
+            AFTER UPDATE OF at ON model_calls
+            BEGIN
+              DELETE FROM call_bucket WHERE bucket = {old_slot} OR bucket = {new_slot};
+              DELETE FROM call_bucket_seal WHERE bucket = {old_slot} OR bucket = {new_slot};
+            END"""
+    )
+    if con.in_transaction:
+        con.commit()
+    _SEAL_READY = True
+    _SEAL_PATH = path
+
+
+def _range_groups(
+    con: sqlite3.Connection,
+    start: datetime,
+    end: datetime,
+    *,
+    inclusive_end: bool,
+    worker: str,
+    model: str,
+) -> list[dict]:
+    """One hour-grain group for a bounded instant range. Closed hours are not in here."""
+
+    if end < start or (end == start and not inclusive_end):
+        return []
+    edge = "at_jd <= julianday(?)" if inclusive_end else "at_jd < julianday(?)"
+    where = f"at_jd >= julianday(?) AND {edge}"
+    params: list = [_stamp(start), _stamp(end)]
+    if worker:
+        where += " AND worker = ?"
+        params.append(worker)
+    if model:
+        provider, _, name = model.partition("\t")
+        where += " AND provider_id = ? AND model = ?"
+        params.extend([provider, name])
+    metered = "input_tokens IS NULL AND output_tokens IS NULL"
+    found = con.execute(
+        f"""SELECT {_slot_expr("hour")} AS slot,
+                   worker, provider_id, model,
+                   SUM(CASE WHEN {metered} THEN 1 ELSE 0 END) AS bare,
+                   SUM(CASE WHEN {metered} THEN 0 ELSE COALESCE(input_tokens, 0) END) AS input_tokens,
+                   SUM(CASE WHEN {metered} THEN 0 ELSE COALESCE(output_tokens, 0) END) AS output_tokens,
+                   SUM(CASE WHEN {metered} THEN 0 ELSE COALESCE(cache_tokens, 0) END) AS cache_tokens,
+                   SUM(CASE WHEN {metered} THEN 0 ELSE max(0, COALESCE(input_tokens, 0) - COALESCE(cache_tokens, 0)) END) AS fresh,
+                   SUM(CASE WHEN {metered} THEN 0 ELSE min(COALESCE(cache_tokens, 0), COALESCE(input_tokens, 0)) END) AS cache_billed,
+                   SUM(CASE WHEN {metered} THEN 0 ELSE 1 END) AS metered
+            FROM model_calls
+            WHERE {where}
+            GROUP BY slot, worker, provider_id, model""",
+        params,
+    ).fetchall()
+    return [dict(row) for row in found]
+
+
+def _missing_call_seals(con: sqlite3.Connection, keys: list[str]) -> list[str]:
+    if not keys:
+        return []
+    found = {
+        str(row[0])
+        for row in con.execute(
+            "SELECT bucket FROM call_bucket_seal WHERE bucket >= ? AND bucket <= ?",
+            (keys[0], keys[-1]),
+        )
+    }
+    return [key for key in keys if key not in found]
+
+
+def _seal_call_hour(con: sqlite3.Connection, key: str) -> None:
+    """Fold one closed hour and seal it. A second writer of the same hour is a no-op."""
+
+    if con.in_transaction:
+        con.commit()
+    start, end = hour_bounds(key)
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        if con.execute("SELECT 1 FROM call_bucket_seal WHERE bucket=?", (key,)).fetchone():
+            con.commit()
+            return
+        rows = _range_groups(con, start, end, inclusive_end=False, worker="", model="")
+        con.execute("DELETE FROM call_bucket WHERE bucket=?", (key,))
+        con.executemany(
+            """INSERT INTO call_bucket(
+                 bucket, worker, provider_id, model, bare, input_tokens, output_tokens,
+                 cache_tokens, fresh, cache_billed, metered
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (
+                    key,
+                    str(row.get("worker") or ""),
+                    str(row.get("provider_id") or ""),
+                    str(row.get("model") or ""),
+                    int(row.get("bare") or 0),
+                    int(row.get("input_tokens") or 0),
+                    int(row.get("output_tokens") or 0),
+                    int(row.get("cache_tokens") or 0),
+                    int(row.get("fresh") or 0),
+                    int(row.get("cache_billed") or 0),
+                    int(row.get("metered") or 0),
+                )
+                for row in rows
+                if str(row.get("slot") or "") == key
+            ],
+        )
+        con.execute("INSERT INTO call_bucket_seal(bucket) VALUES(?)", (key,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+
+
+def _fill_call_hours(con: sqlite3.Connection, keys: list[str]) -> None:
+    """Seal only the hours that are missing. One short transaction each."""
+
+    if not keys:
+        return
+    _ensure_call_seals(con)
+    missing = _missing_call_seals(con, keys)
+    for key in missing:
+        _seal_call_hour(con, key)
+
+
+def _read_call_hours(con: sqlite3.Connection, keys: list[str], worker: str, model: str) -> list[dict]:
+    if not keys:
+        return []
+    where = "bucket >= ? AND bucket <= ?"
+    params: list = [keys[0], keys[-1]]
+    if worker:
+        where += " AND worker = ?"
+        params.append(worker)
+    if model:
+        provider, _, name = model.partition("\t")
+        where += " AND provider_id = ? AND model = ?"
+        params.extend([provider, name])
+    found = con.execute(
+        f"""SELECT bucket AS slot, provider_id, model,
+                   SUM(bare) AS bare,
+                   SUM(input_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   SUM(cache_tokens) AS cache_tokens,
+                   SUM(fresh) AS fresh,
+                   SUM(cache_billed) AS cache_billed,
+                   SUM(metered) AS metered
+            FROM call_bucket
+            WHERE {where}
+            GROUP BY bucket, provider_id, model""",
+        params,
+    ).fetchall()
+    return [dict(row) for row in found]
+
+
+def _collapse(rows: list[dict], grain: str) -> list[dict]:
+    if grain == "hour":
+        merged: dict[tuple, dict] = {}
+        for row in rows:
+            key = (str(row.get("slot") or ""), str(row.get("provider_id") or ""), str(row.get("model") or ""))
+            item = merged.get(key)
+            if item is None:
+                merged[key] = {
+                    "slot": key[0],
+                    "provider_id": key[1],
+                    "model": key[2],
+                    "bare": int(row.get("bare") or 0),
+                    "input_tokens": int(row.get("input_tokens") or 0),
+                    "output_tokens": int(row.get("output_tokens") or 0),
+                    "cache_tokens": int(row.get("cache_tokens") or 0),
+                    "fresh": int(row.get("fresh") or 0),
+                    "cache_billed": int(row.get("cache_billed") or 0),
+                    "metered": int(row.get("metered") or 0),
+                }
+                continue
+            for name in ("bare", "input_tokens", "output_tokens", "cache_tokens", "fresh", "cache_billed", "metered"):
+                item[name] += int(row.get(name) or 0)
+        return list(merged.values())
+    rolled: dict[tuple, dict] = {}
+    for row in rows:
+        slot = str(row.get("slot") or "")
+        day = (slot[:10] + " 00:00:00") if len(slot) >= 10 else slot
+        key = (day, str(row.get("provider_id") or ""), str(row.get("model") or ""))
+        item = rolled.get(key)
+        if item is None:
+            rolled[key] = {
+                "slot": day,
+                "provider_id": key[1],
+                "model": key[2],
+                "bare": int(row.get("bare") or 0),
+                "input_tokens": int(row.get("input_tokens") or 0),
+                "output_tokens": int(row.get("output_tokens") or 0),
+                "cache_tokens": int(row.get("cache_tokens") or 0),
+                "fresh": int(row.get("fresh") or 0),
+                "cache_billed": int(row.get("cache_billed") or 0),
+                "metered": int(row.get("metered") or 0),
+            }
+            continue
+        for name in ("bare", "input_tokens", "output_tokens", "cache_tokens", "fresh", "cache_billed", "metered"):
+            item[name] += int(row.get(name) or 0)
+    return list(rolled.values())
+
+
+def _window_groups(
+    con: sqlite3.Connection,
+    *,
+    start: datetime,
+    end: datetime,
+    grain: str,
+    worker: str,
+    model: str,
+) -> list[dict]:
+    """Closed hours from seals, plus the clipped start and the open hour from the ledger."""
+
+    keys = closed_hour_keys(start, end)
+    _fill_call_hours(con, keys)
+    rows = _read_call_hours(con, keys, worker, model)
+    prefix = partial_prefix(start, end)
+    if prefix:
+        rows.extend(_range_groups(con, prefix[0], prefix[1], inclusive_end=False, worker=worker, model=model))
+    tail = open_tail(start, end)
+    if tail:
+        rows.extend(_range_groups(con, tail[0], tail[1], inclusive_end=True, worker=worker, model=model))
+    return _collapse(rows, grain)
+
+
 def _piece_from_group(row: sqlite3.Row, prices, rate) -> dict:
     piece = _empty()
     piece["input"] = int(row["input_tokens"] or 0)
@@ -819,7 +1106,7 @@ def _overview(
         (key.strftime("%Y-%m-%d %H:00:00") if grain == "hour" else key.strftime("%Y-%m-%d 00:00:00")): key
         for key in buckets(start, moment, grain)
     }
-    for row in _group_sums(con, start=start, end=moment, grain=grain, worker=worker, model=model):
+    for row in _window_groups(con, start=start, end=moment, grain=grain, worker=worker, model=model):
         piece = _piece_from_group(row, prices, rate)
         _merge_sum(folded, piece)
         key = slot_at.get(str(row["slot"] or ""))
@@ -907,7 +1194,7 @@ _BOARD_SNAP_THREAD: threading.Thread | None = None
 # How long a page may wait for the gather it just asked for. The request itself
 # does not open the ledger; it only waits until that identity is published.
 VIEW_WAIT_SECONDS = 2.0
-_BOARD_SNAP_KEYS = ("span", "worker", "model", "detail", "dworker", "dmodel", "page")
+_BOARD_SNAP_KEYS = ("span", "worker", "model", "detail", "dworker", "dmodel")
 _BOARD_WAKE = threading.Event()
 # Identity is the filter combo. Freshness is separate: input generation, the bucket the
 # window was computed in, and whether the last gathers failed. A hit is ready only while
@@ -1163,6 +1450,81 @@ def _start_board_refresher() -> None:
 def overview(**kwargs) -> dict:
     with _store() as con:
         return _overview(con, **kwargs)
+
+
+def _present_calls(con: sqlite3.Connection, calls: list[Call]) -> list[dict]:
+    prices = _prices(con)
+    rate = _rate_of(con)
+    rows = []
+    for call in calls:
+        price = prices.get((call.provider_id, call.model))
+        amount = None
+        if call.input_tokens is not None or call.output_tokens is not None:
+            amount = money_cny(
+                int(call.input_tokens or 0),
+                int(call.output_tokens or 0),
+                int(call.cache_tokens or 0),
+                price,
+                rate,
+            )
+        rows.append(
+            {
+                "at": call.at.astimezone(SHANGHAI).strftime("%m-%d %H:%M"),
+                "worker": call.worker,
+                "provider_id": call.provider_id,
+                "model": call.model,
+                "prompt": call.prompt,
+                "answer": call.answer,
+                "input": call.input_tokens,
+                "output": call.output_tokens,
+                "cache": call.cache_tokens,
+                "total": total_tokens(call.input_tokens, call.output_tokens),
+                "money": amount,
+            }
+        )
+    return rows
+
+
+def call_board(*, now: datetime, detail: str = "30d", dworker: str = "", dmodel: str = "", page: int = 1) -> dict:
+    """One page of call text. This does not fold the overview cards."""
+
+    moment = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    chosen = detail if detail in DETAIL_SPANS else "30d"
+    try:
+        page_no = int(page)
+    except (TypeError, ValueError):
+        page_no = 1
+    with _store() as con:
+        earliest = _earliest_at(con)
+        dstart, _grain = span_bounds(chosen, moment, earliest)
+        listed, count = _detail_rows(
+            con, start=dstart, end=moment, worker=dworker, model=dmodel, page=page_no
+        )
+        rows = _present_calls(con, listed)
+    pages = max(1, (count + PAGE - 1) // PAGE)
+    current = page_no if page_no >= 1 else 1
+    if current > pages:
+        current = pages
+    return {
+        "detail": chosen,
+        "dworker": dworker,
+        "dmodel": dmodel,
+        "page": current,
+        "pages": pages,
+        "page_size": PAGE,
+        "count": count,
+        "rows": rows,
+    }
+
+
+def with_call_page(board: dict, **kwargs) -> dict:
+    """Copy a card reading and attach the asked page. The cached cards stay untouched."""
+
+    fresh = call_board(**kwargs)
+    copied = dict(board)
+    for key in ("rows", "count", "page", "pages", "page_size", "detail", "dworker", "dmodel"):
+        copied[key] = fresh[key]
+    return copied
 
 
 def _shell_board(**kwargs) -> dict:

@@ -197,13 +197,13 @@ def test_rows_inside_the_window_already_agree(tmp_path, monkeypatch):
     rows.append(_row("fin", state="done", when=recent, body="d" * 4))
     _insert(engine, rows)
 
-    board = view("24h", "queued", 2, NOW)
+    board = view("24h", "queued", 99, NOW)
     listed = board["rows"]
     assert board["summary"]["queued_tasks"] == board["counts"]["queued"] == board["total"] == 51
     assert board["summary"]["queued_chars"] == 51
-    assert len(listed) == 1
-    assert board["page"] == 2
-    assert board["pages"] == 2
+    assert len(listed) == 51 - (board["pages"] - 1) * PAGE_SIZE
+    assert board["page"] == board["pages"]
+    assert board["pages"] == (51 + PAGE_SIZE - 1) // PAGE_SIZE
     assert board["summary"]["running"] == board["counts"]["leased"] == 1
     assert board["summary"]["stopped"] == 1
     assert board["summary"]["done_tasks"] == board["counts"]["done"] == 1
@@ -247,14 +247,14 @@ def test_screenshot_scale_queued_count_is_the_live_line(tmp_path, monkeypatch):
                 )
         queued, rows = _walk(span, "queued", NOW)
         assert queued["total"] == LIVE
-        assert queued["pages"] == 6
+        assert queued["pages"] == (LIVE + PAGE_SIZE - 1) // PAGE_SIZE
         assert len(rows) == LIVE
         assert len({row["qid"] for row in rows}) == LIVE
         assert sum(int(row["chars"]) for row in rows) == live_chars
         beyond = view(span, "queued", 99, NOW)
-        assert beyond["page"] == 6
+        assert beyond["page"] == queued["pages"]
         assert beyond["total"] == LIVE
-        assert len(beyond["rows"]) == LIVE - 5 * PAGE_SIZE
+        assert len(beyond["rows"]) == LIVE - (queued["pages"] - 1) * PAGE_SIZE
         if span == "24h":
             listed_ids = {int(row["qid"]) for row in rows}
             hour = view("24h", "done", 1, NOW)

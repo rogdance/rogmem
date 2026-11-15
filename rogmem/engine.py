@@ -365,6 +365,9 @@ def connect(data: Path, scan: Path) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS queue_state_finished ON queue(state, finished_at)")
     _keep_instant(con, "queue", "finished_at", "finished_jd")
     con.execute("CREATE INDEX IF NOT EXISTS queue_done_jd ON queue(state, finished_jd)")
+    from rogmem.queue_board import install_done_seals
+
+    install_done_seals(con)
     con.execute(
         """CREATE INDEX IF NOT EXISTS queue_other_state ON queue(id)
            WHERE state NOT IN ('queued', 'leased', 'failed', 'done')"""
@@ -11113,6 +11116,7 @@ def summary_fields(ctype: str, owner: bool = False) -> list[str]:
 
 
 PAGE_SIZE = 50
+LIST_PAGE = 20
 
 
 def _page_bounds(page: int, total: int, page_size: int = PAGE_SIZE) -> tuple[int, int, int]:
@@ -11193,17 +11197,17 @@ def list_sources(
         ).fetchall()
         ids = [row["id"] for row in narrow if source_progress_matches(row["pipeline"], row["status"], status)]
         total = len(ids)
-        current, pages, offset = _page_bounds(page, total)
-        chosen = ids[offset : offset + PAGE_SIZE]
+        current, pages, offset = _page_bounds(page, total, LIST_PAGE)
+        chosen = ids[offset : offset + LIST_PAGE]
         rows = _source_page(columns, chosen)
     else:
         total = int(db().execute(f"SELECT COUNT(*) AS n {joined}", args).fetchone()["n"])
-        current, pages, offset = _page_bounds(page, total)
+        current, pages, offset = _page_bounds(page, total, LIST_PAGE)
         chosen = [
             row["id"]
             for row in db().execute(
                 f"SELECT s.id AS id {joined} ORDER BY s.ingested_at DESC LIMIT ? OFFSET ?",
-                [*args, PAGE_SIZE, offset],
+                [*args, LIST_PAGE, offset],
             ).fetchall()
         ]
         rows = _source_page(columns, chosen)
@@ -11213,7 +11217,7 @@ def list_sources(
         item["status_label"] = display_status(item["kind"], item["status"])
         item["note"] = list_note(item)
         out.append(item)
-    return {"rows": out, "total": total, "page": current, "pages": pages, "page_size": PAGE_SIZE}
+    return {"rows": out, "total": total, "page": current, "pages": pages, "page_size": LIST_PAGE}
 
 
 def list_note(row: dict) -> str:
@@ -16225,13 +16229,13 @@ def operation_log_view(kind: str = "", page: int = 1) -> dict:
     except (TypeError, ValueError):
         page_no = 1
     total = len(entries)
-    current, pages, offset = _page_bounds(page_no, total)
+    current, pages, offset = _page_bounds(page_no, total, LIST_PAGE)
     return {
-        "entries": entries[offset : offset + PAGE_SIZE],
+        "entries": entries[offset : offset + LIST_PAGE],
         "total": total,
         "page": current,
         "pages": pages,
-        "page_size": PAGE_SIZE,
+        "page_size": LIST_PAGE,
         "kinds": kinds,
         "selected": selected or "全部",
     }

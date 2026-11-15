@@ -934,19 +934,20 @@ async def admin_queue(request: Request) -> Response:
     denied = _guard(request)
     if denied:
         return denied
-    from rogmem.queue_board import view
+    from rogmem.queue_board import list_view, view
 
     try:
         page_no = int(request.query_params.get("page") or "1")
     except ValueError:
         page_no = 1
-    board = await asyncio.to_thread(
-        view,
-        request.query_params.get("span", "24h"),
-        request.query_params.get("tab", "all"),
-        page_no,
-    )
-    return HTMLResponse(ui.queue_page(board))
+    span = request.query_params.get("span", "24h")
+    tab = request.query_params.get("tab", "all")
+    headers = {"Cache-Control": "no-store"}
+    if request.query_params.get("part") == "queue":
+        listed = await asyncio.to_thread(list_view, span, tab, page_no)
+        return HTMLResponse(ui.queue_list_fragment(listed), headers=headers)
+    board = await asyncio.to_thread(lambda: view(span, tab, page_no, sync=False))
+    return HTMLResponse(ui.queue_page(board), headers=headers)
 
 
 @mcp.custom_route("/admin/settings/collect", methods=["GET"])
@@ -992,6 +993,19 @@ def _cost_page(request: Request) -> Response:
         "dmodel": pick("dmodel", ""),
         "page": _cost_page_no(str(query.get("page") or "")),
     }
+    headers = {"Cache-Control": "no-store"}
+    if query.get("part") == "calls":
+        listed = cost.call_board(
+            now=view["now"],
+            detail=str(query.get("detail") or "30d"),
+            dworker=str(query.get("dworker") or ""),
+            dmodel=str(query.get("dmodel") or ""),
+            page=view["page"],
+        )
+        listed["span"] = str(query.get("span") or "30d")
+        listed["worker"] = str(query.get("worker") or "")
+        listed["model"] = str(query.get("model") or "")
+        return HTMLResponse(ui.cost_calls_fragment(listed), headers=headers)
     wants_status = request.query_params.get("observe") == "1" or request.headers.get(ui.COST_OBSERVE_HEADER) == "1"
     board, prices = cost.board_and_prices(**view)
     obs = board.get("observation") if isinstance(board.get("observation"), dict) else {}
@@ -1002,7 +1016,6 @@ def _cost_page(request: Request) -> Response:
         cost.wait_for_view(cost.view_key(**view), cost.VIEW_WAIT_SECONDS)
         board, prices = cost.board_and_prices(**view)
         obs = board.get("observation") if isinstance(board.get("observation"), dict) else {}
-    headers = {"Cache-Control": "no-store"}
     if wants_status:
         obs = board.get("observation") if isinstance(board.get("observation"), dict) else {}
         state = str(obs.get("state") or ("pending" if board.get("observed") is False else "ready"))
@@ -1014,6 +1027,16 @@ def _cost_page(request: Request) -> Response:
                 "observed": state == "ready",
             },
             headers=headers,
+        )
+    state = str(obs.get("state") or ("pending" if board.get("observed") is False else "ready"))
+    if state != "pending":
+        board = cost.with_call_page(
+            board,
+            now=view["now"],
+            detail=view["detail"],
+            dworker=view["dworker"],
+            dmodel=view["dmodel"],
+            page=view["page"],
         )
     return HTMLResponse(ui.cost_page(board, engine.public_providers(), prices), headers=headers)
 

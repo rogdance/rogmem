@@ -161,8 +161,8 @@ def test_run_log_pages_fifty_with_the_shared_pager(tmp_path, monkeypatch):
     engine._refresh_operation_log_snap()
     first = engine.operation_log_view(page=1)
     second = engine.operation_log_view(page=2)
-    assert first["total"] == 55 and first["pages"] == 2 and first["page_size"] == 50
-    assert len(first["entries"]) == 50 and len(second["entries"]) == 5
+    assert first["total"] == 55 and first["pages"] == 3 and first["page_size"] == 20
+    assert len(first["entries"]) == 20 and len(second["entries"]) == 20
     assert first["entries"][0]["subject"] != second["entries"][0]["subject"]
     html = logs_page(
         first["entries"],
@@ -176,7 +176,7 @@ def test_run_log_pages_fifty_with_the_shared_pager(tmp_path, monkeypatch):
     foot = html.split("class='list-foot'", 1)[1].split("</form></div>", 1)[0]
     assert foot.index("共 55 条") < foot.index("<form class='pager'")
     assert "aria-label='页码'" in foot and "page=2" in foot
-    assert html.count("<tr>") == 51
+    assert html.count("<tr>") == 21
     narrowed = engine.operation_log_view("蒸馏", page=2)
     kept = logs_page(
         narrowed["entries"],
@@ -194,4 +194,4 @@ def test_run_log_pages_fifty_with_the_shared_pager(tmp_path, monkeypatch):
     kept_query = parse_qs(urlparse(unescape(kept_foot.split("href='", 1)[1].split("'", 1)[0])).query)
     assert kept_query["kind"] == ["蒸馏"]
     assert "page" not in kept_query
-    assert "page=3" not in kept_foot
+    assert "page=4" not in kept_foot
