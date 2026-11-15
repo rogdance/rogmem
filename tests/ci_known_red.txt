@@ -1,5 +1,5 @@
-# 这些用例在 main 上、装齐依赖之后仍然失败，不是这次开源抽离引入的。
-# 安装门禁先不把它们算进去。基线是 2026-11-14 的 origin/main。
+# 这些用例在 main 上、装齐依赖之后仍然失败，安装门禁先不把它们算进去。
+# 基线是 2026-11-14 的 origin/main。下面 A / B 两组追加于 2026-11-15。
 tests/test_ab79_residue_fail_gate.py::test_ab_a_docs_prompts_git_diff_empty
 tests/test_acceptance_honesty.py::test_eval_gate_scores_meet_baseline
 tests/test_ba_promote_fail_gate.py::test_ba_docs_prompts_git_diff_empty
@@ -48,3 +48,26 @@ tests/test_v54_slot_chain_fail_gate.py::test_V54_TRACE_02_missing_session_is_fai
 tests/test_write_chapter_apply.py::test_write_chapter_apply_ops_shape_uses_computed_prose
 tests/test_write_chapter_apply.py::test_write_chapter_refuses_prose_that_drops_quote
 tests/test_write_switch_gate.py::test_WS_LEG_apply_ops_commit_false_holds_sidecar_until_shared_commit
+
+# A. 公开树不携带这些用例要读的私有文件，断言必然失败。路径由分段字面量拼成
+#    （ROOT / "docs" / "superpowers" / ...），public_tree 的字面量扫描看不见。
+#    tests/live_check.py 私有；docs/superpowers/、docs/bench/ 依 public_tree 的规则不进公开树。
+tests/test_acceptance_honesty.py::test_live_check_source_has_no_f35_contract_pass_id
+tests/test_acceptance_honesty.py::test_f108_contract_id_is_not_claiming_vendor
+tests/test_acceptance_honesty.py::test_i_f108_skip_is_not_pass_without_live_flag
+tests/test_acceptance_honesty.py::test_f113_keeps_delivery_rows_unpassed
+tests/test_acceptance_honesty.py::test_acceptance_layers_doc_defines_l0_l1_l2
+tests/test_acceptance_honesty.py::test_features_notes_layers_and_f108_honesty
+tests/test_host_path_friction.py::test_adr_states_no_packaging_and_script_web_is_official_path
+tests/test_host_path_friction.py::test_design_section_8_points_at_adr_delivery_shape
+tests/test_host_path_friction.py::test_features_and_worklist_do_not_claim_packaged_client_passed
+tests/test_revision_stability.py::test_synthetic_sentences_do_not_repeat_the_corpus
+
+# B. 私有仓同样红，与开源抽离无关：是产品侧待修，不是抽取问题。
+#    host_fleet 三条是同一处（重命名/历史对账多出一条），queue_read_model 一条是并发读快照，
+#    host_import_r4 一条是取消后线程泄漏。
+tests/test_host_fleet.py::test_fleet_lists_every_device_and_marks_only_the_viewer
+tests/test_host_fleet.py::test_a_renamed_owner_updates_the_same_repository
+tests/test_host_fleet.py::test_history_keeps_the_repository_the_host_already_recorded
+tests/test_queue_read_model.py::test_concurrent_reads_do_not_mix_a_snapshot
+tests/test_host_import_r4.py::test_worker_heartbeat_stops_on_cancel_without_leaking_threads
