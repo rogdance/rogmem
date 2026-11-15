@@ -288,6 +288,19 @@ canvas#neural-network-canvas {
   letter-spacing: .3px;
   text-align: center;
 }
+.login-legal {
+  position: fixed;
+  z-index: 30;
+  left: 0;
+  right: 0;
+  bottom: 16px;
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.login-legal a { color: inherit; }
 @media (max-width: 480px) {
   .login-panel { padding: 24px 20px 18px; }
   .login-title { font-size: 18px; }
@@ -302,6 +315,7 @@ canvas#neural-network-canvas {
 <p id="login-message" class="login-message" role="status" aria-live="polite"></p>
 <p class="login-hint">初始密码：__INITIAL__</p>
 </main>
+<p class="login-legal">Copyright (c) 2026 by Rogdance (<a href="https://github.com/rogdance/rogmem">https://github.com/rogdance/rogmem</a>)</p>
 <script type="importmap">
 {
   "imports": {
@@ -312,6 +326,7 @@ canvas#neural-network-canvas {
 </script>
 <script type="module">
 import * as THREE from 'three';
+// Techartist, 3D Quantum Neural Network, MIT. https://codepen.io/VoXelo/pen/dPMeGze
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -1812,18 +1827,38 @@ h3 {{ font-size: 16px; line-height: 1.5; font-weight: 600; margin: 22px 0 8px; }
   background: var(--surface-subtle);
 }}
 .setting-foot .note {{ margin: 0; }}
-.current-password-line {{ display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }}
-.current-password-line input {{ width: min(24em, 100%); }}
-.initial-password {{ color: var(--text-muted); font-size: 12px; }}
+.initial-password {{ margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }}
 .login-password-switch {{ border-top: 1px solid var(--border); }}
-.login-password-block {{ display: flex; flex-direction: column; gap: 16px; }}
-.password-save-line {{ display: flex; align-items: flex-end; gap: 12px; }}
-.password-save-line .password-reveal {{ flex: 1; min-width: 0; }}
-.password-save-line button[type="submit"] {{ flex: none; }}
-.login-password-fields {{ display: flex; flex-direction: column; gap: 12px; }}
-.login-password-fields input {{ display: block; width: min(24em, 100%); }}
-.password-reveal {{ display: flex; align-items: center; gap: 8px; }}
-.password-reveal input {{ flex: 1; min-width: 0; }}
+.login-password-grid {{
+  display: grid;
+  grid-template-columns: 7.5em min(24em, 100%);
+  column-gap: 16px;
+  row-gap: 12px;
+  align-items: start;
+  justify-content: start;
+}}
+.login-password-grid > .setting-name {{
+  margin: 0;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+}}
+.password-stack {{ display: flex; flex-direction: column; gap: 4px; min-width: 0; }}
+.password-field {{ position: relative; display: block; width: 100%; min-width: 0; }}
+.login-password-grid .password-field input {{
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding-right: 36px;
+}}
+.password-field .peek {{ position: absolute; top: 50%; right: 4px; transform: translateY(-50%); }}
+.login-password-grid #password-gap {{ grid-column: 2; }}
+.login-password-save {{ grid-column: 2; display: flex; justify-content: flex-end; }}
+@media (max-width: 760px) {{
+  .login-password-grid {{ grid-template-columns: minmax(0, 1fr); }}
+  .login-password-grid #password-gap,
+  .login-password-save {{ grid-column: 1; }}
+}}
 .peek {{
   flex: none;
   display: inline-flex;
@@ -2218,6 +2253,13 @@ tr.draft input {{ width: 100%; }}
 .about-links li:last-child {{ border-bottom: 0; }}
 .about-links span {{ color: var(--text-muted); font-size: 12px; letter-spacing: 0; }}
 .about-links a {{ color: var(--link-color); word-break: break-all; }}
+.about-credits {{ border-top: 1px solid var(--border); padding: 16px 28px 4px; }}
+.about-credits .about-label {{ margin: 0; }}
+.about-credits ul {{ list-style: none; margin: 0; padding: 0; }}
+.about-credits li {{ display: grid; grid-template-columns: 12em minmax(0, 1fr); gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); align-items: baseline; }}
+.about-credits li:last-child {{ border-bottom: 0; }}
+.about-credits li > span {{ color: var(--text-muted); font-size: 12px; }}
+.about-credits a {{ color: var(--link-color); word-break: break-all; }}
 code, kbd, pre, samp {{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }}
 .src-body {{ max-width: 100%; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
 .wiki-article code {{ font-size: .92em; background: var(--surface-subtle); border-radius: 4px; padding: 1px 5px; }}
@@ -2359,6 +2401,8 @@ table.calls td.num, table.calls th.num {{ text-align: right; font-variant-numeri
   .about-versions > div {{ padding: 14px 16px; }}
   .about-links {{ padding: 0 16px; }}
   .about-links li {{ grid-template-columns: 1fr; gap: 2px; padding: 10px 0; }}
+  .about-credits {{ padding: 14px 16px 4px; }}
+  .about-credits li {{ grid-template-columns: 1fr; gap: 2px; }}
   .board .panel {{ min-width: 0; }}
   .ov-filters {{ flex-wrap: wrap; row-gap: 8px; }}
   .ov-filters .tabs {{ min-width: 0; }}
@@ -8665,6 +8709,24 @@ _SETTINGS_DIRTY = """<script>
 </script>"""
 
 
+_PEEK_ICON = (
+    '<svg class="eye-on" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2">'
+    '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>'
+    '<svg class="eye-off" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2">'
+    '<path d="M3 3l18 18"/><path d="M10.6 10.6a3 3 0 004.2 4.2"/>'
+    '<path d="M9.9 5.1A10.8 10.8 0 0112 5c6.5 0 10 7 10 7a18.5 18.5 0 01-3.2 4.3"/>'
+    '<path d="M6.1 6.1C3.8 7.8 2 12 2 12s3.5 7 10 7a10.8 10.8 0 004.1-.8"/></svg>'
+)
+
+
+def _password_peek(name: str) -> str:
+    """Show/hide control. Same markup on every password field so the eyes share one column."""
+    return (
+        f'<button type="button" class="peek" data-show="显示{name}" data-hide="隐藏{name}" '
+        f'aria-label="显示{name}" aria-pressed="false">{_PEEK_ICON}</button>'
+    )
+
+
 def basic_page(cfg: dict) -> str:
     from rogmem.engine import INITIAL_ADMIN_PASSWORD, TURN_WAIT_DEFAULT
 
@@ -8674,33 +8736,39 @@ def basic_page(cfg: dict) -> str:
     wait = str(cfg.get("turn_wait") or TURN_WAIT_DEFAULT)
     stored = cfg.get("passwordless")
     opened = "" if str(stored if stored is not None else "1").strip() in {"0", "off", "false", "no"} else " checked"
+    peek_current = _password_peek("当前密码")
+    peek_new = _password_peek("新密码")
+    peek_again = _password_peek("确认新密码")
     login_settings = f"""<section class="panel plate" id="login-password">
 <header class="setting-head"><h2>登录密码设置</h2></header>
 <form id="login-password-form" onsubmit="event.preventDefault(); post('/admin/api/password', {{current:this.current_password.value, password:this.new_password.value, confirm:this.confirm_password.value}})">
-<section class="setting-row login-password-block">
-<div class="setting-line current-password-line">
+<div class="setting-row login-password-block">
+<div class="login-password-grid">
 <p class="setting-name">当前密码</p>
+<div class="password-stack">
+<label class="password-field">
 <input name="current_password" type="password" autocomplete="current-password" aria-label="当前密码">
-<span class="initial-password">初始密码: {esc(INITIAL_ADMIN_PASSWORD)}</span>
+{peek_current}
+</label>
+<p class="initial-password">初始密码: {esc(INITIAL_ADMIN_PASSWORD)}</p>
 </div>
-<div class="login-password-fields">
-<label class="password-reveal">新密码
+<p class="setting-name">新密码</p>
+<label class="password-field">
 <input name="new_password" type="password" autocomplete="new-password" aria-label="新密码" aria-describedby="password-gap">
-<button type="button" class="peek" data-show="显示新密码" data-hide="隐藏新密码" aria-label="显示新密码" aria-pressed="false"><svg class="eye-on" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-off" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.6 10.6a3 3 0 004.2 4.2"/><path d="M9.9 5.1A10.8 10.8 0 0112 5c6.5 0 10 7 10 7a18.5 18.5 0 01-3.2 4.3"/><path d="M6.1 6.1C3.8 7.8 2 12 2 12s3.5 7 10 7a10.8 10.8 0 004.1-.8"/></svg></button>
+{peek_new}
 </label>
-<div class="password-save-line">
-<label class="password-reveal">新密码
+<p class="setting-name">确认新密码</p>
+<label class="password-field">
 <input name="confirm_password" type="password" autocomplete="new-password" aria-label="确认新密码" aria-describedby="password-gap">
-<button type="button" class="peek" data-show="显示确认新密码" data-hide="隐藏确认新密码" aria-label="显示确认新密码" aria-pressed="false"><svg class="eye-on" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-off" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.6 10.6a3 3 0 004.2 4.2"/><path d="M9.9 5.1A10.8 10.8 0 0112 5c6.5 0 10 7 10 7a18.5 18.5 0 01-3.2 4.3"/><path d="M6.1 6.1C3.8 7.8 2 12 2 12s3.5 7 10 7a10.8 10.8 0 004.1-.8"/></svg></button>
+{peek_again}
 </label>
-<button type="submit">保存</button>
-</div>
 <p id="password-gap" class="initial-password" aria-live="polite"></p>
+<div class="login-password-save"><button type="submit">保存</button></div>
 </div>
-</section>
+</div>
 </form>
 <section class="setting-row setting-line login-password-switch">
-<div><p class="setting-name">免密登录</p><p class="note">默认开启。关掉后，未登录和管理里已有的会话都要重新登录。</p></div>
+<div><p class="setting-name">免密登录</p><p class="note">开启后，登录记忆中枢时不再需要输入密码。建议仅当确信自己的 NAS 安全时开启。</p></div>
 <label class="switch"><span class="knob"><input type="checkbox" name="passwordless" role="switch"{opened} aria-label="免密登录" onchange="post('/admin/api/settings/basic', {{passwordless:this.checked ? '1' : '0'}})"><i></i></span></label>
 </section>
 <script>
@@ -9121,6 +9189,14 @@ def about_page(version: str, release: dict | None = None) -> str:
 <ul class='about-links'>
 <li><span>GitHub</span><a href='https://github.com/rogdance/rogmem' target='_blank' rel='noopener'>https://github.com/rogdance/rogmem</a></li>
 </ul>
+<div class='about-credits'>
+<p class='about-label'>致谢</p>
+<ul>
+<li><span>WeKnora</span>Tencent · <a href='https://github.com/Tencent/WeKnora' target='_blank' rel='noopener'>https://github.com/Tencent/WeKnora</a></li>
+<li><span>@cosmos.gl/graph</span>cosmos.gl · <a href='https://github.com/cosmosgl/graph' target='_blank' rel='noopener'>https://github.com/cosmosgl/graph</a></li>
+<li><span>Techartist</span>Techartist · <a href='https://codepen.io/VoXelo/pen/dPMeGze' target='_blank' rel='noopener'>https://codepen.io/VoXelo/pen/dPMeGze</a></li>
+</ul>
+</div>
 </section>
 {about_release_script()}"""
     return _section_page("about", "关于ROGMEM", inner)

@@ -341,6 +341,9 @@ def test_login_page_keeps_only_the_password_panel(tmp_path, monkeypatch):
         assert "color: var(--text-muted)" in page
         assert 'class="login-panel"' in page
         assert 'id="neural-network-canvas"' in page
+        assert "Copyright (c) 2026 by Rogdance (" in page
+        assert 'href="https://github.com/rogdance/rogmem"' in page
+        assert ">https://github.com/rogdance/rogmem</a>)" in page
         assert 'id="nebula"' not in page
         assert "cosmos-graph.min.js" not in page
         assert "spaceDimensions" not in page
@@ -454,13 +457,15 @@ def test_passwordless_defaults_open_and_can_close(tmp_path, monkeypatch):
         assert 'id="password-gap"' in html
         assert "至少 8 位" in html
         assert "两次输入不一致" in html
-        assert html.count('class="peek"') == 2
+        assert html.count('class="peek"') == 3
         module = html.split('id="login-password"', 1)[1].split("主人称呼", 1)[0]
-        before_fields = module.split('class="login-password-fields"', 1)[0]
-        assert 'name="current_password"' in before_fields
-        assert 'class="peek"' not in before_fields
+        assert 'name="current_password"' in module
+        assert 'aria-label="显示当前密码"' in module
         assert "login-password-switch" in module
-        assert "password-save-line" in module
+        assert "login-password-save" in module
+        assert "password-save-line" not in module
+        assert '<p class="setting-name">确认新密码</p>' in module
+        assert "开启后，登录记忆中枢时不再需要输入密码。建议仅当确信自己的 NAS 安全时开启。" in module
         assert "setting-foot" not in module
         assert "dashed" not in module
         assert "login-password-split" not in module

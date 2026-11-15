@@ -63,6 +63,10 @@ def test_about_page_shows_the_single_version():
     assert "/admin/settings/about" in html
     assert "S-V1" not in html
     assert "C-V1" not in html
+    assert "致谢" in html
+    assert "Tencent · <a href='https://github.com/Tencent/WeKnora'" in html
+    assert "cosmos.gl · <a href='https://github.com/cosmosgl/graph'" in html
+    assert "Techartist · <a href='https://codepen.io/VoXelo/pen/dPMeGze'" in html
 
 
 def test_nav_puts_the_version_left_of_the_theme_icon(monkeypatch):
