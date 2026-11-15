@@ -118,10 +118,9 @@ def test_recent_pack_reads_the_budget_not_the_archive(tmp_path, monkeypatch):
     engine.db().set_trace_callback(None)
     assert any("新的一句" in item["text"] for item in loaded)
     assert truncated is True
-    body_reads = [sql for sql in seen if "body" in sql.lower()]
-    assert body_reads
-    assert all("substr" in sql.lower() for sql in body_reads)
-    assert len(body_reads) <= 4
+    joined = "\n".join(seen).lower()
+    assert "substr(body" not in joined
+    assert "select body" not in joined
 
 
 def test_continuation_returns_only_older_excerpts(tmp_path, monkeypatch):
