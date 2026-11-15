@@ -55,26 +55,12 @@ def test_one_grant_gives_each_program_its_own_token(tmp_path, monkeypatch):
     assert other["ok"] is False and other["error"] == "不是这台设备"
 
 
-def test_a_new_grant_does_not_replace_an_enabled_host(tmp_path, monkeypatch):
-    engine = _open(tmp_path, monkeypatch)
-    first = engine.create_enroll_grant()
-    secret, public = _pair()
-    opened = engine.redeem_enroll_grant(first["secret"], "dev-a", "AAAA", "Cursor", public)
-    digest = engine.db().execute("SELECT key_hash FROM agents WHERE id=?", (opened["id"],)).fetchone()["key_hash"]
-    second = engine.create_enroll_grant()
-    kept = engine.redeem_enroll_grant(second["secret"], "dev-a", "AAAA", "Cursor", public)
-    fresh_secret, fresh_public = _pair()
-    added = engine.redeem_enroll_grant(second["secret"], "dev-a", "AAAA", "Hermes", fresh_public)
-    assert kept["already"] is True and kept["wrapped"] == ""
-    assert engine.db().execute("SELECT key_hash FROM agents WHERE id=?", (opened["id"],)).fetchone()["key_hash"] == digest
-    assert added["status"] == "启用" and _token(fresh_secret, added["wrapped"]) != _token(secret, opened["wrapped"])
+def test_a_fresh_grant_rekeys_an_enabled_host_so_none_is_stranded(tmp_path, monkeypatch):
+    """A lost reply must not strand a host: a fresh grant always yields a key.
 
-
-def test_an_enabled_host_rekeys_when_the_client_presents_a_new_key(tmp_path, monkeypatch):
-    """A host that lost its key re-enrols onto the same row instead of being stranded.
-
-    The row keeps its identity, the old key dies and the new one works. Without
-    this, a client whose config no longer holds a token stays refused forever.
+    The client only redeems when its config holds no token, so reaching this
+    path means this machine needs a key now. The row keeps its identity; the
+    old key dies and the key presented now gets a fresh one.
     """
     engine = _open(tmp_path, monkeypatch)
     first = engine.create_enroll_grant()
@@ -83,17 +69,21 @@ def test_an_enabled_host_rekeys_when_the_client_presents_a_new_key(tmp_path, mon
     old_token = _token(old_secret, opened["wrapped"])
     assert engine.agent_by_token(old_token, "dev-a") is not None
 
-    new_secret, new_public = _pair()
-    fresh = engine.create_enroll_grant()
-    rekeyed = engine.redeem_enroll_grant(fresh["secret"], "dev-a", "AAAA", "Cursor", new_public)
-    assert rekeyed["ok"] is True and rekeyed["already"] is False and rekeyed["status"] == "启用"
-    assert rekeyed["id"] == opened["id"]
-    new_token = _token(new_secret, rekeyed["wrapped"])
-    assert engine.agent_by_token(new_token, "dev-a")["id"] == opened["id"]
+    second = engine.create_enroll_grant()
+    again = engine.redeem_enroll_grant(second["secret"], "dev-a", "AAAA", "Cursor", old_public)
+    assert again["ok"] is True and again["already"] is False and again["status"] == "启用"
+    assert again["id"] == opened["id"]
+    fresh_token = _token(old_secret, again["wrapped"])
+    assert fresh_token != old_token
+    assert engine.agent_by_token(fresh_token, "dev-a")["id"] == opened["id"]
     assert engine.agent_by_token(old_token, "dev-a") is None
     assert engine.db().execute(
         "SELECT COUNT(*) AS n FROM agents WHERE device_id='dev-a' AND program='Cursor'"
     ).fetchone()["n"] == 1
+
+    other_secret, other_public = _pair()
+    added = engine.redeem_enroll_grant(second["secret"], "dev-a", "AAAA", "Hermes", other_public)
+    assert added["status"] == "启用" and _token(other_secret, added["wrapped"]) != fresh_token
 
 
 def test_stopped_and_rejected_hosts_stay_put(tmp_path, monkeypatch):

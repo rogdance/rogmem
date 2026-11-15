@@ -92,7 +92,7 @@ def test_a_turn_keeps_the_workspace_remote_for_the_rest_of_the_session(tmp_path,
     )
     seen = []
 
-    def flush(home, program, rows):
+    def flush(home, program, rows, timeout=30):
         seen.extend(rows)
         return []
 
@@ -129,7 +129,7 @@ def test_turns_use_the_same_mcp_door_as_core(tmp_path, monkeypatch):
         lambda home, program: ("http://127.0.0.1:18780/mcp", "rm_test", "dev"),
     )
 
-    def mcp(url, token, device, name, arguments):
+    def mcp(url, token, device, name, arguments, timeout=None):
         seen.append((url, name, arguments["role"], token))
         return {"result": {"content": [{"type": "text", "text": "{\"ok\": true}"}]}}
 
@@ -215,7 +215,7 @@ def test_the_channel_retries_turns_the_hub_has_not_accepted(tmp_path, monkeypatc
     sent = []
     hold = {"down": True}
 
-    def mcp(url, token, device, name, arguments):
+    def mcp(url, token, device, name, arguments, timeout=None):
         sent.append(arguments["text"])
         if hold["down"]:
             return {}
@@ -242,13 +242,35 @@ def test_the_channel_retries_turns_the_hub_has_not_accepted(tmp_path, monkeypatc
     assert "合成句：还没送出。" in sent and "合成句：这次通了。" in sent
 
 
+def test_the_inline_upload_keeps_the_host_deadline_and_the_resident_drain_waits(tmp_path, monkeypatch):
+    """A turn upload embeds on the hub and takes seconds; the host hook budget is 3s.
+
+    The hook's own drain must stay short so it never overruns the host; the
+    resident channel has no host deadline and waits for the hub to accept.
+    """
+    import rogmem.host_hook as hook
+
+    monkeypatch.setattr(hook, "_core_text", lambda home, program, project="": "")
+    seen: list[float] = []
+
+    def drain(home, timeout=30):
+        seen.append(timeout)
+        return 0
+
+    monkeypatch.setattr(hook, "drain_outbox", drain)
+    handle({"hook_event_name": "beforeSubmitPrompt", "session_id": "s", "prompt": "合成句。"}, home=tmp_path, program="Cursor")
+    assert seen == [hook._INLINE_UPLOAD_TIMEOUT]
+    assert hook._INLINE_UPLOAD_TIMEOUT <= 3
+    assert hook._DRAIN_UPLOAD_TIMEOUT > hook._INLINE_UPLOAD_TIMEOUT
+
+
 def test_a_packet_is_injected_once_and_a_failed_post_stays_local(tmp_path, monkeypatch):
     import rogmem.host_hook as hook
 
     monkeypatch.setattr(hook, "_core_text", lambda home, program, project="": "历史包" * 1000)
     drains = []
     real_drain = hook.drain_outbox
-    monkeypatch.setattr(hook, "drain_outbox", lambda home: drains.append(home) or 0)
+    monkeypatch.setattr(hook, "drain_outbox", lambda home, timeout=30: drains.append(home) or 0)
     opened = handle({"hook_event_name": "sessionStart", "session_id": "s"}, home=tmp_path, program="Cursor")
     packet = "【rogmem 历史包】\n" + ("历史包" * 1000)
     assert opened == {"additional_context": packet}
@@ -257,7 +279,7 @@ def test_a_packet_is_injected_once_and_a_failed_post_stays_local(tmp_path, monke
     again = handle({"hook_event_name": "sessionStart", "session_id": "s"}, home=tmp_path, program="Cursor")
     assert again == {}
 
-    monkeypatch.setattr("rogmem.host_hook._flush", lambda home, program, rows: rows)
+    monkeypatch.setattr("rogmem.host_hook._flush", lambda home, program, rows, timeout=30: rows)
     captured = handle(
         {"hook_event_name": "beforeSubmitPrompt", "session_id": "s", "prompt": "合成句：记得这一句。"},
         home=tmp_path,
@@ -267,7 +289,7 @@ def test_a_packet_is_injected_once_and_a_failed_post_stays_local(tmp_path, monke
     stored = (tmp_path / ".rogmem" / "outbox.jsonl").read_text(encoding="utf-8")
     assert "合成句：记得这一句。" in stored
 
-    monkeypatch.setattr("rogmem.host_hook._flush", lambda home, program, rows: [])
+    monkeypatch.setattr("rogmem.host_hook._flush", lambda home, program, rows, timeout=30: [])
     handle(
         {"hook_event_name": "afterAgentResponse", "session_id": "s", "text": "合成句：已经送出。"},
         home=tmp_path,
@@ -509,7 +531,7 @@ def test_a_prompt_without_a_session_start_still_loads_once_and_a_stop_reads_the_
         lambda home, program, project="": calls.append(program) or "历史包",
     )
     seen = []
-    monkeypatch.setattr("rogmem.host_hook._flush", lambda home, program, rows: seen.extend(rows) or [])
+    monkeypatch.setattr("rogmem.host_hook._flush", lambda home, program, rows, timeout=30: seen.extend(rows) or [])
     monkeypatch.setattr("rogmem.host_hook._remote_from_dir", lambda directory: "git@github.com:example/memory.git")
     first = handle(
         {
