@@ -200,11 +200,11 @@ canvas#neural-network-canvas {
 .brand { pointer-events: auto; color: var(--text-primary); text-decoration: none; }
 .brand svg { display: block; height: 26px; width: auto; }
 :focus-visible { outline: 2px solid var(--focus-color); outline-offset: 2px; }
-/* 登录窗：垂直中线 x=50% 与下方黄金分割线 y=61.8% 的交汇点 */
+/* 登录窗：页面正中，垂直中线 x=50% 与水平中线 y=50% 的交汇点 */
 .login-panel {
   position: fixed;
   left: 50%;
-  top: 61.8%;
+  top: 50%;
   transform: translate(-50%, -50%);
   z-index: 30;
   width: min(380px, calc(100vw - 40px));
@@ -289,7 +289,7 @@ canvas#neural-network-canvas {
   text-align: center;
 }
 @media (max-width: 480px) {
-  .login-panel { top: 58%; padding: 24px 20px 18px; }
+  .login-panel { padding: 24px 20px 18px; }
   .login-title { font-size: 18px; }
 }
 </style></head><body>
