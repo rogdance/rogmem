@@ -511,22 +511,99 @@ def connect(data: Path, scan: Path) -> None:
                body_preview=excluded.body_preview;
            END"""
     )
-    # The opening packet reads this prefix. It does not go back to the archive body.
-    con.execute("DROP TRIGGER IF EXISTS sources_excerpt_insert")
-    con.execute("DROP TRIGGER IF EXISTS sources_excerpt_update")
+    # Opening fields are written with the row, into their own tables. core never reads the archive columns.
+    for name in (
+        "sources_excerpt_insert",
+        "sources_excerpt_update",
+        "source_openings_insert",
+        "source_openings_update",
+        "source_openings_hide",
+        "crystal_openings_insert",
+        "crystal_openings_update",
+    ):
+        con.execute(f"DROP TRIGGER IF EXISTS {name}")
     con.execute(
-        f"""CREATE TRIGGER sources_excerpt_insert
+        f"""CREATE TRIGGER source_openings_insert
             AFTER INSERT ON sources
-            WHEN IFNULL(NEW.excerpt, '') = ''
+            WHEN NEW.redacted=0 AND NEW.kind IN ('user','agent')
             BEGIN
-              UPDATE sources SET excerpt = substr(NEW.body, 1, {_OPENING_KEEP}) WHERE id = NEW.id;
+              INSERT INTO source_openings(id, kind, event_at, project_ref, excerpt)
+              VALUES (
+                NEW.id,
+                IFNULL(NEW.kind, ''),
+                IFNULL(NEW.event_at, ''),
+                IFNULL(NEW.project_ref, ''),
+                substr(IFNULL(NEW.body, ''), 1, {_OPENING_KEEP})
+              )
+              ON CONFLICT(id) DO UPDATE SET
+                kind=excluded.kind,
+                event_at=excluded.event_at,
+                project_ref=excluded.project_ref,
+                excerpt=excluded.excerpt;
             END"""
     )
     con.execute(
-        f"""CREATE TRIGGER sources_excerpt_update
-            AFTER UPDATE OF body ON sources
+        f"""CREATE TRIGGER source_openings_update
+            AFTER UPDATE OF body, kind, event_at, project_ref, redacted ON sources
+            WHEN NEW.redacted=0 AND NEW.kind IN ('user','agent')
             BEGIN
-              UPDATE sources SET excerpt = substr(NEW.body, 1, {_OPENING_KEEP}) WHERE id = NEW.id;
+              INSERT INTO source_openings(id, kind, event_at, project_ref, excerpt)
+              VALUES (
+                NEW.id,
+                IFNULL(NEW.kind, ''),
+                IFNULL(NEW.event_at, ''),
+                IFNULL(NEW.project_ref, ''),
+                substr(IFNULL(NEW.body, ''), 1, {_OPENING_KEEP})
+              )
+              ON CONFLICT(id) DO UPDATE SET
+                kind=excluded.kind,
+                event_at=excluded.event_at,
+                project_ref=excluded.project_ref,
+                excerpt=excluded.excerpt;
+            END"""
+    )
+    con.execute(
+        """CREATE TRIGGER source_openings_hide
+           AFTER UPDATE OF kind, redacted ON sources
+           WHEN NEW.redacted!=0 OR NEW.kind NOT IN ('user','agent')
+           BEGIN
+             DELETE FROM source_openings WHERE id=NEW.id;
+           END"""
+    )
+    con.execute(
+        f"""CREATE TRIGGER crystal_openings_insert
+            AFTER INSERT ON crystallizations
+            BEGIN
+              INSERT INTO crystal_openings(id, name, sketch, body, repo)
+              VALUES (
+                NEW.id,
+                IFNULL(NEW.name, ''),
+                substr(IFNULL(NEW.sketch_md, ''), 1, {_OPENING_KEEP}),
+                substr(IFNULL(NEW.body_md, ''), 1, {_OPENING_KEEP}),
+                ''
+              )
+              ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                sketch=excluded.sketch,
+                body=excluded.body;
+            END"""
+    )
+    con.execute(
+        f"""CREATE TRIGGER crystal_openings_update
+            AFTER UPDATE OF name, sketch_md, body_md ON crystallizations
+            BEGIN
+              INSERT INTO crystal_openings(id, name, sketch, body, repo)
+              VALUES (
+                NEW.id,
+                IFNULL(NEW.name, ''),
+                substr(IFNULL(NEW.sketch_md, ''), 1, {_OPENING_KEEP}),
+                substr(IFNULL(NEW.body_md, ''), 1, {_OPENING_KEEP}),
+                ''
+              )
+              ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                sketch=excluded.sketch,
+                body=excluded.body;
             END"""
     )
     con.execute(
@@ -10154,6 +10231,21 @@ def _project_addresses(row, con=None) -> list[str]:
     return found
 
 
+def _opening_for_project(project: str):
+    """The stored project sketch. Only the opening table, never the archive page."""
+    wanted = (project or "").strip()
+    if not wanted:
+        return None
+    rows = db().execute("SELECT id, name, sketch, repo FROM crystal_openings WHERE id!='owner'").fetchall()
+    for row in rows:
+        sketch = (row["sketch"] or "").strip()
+        if not sketch:
+            continue
+        if row["name"] == wanted or _project_ref_hits(wanted, row["repo"] or "") or _project_ref_hits(wanted, row["name"] or ""):
+            return row
+    return None
+
+
 def _project_ref_hits(ref: str, address: str) -> bool:
     """Same repository, whatever spelling each side used. A lookalike path does not count.
 
@@ -10524,50 +10616,125 @@ _PREFIX_SLACK = 64
 
 
 def _recent_identity(before_at: str, before_id: str, limit: int, offset: int):
-    """Newest turn identities. The index carries this order, so the body stays unread."""
-    sql = """SELECT id, kind, IFNULL(event_at,'') AS event_at, IFNULL(project_ref,'') AS project_ref
-             FROM sources
-             WHERE redacted=0 AND kind IN ('user','agent')"""
+    """Newest openings. This table has no archive body."""
+    sql = """SELECT id, kind, event_at, project_ref, excerpt
+             FROM source_openings
+             WHERE kind IN ('user','agent')"""
     params: list = []
     if before_at:
-        sql += " AND (IFNULL(event_at,'') < ? OR (IFNULL(event_at,'') = ? AND id < ?))"
+        sql += " AND (event_at < ? OR (event_at = ? AND id < ?))"
         params.extend([before_at, before_at, before_id])
-    sql += " ORDER BY IFNULL(event_at,'') DESC, id DESC LIMIT ? OFFSET ?"
+    sql += " ORDER BY event_at DESC, id DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     return db().execute(sql, params).fetchall()
 
 
-def _text_prefix(table: str, key: str, column: str, n_chars: int) -> str:
-    """The first characters of one cell. The rest of a long value stays on its pages."""
-    if n_chars <= 0 or not key:
-        return ""
-    row = db().execute(f"SELECT rowid FROM {table} WHERE id=?", (key,)).fetchone()
-    if row is None:
-        return ""
-    try:
-        blob = db().blobopen(table, column, row[0], readonly=True)
-    except sqlite3.OperationalError:
-        return ""
-    try:
-        raw = blob.read(n_chars * 4)
-    finally:
-        blob.close()
-    return raw.decode("utf-8", errors="ignore")[:n_chars]
-
-
-def _spoken_prefix(source_id: str, kind: str, room: int) -> str:
-    """Return the prefix the packer can still show. The archive is not materialized."""
-    need = REPLY_CLIP + _PREFIX_SLACK if kind == "agent" else max(room, 0) + _PREFIX_SLACK
-    need = min(need, _OPENING_KEEP)
-    body = _text_prefix("sources", source_id, "excerpt", need).strip()
-    if not body:
-        body = _text_prefix("sources", source_id, "body", need).strip()
+def _clip_spoken(text: str, kind: str) -> str:
+    """Show the opening that was stored with the turn. Agent replies stay short on the page."""
+    body = redact_text((text or "").strip())
     if not body:
         return ""
-    body = redact_text(body)
     if kind == "agent" and len(body) > REPLY_CLIP:
         body = body[:REPLY_CLIP].rstrip() + _CLIP_MARK
     return body
+
+
+def _copy_cell_prefix(con: sqlite3.Connection, table: str, column: str, rowid: int) -> str:
+    """Copy a bounded prefix into memory for the opening table. Not used by core."""
+    try:
+        blob = con.blobopen(table, column, rowid, readonly=True)
+    except sqlite3.OperationalError:
+        return ""
+    try:
+        raw = blob.read(_OPENING_KEEP * 4)
+    finally:
+        blob.close()
+    return raw.decode("utf-8", errors="ignore")[:_OPENING_KEEP]
+
+
+def backfill_openings(limit: int = 1) -> int:
+    """Fill opening rows that were written before the short fields existed.
+
+    One row, then commit. core does not call this. A missing row is skipped
+    by the opening read until this copy lands.
+    """
+    con = db()
+    made = 0
+    owner = con.execute(
+        """SELECT c.rowid, c.id, IFNULL(c.name, '')
+           FROM crystallizations AS c
+           WHERE c.id='owner'
+             AND NOT EXISTS (SELECT 1 FROM crystal_openings o WHERE o.id=c.id)"""
+    ).fetchone()
+    pending = [owner] if owner is not None else []
+    if len(pending) < limit:
+        pending.extend(
+            con.execute(
+                """SELECT c.rowid, c.id, IFNULL(c.name, '')
+                   FROM crystallizations AS c
+                   WHERE NOT EXISTS (SELECT 1 FROM crystal_openings o WHERE o.id=c.id)
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        )
+    seen: set[str] = set()
+    for row in pending:
+        if row is None or row[1] in seen or made >= limit:
+            continue
+        seen.add(row[1])
+        sketch = _copy_cell_prefix(con, "crystallizations", "sketch_md", row[0])
+        body = _copy_cell_prefix(con, "crystallizations", "body_md", row[0])
+        repo = ""
+        found = con.execute(
+            """SELECT text FROM statements
+               WHERE crystal_id=? AND field IN ('仓库地址','repo') AND invalid_at IS NULL
+               LIMIT 1""",
+            (row[1],),
+        ).fetchone()
+        if found is not None:
+            repo = str(found["text"] or "")[:500]
+        con.execute(
+            """INSERT INTO crystal_openings(id, name, sketch, body, repo)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(id) DO NOTHING""",
+            (row[1], row[2], sketch, body, repo),
+        )
+        con.commit()
+        made += 1
+    if made >= limit:
+        return made
+    sources = con.execute(
+        """SELECT rowid, id, IFNULL(kind, ''), IFNULL(event_at, ''), IFNULL(project_ref, '')
+           FROM sources
+           WHERE redacted=0 AND kind IN ('user','agent')
+             AND id NOT IN (SELECT id FROM source_openings)
+           ORDER BY IFNULL(event_at, '') DESC
+           LIMIT ?""",
+        (limit - made,),
+    ).fetchall()
+    for row in sources:
+        excerpt = _copy_cell_prefix(con, "sources", "body", row[0])
+        con.execute(
+            """INSERT INTO source_openings(id, kind, event_at, project_ref, excerpt)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(id) DO NOTHING""",
+            (row[1], row[2], row[3], row[4], excerpt),
+        )
+        con.commit()
+        made += 1
+    return made
+
+
+def opening_backfill_loop() -> None:
+    """Keep filling old rows off the request path. Idle when there is nothing to copy."""
+    while True:
+        try:
+            made = backfill_openings(limit=1)
+        except Exception as exc:
+            print(f"ROGMEM_OPENING {type(exc).__name__}", flush=True)
+            time.sleep(1)
+            continue
+        time.sleep(0.02 if made else 30)
 
 
 def _has_spoken(before_at: str, before_id: str) -> bool:
@@ -10582,7 +10749,7 @@ def _has_spoken(before_at: str, before_id: str) -> bool:
             scanned += 1
             if not _older_than(row["event_at"], row["id"], before_at, before_id):
                 continue
-            if _spoken_prefix(row["id"], row["kind"], 1):
+            if _clip_spoken(row["excerpt"], row["kind"]):
                 return True
             if scanned >= _RECENT_SCAN:
                 return False
@@ -10592,8 +10759,7 @@ def _has_spoken(before_at: str, before_id: str) -> bool:
 def _pack_recent(budget: int, project: str, before: str) -> tuple[list[dict], bool, dict | None]:
     """Newest user lines and clipped replies, across repositories. Files stay out.
 
-    The budget is a character budget. Turn identities come off the recent index;
-    a body is read only until that budget is full, and only the prefix that can fit.
+    The budget is a character budget. Each turn already stored its opening excerpt.
     """
     del project
     before_at, before_id = _parse_before(before)
@@ -10616,7 +10782,7 @@ def _pack_recent(budget: int, project: str, before: str) -> tuple[list[dict], bo
             if not _older_than(row["event_at"], row["id"], before_at, before_id):
                 continue
             room = budget - used
-            body = _spoken_prefix(row["id"], row["kind"], room)
+            body = _clip_spoken(row["excerpt"], row["kind"])
             if not body:
                 continue
             if first_spoken is None:
@@ -10741,23 +10907,6 @@ _THIN_CRYSTAL = (
 )
 
 
-def _thin_crystal(where: str, params: tuple = ()) -> sqlite3.Row | None:
-    return db().execute(f"SELECT {_THIN_CRYSTAL} FROM crystallizations WHERE {where}", params).fetchone()
-
-
-def _with_body(row: sqlite3.Row | None) -> dict | None:
-    """Load the page body only when the sketch is not what this call will show."""
-    if row is None:
-        return None
-    item = dict(row)
-    if str(item.get("sketch_md") or "").strip():
-        item["body_md"] = ""
-        return item
-    body = db().execute("SELECT body_md FROM crystallizations WHERE id=?", (item["id"],)).fetchone()
-    item["body_md"] = "" if body is None else (body["body_md"] or "")
-    return item
-
-
 def core_memory(
     budget: int = CORE_BUDGET_DEFAULT,
     project: str = "",
@@ -10766,24 +10915,15 @@ def core_memory(
     now: str | datetime | None = None,
 ) -> dict:
     row = db().execute(
-        "SELECT id, type, name, status, revision FROM crystallizations WHERE id='owner'"
+        "SELECT name, sketch, body FROM crystal_openings WHERE id='owner'"
     ).fetchone()
-    summary = _summary_slots_from_row(row) if row else {}
-    birth = _birth_text(summary)
-    if birth:
-        summary["出生时间"] = birth
-        summary["年龄"] = _age(birth)
-    org = summary.get("所属组织及职务") or summary.get("所属组织")
-    if org and org != "尚无来源":
-        summary["所属组织及职务"] = org
-    crystal = hydrate(row) if row else None
-    owner_sketch = _text_prefix("crystallizations", "owner", "sketch_md", budget).strip() if row else ""
-    if crystal is not None and not owner_sketch:
-        crystal.body_md = _text_prefix("crystallizations", "owner", "body_md", budget)
-    project_row = _project_crystal(project)
+    owner_name = (row["name"] or "") if row else ""
+    owner_sketch = ((row["sketch"] or "") if row else "").strip()
+    owner_body = (row["body"] or "") if row else ""
+    project_row = _opening_for_project(project)
     project_sketch_item = None
     if project_row is not None:
-        project_sketch = (hydrate(project_row).sketch_md or "").strip()
+        project_sketch = (project_row["sketch"] or "").strip()
         if project_sketch:
             project_sketch_item = {"name": project_row["name"] or "工程", "text": project_sketch}
     before_text = (before or "").strip()
@@ -10802,39 +10942,17 @@ def core_memory(
         truncated = sketch_cut or cut or bool(omitted)
         loaded.extend(excerpts)
         return _finish_core(loaded, omitted, truncated, continuation, continued=False, project=project)
-    parsed = _parse_body_sections(crystal.body_md if crystal else "")
+    parsed = _parse_body_sections(owner_body)
     sections: list[dict] = []
-    if crystal is not None:
-        alias_text = "、".join(crystal.aliases) if crystal.aliases else ""
-        bits = []
-        if crystal.name:
-            bits.append(f"真名：{crystal.name}" if crystal.id == "owner" else f"名称：{crystal.name}")
-        if alias_text:
-            bits.append(f"别名：{alias_text}")
-        if bits:
-            sections.append({"name": "信封", "text": "\n".join(bits)})
+    if owner_name:
+        sections.append({"name": "信封", "text": f"真名：{owner_name}"})
     covered: set[str] = set()
     for heading, text in parsed.items():
         if heading and text:
             sections.append({"name": heading, "text": text})
             covered.add(heading)
-    for key in OWNER_FIELDS:
-        if key in covered or key == "概述":
-            continue
-        value = summary.get(key)
-        if value in {None, "", "尚无来源", "暂无来源"}:
-            continue
-        sections.append({"name": key, "text": f"{key}：{value}"})
-        if key == "出生时间" and summary.get("年龄") not in {None, "", "尚无来源"}:
-            sections.append({"name": "年龄", "text": f"年龄：{summary['年龄']}"})
-    leftover = []
     if project_sketch_item is not None:
-        leftover.append(project_sketch_item)
-    elif project_row is not None:
-        project_summary = _summary_slots_from_row(project_row)
-        for key, value in project_summary.items():
-            leftover.append({"name": f"工程·{project_row['name']}·{key}", "text": f"{key}：{value}"})
-    sections.extend(leftover)
+        sections.append(project_sketch_item)
     loaded = []
     omitted = []
     used = 0

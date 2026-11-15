@@ -1989,6 +1989,7 @@ def main() -> None:
     scan = Path(os.environ.get("ROGMEM_SCAN", "/scan"))
     engine.connect(data, scan)
     os.environ["ROGMEM_DATA"] = str(data)
+    threading.Thread(target=engine.opening_backfill_loop, daemon=True, name="rogmem-opening-backfill").start()
     threading.Thread(target=_load_embed, daemon=True).start()
     threading.Thread(target=worker, daemon=True).start()
     print("ROGMEM_LISTEN " + os.environ.get("PORT", "18080"), flush=True)

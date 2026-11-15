@@ -66,6 +66,25 @@ CREATE TABLE IF NOT EXISTS source_cards (
   body_preview TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS source_openings (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT '',
+  event_at TEXT NOT NULL DEFAULT '',
+  project_ref TEXT NOT NULL DEFAULT '',
+  excerpt TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS source_openings_recent
+ON source_openings(event_at, id);
+
+CREATE TABLE IF NOT EXISTS crystal_openings (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  sketch TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  repo TEXT NOT NULL DEFAULT ''
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS sources_idem ON sources(idempotency_key);
 CREATE INDEX IF NOT EXISTS sources_recent_turn
 ON sources(IFNULL(event_at, ''), id, kind, IFNULL(project_ref, ''))
