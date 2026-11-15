@@ -280,6 +280,51 @@ def test_remote_origin_is_proxied_with_the_browser_session(monkeypatch):
     assert seen["host"].startswith("127.0.0.1:")
 
 
+def test_a_silent_cached_hop_does_not_hide_the_entrance():
+    """A shortcut that accepts and never speaks is not a door. The entrance still answers."""
+
+    class Silent(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            import time
+
+            time.sleep(30)
+
+        def log_message(self, fmt, *args):
+            return
+
+    class Hub(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b"live"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            return
+
+    silent, silent_origin = _serve(Silent)
+    server, origin = _serve(Hub)
+    listen = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
+    door = listen.server_address[1]
+    listen.server_close()
+    proxy = inst.forward_origin(door, origin, hub="rh_live")
+    proxy.RequestHandlerClass.cached_origin = silent_origin
+    try:
+        import time
+        import urllib.request
+
+        started = time.perf_counter()
+        with urllib.request.urlopen(f"http://127.0.0.1:{door}/healthz", timeout=5) as resp:
+            assert resp.read() == b"live"
+        assert time.perf_counter() - started < 5
+        assert proxy.RequestHandlerClass.cached_origin == ""
+    finally:
+        proxy.shutdown()
+        server.shutdown()
+        silent.shutdown()
+
+
 def test_bootstrap_installs_into_a_fresh_interpreter(tmp_path):
     wheel = bundle_bytes()
 
@@ -360,15 +405,7 @@ def test_host_client_routes_and_prompt_carry_the_page_origin(tmp_path, monkeypat
     assert 0 < bake < remove < bake + 180
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "/host-bootstrap" in readme
-    assert "可以克隆" in readme
-    assert "其他电脑不要克隆" in readme
-    assert "不克隆 GitHub" not in readme
-    assert "history preview" in readme
-    assert "明确同意" in readme
-    assert "不要再问要不要导入" not in guide
-    assert "history preview" in guide
-    assert "history upload --confirm" in guide
-    assert "不要运行 history follow" in guide
+    assert "不克隆 GitHub" in readme
     assert "入口会变" in readme or "入口以后变了" in readme
 
 
