@@ -179,16 +179,16 @@ def _file_source(engine, sid: str, body: str):
 def test_a_draft_title_does_not_rename_a_page_the_merge_did_not_propose(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     monkeypatch.setattr(engine, "llm_target", lambda role: None)
-    _product(engine, "play", "yunlan Play", "A small game.\n")
+    _product(engine, "play", "Yunlan Play", "A small game.\n")
     source = _file_source(engine, "src-zh", "云岚游。")
     engine._land_markdown_pages(
         source,
-        [{"name": "云岚游", "type": "产品", "body": "云岚游是一款小游戏。\n别名：yunlan Play\n"}],
+        [{"name": "云岚游", "type": "产品", "body": "云岚游是一款小游戏。\n别名：Yunlan Play\n"}],
     )
     rows = engine.db().execute(
         "SELECT id, name FROM crystallizations WHERE type='产品' AND status='active'"
     ).fetchall()
-    assert [(row["id"], row["name"]) for row in rows] == [("play", "yunlan Play")]
+    assert [(row["id"], row["name"]) for row in rows] == [("play", "Yunlan Play")]
     notes = [item["note"] for item in engine.revisions("play")]
     assert "篇名" not in notes
 
@@ -196,14 +196,14 @@ def test_a_draft_title_does_not_rename_a_page_the_merge_did_not_propose(tmp_path
 def test_a_title_proposal_renames_the_bound_page_and_keeps_the_old_name(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     monkeypatch.setattr(engine, "llm_target", lambda role: None)
-    _product(engine, "play", "yunlan Play", "A small game.\n")
+    _product(engine, "play", "Yunlan Play", "A small game.\n")
     source = _file_source(engine, "src-rename", "云岚游是现在的名字。")
     engine._land_markdown_pages(
         source,
         [
             {
                 "id": "play",
-                "name": "yunlan Play",
+                "name": "Yunlan Play",
                 "type": "产品",
                 "title": "云岚游",
                 "body": "云岚游是一款小游戏。\n",
@@ -218,16 +218,16 @@ def test_a_title_proposal_renames_the_bound_page_and_keeps_the_old_name(tmp_path
     ).fetchall()
     assert [(row["id"], row["name"]) for row in rows] == [("play", "云岚游")]
     crystal = hydrate(engine.db().execute("SELECT * FROM crystallizations WHERE id='play'").fetchone())
-    assert "yunlan Play" in crystal.aliases
-    assert "别名：yunlan Play" in crystal.body_md
+    assert "Yunlan Play" in crystal.aliases
+    assert "别名：Yunlan Play" in crystal.body_md
     from rogmem.wikilink import title_index
 
     index = title_index(engine.db())
     assert index.get("云岚游") == "play"
-    assert index.get("yunlan Play") == "play"
+    assert index.get("Yunlan Play") == "play"
     revision = next(item for item in engine.revisions("play") if item["note"] == "篇名")
     assert "篇名改为云岚游" in revision["change"]
-    assert "yunlan Play" in revision["change"]
+    assert "Yunlan Play" in revision["change"]
 
 
 def test_a_title_proposal_does_not_take_a_name_another_page_owns(tmp_path, monkeypatch):
@@ -349,7 +349,7 @@ def test_merge_applies_a_new_title_without_opening_a_second_page(tmp_path, monke
 
 def test_one_git_address_stays_one_engineering_page(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
-    repo = "https://github.com/yunlan/rogmem"
+    repo = "https://github.com/example/memory"
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,project_ref,event_at)
            VALUES('src-eng','user','2026-11-06T00:00:00+00:00','h','今天修检索。','蒸馏中','fast',?,
@@ -380,7 +380,7 @@ def test_one_git_address_stays_one_engineering_page(tmp_path, monkeypatch):
 
 def test_engineering_session_sends_the_page_and_owner_sketch_file_does_not(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
-    repo = "https://github.com/yunlan/rogmem"
+    repo = "https://github.com/example/memory"
     engine.db().execute(
         "UPDATE crystallizations SET sketch_md=? WHERE id='owner'",
         ("主人喜欢先看结论。",),
@@ -442,11 +442,11 @@ def test_core_memory_is_the_owner_sketch_and_the_current_project_sketch(tmp_path
     from rogmem.crystal_store import CrystalStore, hydrate
 
     crystal = hydrate(row)
-    crystal.body_md = "仓库 https://github.com/yunlan/rogmem\n"
+    crystal.body_md = "仓库 https://github.com/example/memory\n"
     crystal.sketch_md = "工程速写。"
-    crystal.keys["仓库地址"] = "https://github.com/yunlan/rogmem"
+    crystal.keys["仓库地址"] = "https://github.com/example/memory"
     CrystalStore(engine.db()).put(crystal, holder="test")
     engine.db().commit()
-    loaded = engine.core_memory(project="https://github.com/yunlan/rogmem")["loaded"]
+    loaded = engine.core_memory(project="https://github.com/example/memory")["loaded"]
     assert [item["name"] for item in loaded] == ["记忆主人", "云岚核忆"]
     assert loaded[1]["text"] == "工程速写。"

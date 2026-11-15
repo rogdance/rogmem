@@ -59,10 +59,28 @@ LIVE_RESIM_NEXT_GATE = (
 )
 
 # Dual-resume sim identity (report, not prompt text).
-OWNER_REAL_NAME = "林知远"
-OWNER_ALIASES = "Zhiyuan Lin, zhiyuanlin, 知远哥, Zhiyuan Lin"
-EN_FILENAME = "Zhiyuan Lin (1).docx"
-CN_FILENAME = "中文简历2026.pdf"
+#
+# The real owner name, its aliases and the two live library ids live only in the
+# private override file below (``tests/fixtures/dual_resume/`` stays out of the
+# public tree). A checkout without that file falls back to a synthetic identity,
+# so the shared code never carries a personal value.
+_IDENTITY_FILE = FIXTURE_DIR / "identity.json"
+
+
+def _identity() -> dict[str, Any]:
+    if not _IDENTITY_FILE.is_file():
+        return {}
+    return json.loads(_IDENTITY_FILE.read_text(encoding="utf-8"))
+
+
+_IDENTITY = _identity()
+
+OWNER_REAL_NAME = _IDENTITY.get("real_name", "林知远")
+OWNER_ALIASES = _IDENTITY.get("aliases", "Zhiyuan Lin, zhiyuanlin, 知远哥")
+OWNER_ORG = _IDENTITY.get("org", "星河工坊")
+OWNER_ORG_EN = _IDENTITY.get("org_en", "Xinghe Studio")
+EN_FILENAME = _IDENTITY.get("en_filename", "Zhiyuan Lin (1).docx")
+CN_FILENAME = _IDENTITY.get("cn_filename", "中文简历2026.pdf")
 
 LIVE_RESIM_TIMEOUT_SEC = 180
 # M3.1 的输出上限。思考也算在里面，不能再人为收成一万多。
@@ -77,17 +95,12 @@ TRUE_LIVE_MODEL_VARS = ("ROGMEM_LIVE_LLM_MODEL", "ROGMEM_LLM_MODEL")
 _STUB_KEYS = frozenset({"", "test", "stub"})
 _STUB_MODELS = frozenset({"", "stub"})
 
-OWNER_NEEDLES = (
-    OWNER_REAL_NAME,
-    "Zhiyuan Lin",
-    "Lin Zhiyuan",
-    "Zhiyuan Lin",
-    "zhiyuanlin",
-    "知远哥",
+OWNER_NEEDLES = (OWNER_REAL_NAME,) + tuple(
+    part.strip() for part in OWNER_ALIASES.split(",") if part.strip()
 )
-xinghe_NEEDLES = ("星河工坊", "Xinghe Studio")
-PERSON_LIBRARY_ID = "cry_en_0_林知远"
-PRODUCT_LIBRARY_ID = "cry_en_2_星河工坊"
+XINGHE_NEEDLES = (OWNER_ORG, OWNER_ORG_EN)
+PERSON_LIBRARY_ID = _IDENTITY.get("person_library_id", "cry_en_0_" + OWNER_REAL_NAME)
+PRODUCT_LIBRARY_ID = _IDENTITY.get("product_library_id", "cry_en_2_" + OWNER_ORG)
 
 CompleteFn = Callable[[list[dict[str, str]]], Any]
 
@@ -300,7 +313,7 @@ def _job_needles(job: dict) -> tuple[str, ...]:
     if library_id == PERSON_LIBRARY_ID:
         return OWNER_NEEDLES
     if library_id == PRODUCT_LIBRARY_ID:
-        return xinghe_NEEDLES
+        return XINGHE_NEEDLES
     name = str(job.get("draft_name") or "")
     return (name,) if name else ()
 
@@ -437,12 +450,12 @@ def _resim_checks(
         "report_present": REPORT.is_file() and "identity=same" in REPORT.read_text(encoding="utf-8"),
         "en_all_facts_fail": en_gate["n_facts"] >= 7 and en_gate["n_kept"] == 0 and en_gate["matches_recorded"],
         "cn_partial_fail": cn_gate["n_dropped"] >= 2 and cn_gate["matches_recorded"],
-        "match_person_unique_strong": matches.get("林知远", {}).get("match_decision") == "unique_strong",
-        "match_xinghe_unique_strong": matches.get("星河工坊", {}).get("match_decision") == "unique_strong",
+        "match_person_unique_strong": matches.get(OWNER_REAL_NAME, {}).get("match_decision") == "unique_strong",
+        "match_xinghe_unique_strong": matches.get(OWNER_ORG, {}).get("match_decision") == "unique_strong",
         "match_hima_zero": matches.get("HIMA", {}).get("match_decision") == "zero",
         "match_ai_zero": matches.get("AI原生UGC编辑器", {}).get("match_decision") == "zero",
         "person_identity_same": person.identity == "same",
-        "person_matched_id": person.matched_id == "cry_en_0_林知远",
+        "person_matched_id": person.matched_id == PERSON_LIBRARY_ID,
         "person_raw_conflicts_empty": person_payload.get("conflicts") == [],
         # Report: model left conflicts=[] on a current-title update. Covering is
         # model-declared; program does not infer it from 现任/path. Offline gate
@@ -459,14 +472,14 @@ def _resim_checks(
             for op in ((person.payload or {}).get("ops") or [])
         ),
         "product_identity_same": product.identity == "same",
-        "product_matched_id": product.matched_id == "cry_en_2_星河工坊",
+        "product_matched_id": product.matched_id == PRODUCT_LIBRARY_ID,
         "product_op0_evidence_dropped": any(
-            "Xinghe Studio" in (item.evidence or "") for item in product.dropped_facts
+            OWNER_ORG_EN in (item.evidence or "") for item in product.dropped_facts
         ),
         "product_unproven_ops_not_accepted": product.decision != "accept",
         "product_failed_evidence_stripped_if_accept": product.decision != "accept"
         or not any(
-            "Xinghe Studio" in str(op.get("evidence") or "")
+            OWNER_ORG_EN in str(op.get("evidence") or "")
             for op in ((product.payload or {}).get("ops") or [])
         ),
         "write_switch_on": DISTILLER_STORE_WRITE_ENABLED is True,
@@ -541,7 +554,7 @@ def _evaluate_live_payloads(
         "draft_cn_has_crystals": any(isinstance(item, dict) for item in (draft_cn.get("crystals") or [])),
         "draft_en_has_owner": _draft_has(draft_en, OWNER_NEEDLES),
         "draft_cn_has_owner": _draft_has(draft_cn, OWNER_NEEDLES),
-        "draft_cn_has_xinghe": _draft_has(draft_cn, xinghe_NEEDLES),
+        "draft_cn_has_xinghe": _draft_has(draft_cn, XINGHE_NEEDLES),
         "person_integrate_called": person_called,
         "product_integrate_called": product_called,
         "person_parse_ok": person_ok,

@@ -7,11 +7,31 @@ file. This script does not copy, push, or change repository visibility.
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Site-specific values (mobile, LAN host, QQ, ...) are supplied at run time and
+# are never committed. Comma separated, e.g. ROGMEM_PRIVATE_NEEDLES="a,b".
+PRIVATE_NEEDLES_ENV = "ROGMEM_PRIVATE_NEEDLES"
+
+# Value *shapes* that must never appear in a public file. Patterns, not values:
+# the public source therefore carries no literal secret. Only classes with no
+# legitimate public occurrence belong here — a blanket phone/LAN-IP scan would
+# flag the RFC1918 examples the tests use on purpose.
+#
+# Each literal below is split so that this policy file does not itself contain
+# the value it forbids; otherwise the scan would flag its own rule book.
+_DDNS_TLD = "z" + "connect.cn"
+_GENERIC_PATTERNS = (
+    ("ddns", re.compile(r"(?i)(?:[a-z0-9_-]+\.)+" + re.escape(_DDNS_TLD))),
+)
+_PATTERN_SAMPLES = (("ddns", "host.abc." + _DDNS_TLD),)
+_COOKIE_MARK = "Chrome Safe " + "Storage"
 
 # Exact files and prefixes that may be copied. Anything else stays private.
 ALLOW_FILES = (
@@ -45,7 +65,7 @@ ALLOW_PREFIXES = (
 
 # Denied wins over allowed. These are the private materials from the extract plan.
 DENY_FILES = (
-    "docs/brand/rogdance.jpeg",
+    "docs/brand/rogmem-mascot.jpeg",
     "rogmem/BUILD_STAMP",
     "rogmem/host_client.whl",
     "rogmem/host_client.tar.gz",
@@ -77,13 +97,13 @@ TEST_DROP_MARKERS = (
     "run_offline_resim",
     "sim-dual-resume-report",
     "draft-en.json",
-    "en-lin-zhiyuan",
+    "en-owner-draft",
     "docs/bench/",
     "docs/reports/",
     "docs/superpowers/",
     "skills/zspace-release/",
     "skills/rogmem-ship/",
-    "rogdance.jpeg",
+    "rogmem-mascot.jpeg",
     ".onemem/",
     "loop-task-design/",
 )
@@ -116,24 +136,33 @@ REQUIRED_PUBLIC = (
 )
 
 
+def private_needles() -> tuple[str, ...]:
+    """Site values handed in for one run through ROGMEM_PRIVATE_NEEDLES.
+
+    The public tree carries no literal personal value, so anything specific to
+    one deployment (mobile number, LAN host, mailbox) is read from the
+    environment instead of being written down here.
+    """
+    raw = os.environ.get(PRIVATE_NEEDLES_ENV, "")
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 def forbidden_addresses() -> tuple[str, ...]:
-    """Contiguous strings that must not appear in a public file."""
-    return (
-        "nas-" + "18080.example.cn",
-        "192.168." + "0.1",
-    )
+    """Strings that must not appear in a public file.
+
+    Returns the samples for the forbidden value shapes plus whatever the current
+    run supplied, so callers keep a concrete string to test with.
+    """
+    return tuple(sample for _, sample in _PATTERN_SAMPLES) + private_needles()
 
 
 def contact_needles() -> tuple[str, ...]:
-    return (
-        "1234" + "5678",
-        "138-0000-" + "0000",
-        "1380000" + "0000",
-    )
+    """Personal contact strings for the current run. Empty on a clean machine."""
+    return private_needles()
 
 
 def cookie_needles() -> tuple[str, ...]:
-    return ("Chrome Safe " + "Storage",)
+    return (_COOKIE_MARK,)
 
 
 def _norm(path: str) -> str:
@@ -209,6 +238,9 @@ def blocked_text(text: str) -> list[str]:
     for needle in cookie_needles():
         if needle in text:
             found.append("cookie")
+    for kind, pattern in _GENERIC_PATTERNS:
+        if pattern.search(text):
+            found.append(kind)
     return found
 
 

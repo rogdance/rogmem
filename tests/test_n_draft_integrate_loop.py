@@ -15,7 +15,7 @@ from rogmem.crystal_store import DISTILLER_STORE_WRITE_ENABLED, CrystalStore, hy
 from rogmem.distill_gate import PAYLOAD_KIND_INTEGRATE
 
 CORPUS = "云岚测试员甲于 2019 年在北窗实验室任职。后来到南港书院做讲师。"
-yunlan_DRAFT = {
+YUNLAN_DRAFT = {
     "name": "云岚甲",
     "type": "人物",
     "aliases": ["测试员甲"],
@@ -73,7 +73,7 @@ EMPTY_FACTS = {
     "aliases": [],
     "facts": [],
 }
-SAME_yunlan = {
+SAME_YUNLAN = {
     "identity": "same",
     "matched_id": "c-yunlan",
     "ops": [
@@ -179,13 +179,13 @@ def test_two_mid_drafts_each_get_integrate_and_land(tmp_path, monkeypatch):
 
     def spy_draft(*_a, **_k):
         draft_calls.append(1)
-        return _draft_bundle(yunlan_DRAFT, SCHOOL_DRAFT)
+        return _draft_bundle(YUNLAN_DRAFT, SCHOOL_DRAFT)
 
     def spy_integrate(_text, _kind="", **kw):
         integrate_calls.append(kw)
         name = (kw.get("draft_crystal") or {}).get("name")
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         if name == "南港书院":
             return dict(SAME_SCHOOL)
         raise AssertionError(f"unexpected draft {name}")
@@ -233,10 +233,10 @@ def test_two_mid_drafts_same_plus_new_land(tmp_path, monkeypatch):
     def spy_integrate(_text, _kind="", **kw):
         name = (kw.get("draft_crystal") or {}).get("name")
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         return dict(NEW_ACCEPT)
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, NEW_DRAFT))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, NEW_DRAFT))
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     monkeypatch.setattr(engine, "_llm_extract", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("extract")))
     _queue_user(engine, "src-same-new")
@@ -267,13 +267,13 @@ def test_empty_facts_stub_does_not_enter_integrate(tmp_path, monkeypatch):
         name = (kw.get("draft_crystal") or {}).get("name")
         names.append(name)
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         return dict(SAME_SCHOOL)
 
     monkeypatch.setattr(
         engine,
         "_llm_draft",
-        lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, EMPTY_FACTS, SCHOOL_DRAFT),
+        lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, EMPTY_FACTS, SCHOOL_DRAFT),
     )
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     _queue_user(engine, "src-skip-empty")
@@ -295,13 +295,13 @@ def test_single_mid_draft_degenerates_to_hash79(tmp_path, monkeypatch):
         apply_calls.append((args, kwargs))
         return orig_apply(*args, **kwargs)
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT))
-    monkeypatch.setattr(engine, "_llm_integrate", lambda *_a, **_k: dict(SAME_yunlan))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT))
+    monkeypatch.setattr(engine, "_llm_integrate", lambda *_a, **_k: dict(SAME_YUNLAN))
     monkeypatch.setattr(engine, "apply_integrate", spy_apply)
     data = engine._produce_distill_payload(CORPUS, "user", **engine._match_integrate_parts(CORPUS))
     assert data["payload_kind"] == PAYLOAD_KIND_INTEGRATE
     assert "_integrate_batch" not in data
-    assert data.get("_draft_crystal") == yunlan_DRAFT
+    assert data.get("_draft_crystal") == YUNLAN_DRAFT
     assert data["identity"] == "same"
     con = engine.db()
     con.execute(
@@ -313,7 +313,7 @@ def test_single_mid_draft_degenerates_to_hash79(tmp_path, monkeypatch):
     source = con.execute("SELECT * FROM sources WHERE id='src-single-eq79'").fetchone()
     engine._raise_if_new_land_unwritten(engine._route_distill_payload(source, data, CORPUS))
     assert len(apply_calls) == 1
-    assert apply_calls[0][1].get("draft_crystal") == yunlan_DRAFT
+    assert apply_calls[0][1].get("draft_crystal") == YUNLAN_DRAFT
     qing = engine.db().execute("SELECT body_md FROM crystallizations WHERE id='c-yunlan'").fetchone()
     assert CORPUS in (qing["body_md"] or "")
 
@@ -336,7 +336,7 @@ def test_one_integrate_none_fail_closes_does_not_skip(tmp_path, monkeypatch):
         name = (kw.get("draft_crystal") or {}).get("name")
         integrate_names.append(name)
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         return None
 
     def spy_apply(*args, **kwargs):
@@ -344,7 +344,7 @@ def test_one_integrate_none_fail_closes_does_not_skip(tmp_path, monkeypatch):
         apply_names.append(str(draft.get("name") or ""))
         return orig_apply(*args, **kwargs)
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, SCHOOL_DRAFT))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, SCHOOL_DRAFT))
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     monkeypatch.setattr(engine, "apply_integrate", spy_apply)
     monkeypatch.setattr(engine, "_llm_extract", lambda *_a, **_k: extract_calls.append(1) or {"payload_kind": "extract", "items": []})
@@ -379,7 +379,7 @@ def test_all_integrate_none_does_not_extract(tmp_path, monkeypatch):
         integrate_names.append((kw.get("draft_crystal") or {}).get("name"))
         return None
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, SCHOOL_DRAFT))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, SCHOOL_DRAFT))
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     monkeypatch.setattr(engine, "apply_integrate", lambda *_a, **_k: apply_calls.append(1))
     monkeypatch.setattr(engine, "_llm_extract", lambda *_a, **_k: extract_calls.append(1) or {"payload_kind": "extract", "items": []})
@@ -417,7 +417,7 @@ def test_batch_gate_reject_blocks_done_not_only_new_land(tmp_path, monkeypatch):
         name = (kw.get("draft_crystal") or {}).get("name")
         integrate_names.append(name)
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         return dict(ILLEGAL_NEW)
 
     def spy_apply(*args, **kwargs):
@@ -425,7 +425,7 @@ def test_batch_gate_reject_blocks_done_not_only_new_land(tmp_path, monkeypatch):
         apply_names.append(str(draft.get("name") or ""))
         return orig_apply(*args, **kwargs)
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, NEW_DRAFT))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, NEW_DRAFT))
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     monkeypatch.setattr(engine, "apply_integrate", spy_apply)
     monkeypatch.setattr(engine, "_llm_extract", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("extract")))
@@ -457,7 +457,7 @@ def test_any_land_failure_fail_closes_source(tmp_path, monkeypatch):
         name = (kw.get("draft_crystal") or {}).get("name") or ""
         integrate_names.append(name or "<nameless>")
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         return dict(NEW_ACCEPT)
 
     def spy_apply(*args, **kwargs):
@@ -465,7 +465,7 @@ def test_any_land_failure_fail_closes_source(tmp_path, monkeypatch):
         apply_names.append(str(draft.get("name") or "<nameless>"))
         return orig_apply(*args, **kwargs)
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, NAMELESS_DRAFT))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, NAMELESS_DRAFT))
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     monkeypatch.setattr(engine, "apply_integrate", spy_apply)
     _queue_user(engine, "src-fail-closed")

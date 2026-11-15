@@ -88,7 +88,7 @@ def test_hermes_hook_reads_its_own_block_and_joins_existing_events(tmp_path):
 def test_a_turn_keeps_the_workspace_remote_for_the_rest_of_the_session(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "rogmem.host_hook._remote_from_dir",
-        lambda directory: "https://github.com/yunlan/rogmem" if directory == "/work/rogmind" else "",
+        lambda directory: "https://github.com/example/memory" if directory == "/work/rogmind" else "",
     )
     seen = []
 
@@ -117,8 +117,8 @@ def test_a_turn_keeps_the_workspace_remote_for_the_rest_of_the_session(tmp_path,
         program="Cursor",
     )
     assert [item["project"] for item in seen] == [
-        "https://github.com/yunlan/rogmem",
-        "https://github.com/yunlan/rogmem",
+        "https://github.com/example/memory",
+        "https://github.com/example/memory",
     ]
 
 
@@ -455,7 +455,7 @@ def test_a_prompt_without_a_session_start_still_loads_once_and_a_stop_reads_the_
     )
     seen = []
     monkeypatch.setattr("rogmem.host_hook._flush", lambda home, program, rows: seen.extend(rows) or [])
-    monkeypatch.setattr("rogmem.host_hook._remote_from_dir", lambda directory: "git@github.com:yunlan/rogmem.git")
+    monkeypatch.setattr("rogmem.host_hook._remote_from_dir", lambda directory: "git@github.com:example/memory.git")
     first = handle(
         {
             "hook_event_name": "UserPromptSubmit",
@@ -496,7 +496,7 @@ def test_a_prompt_without_a_session_start_still_loads_once_and_a_stop_reads_the_
         "user:合成句：第二问不再取历史包。",
         "assistant:合成句：最后交出去的回复。",
     ]
-    assert {item["project"] for item in seen} == {"git@github.com:yunlan/rogmem.git"}
+    assert {item["project"] for item in seen} == {"git@github.com:example/memory.git"}
 
 
 def _gbk_pipe(monkeypatch, raw: bytes) -> io.BytesIO:

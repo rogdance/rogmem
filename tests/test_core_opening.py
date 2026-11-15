@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-REPO = "https://github.com/yunlan/rogmem"
+REPO = "https://github.com/example/memory"
 OTHER = "https://github.com/other/repo"
 
 

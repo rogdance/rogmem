@@ -3,7 +3,7 @@
 # rogmem Wiki 蒸馏相关 Prompt 索引
 
 日期：2026-10-29（Asia/Shanghai）  
-状态：**维护者 已审的设计真源（已入库）**；**尚未接入** runtime（不 import、不翻转 `DISTILLER_STORE_WRITE_ENABLED`，写库开关保持 `False`）  
+状态：**维护者已审的设计真源（已入库）**；**尚未接入** runtime（不 import、不翻转 `DISTILLER_STORE_WRITE_ENABLED`，写库开关保持 `False`）  
 主架构：`docs/rogmem-tech-architecture-v3.md` §6（已与 integrate v1.4 / draft v5.3 同步；本分支未收录该架构文）
 
 ## 管线位置（draft → match → **integrate-adjudicate** → gate）
@@ -25,7 +25,7 @@ Draft（独立结晶，v5.3：叙述语种解耦；仅 evidence 原语种）
 
 | 文件 | 职责 | 状态 |
 | --- | --- | --- |
-| [`wiki-distill-draft-prompt-v5.md`](./wiki-distill-draft-prompt-v5.md) | **Draft v5.3**（维护者 已审）：瘦信封 + body_md；叙述语种解耦；**仅** evidence 原语种 | 主契约 |
+| [`wiki-distill-draft-prompt-v5.md`](./wiki-distill-draft-prompt-v5.md) | **Draft v5.3**（维护者已审）：瘦信封 + body_md；叙述语种解耦；**仅** evidence 原语种 | 主契约 |
 | [`wiki-integrate-adjudicate-prompt-v1.md`](./wiki-integrate-adjudicate-prompt-v1.md) | **整合裁决**：身份 + patch + 冲突；全文注入分级 | **现行真源 v1.4** |
 | `../wiki-integrate-context-injection-note.md` | 注入分级说明 | 已定策略（本分支未收录） |
 | [`../sim-dual-resume-report.md`](../sim-dual-resume-report.md) | 双简历模拟报告 | 已跑；驱动 v1.1–v1.3 |

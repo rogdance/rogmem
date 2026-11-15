@@ -41,7 +41,7 @@ README 是给打开仓库的人看的产品介绍。它跟着现在跑着的产�
 
 ## 头图
 
-文件是 `docs/brand/rogmem-lockup.svg`：图标加字标的 ROGMEM 锁定版式，字标颜色用 `prefers-color-scheme` 在日间黑、暗夜白之间切换，图标渐变 `#FF3763 → #FF7038` 两种底色不变。README 里只出现这一次，宽度 440 居中，替代文本写清是 ROGMEM 的标识，不要再描述浣熊。换图时仍把 SVG 放到这个路径，保持同一套 `@media (prefers-color-scheme)` 字标色和渐变色号。字标已经读作 ROGMEM，这张图下面不再叠一个纯文字 ROGMEM 的一级标题，保留副标题。旧的吉祥物图片 `docs/brand/rogdance.jpeg` 留在仓库里不删，没有别的地方引用它。
+文件是 `docs/brand/rogmem-lockup.svg`：图标加字标的 ROGMEM 锁定版式，字标颜色用 `prefers-color-scheme` 在日间黑、暗夜白之间切换，图标渐变 `#FF3763 → #FF7038` 两种底色不变。README 里只出现这一次，宽度 440 居中，替代文本写清是 ROGMEM 的标识，不要再描述浣熊。换图时仍把 SVG 放到这个路径，保持同一套 `@media (prefers-color-scheme)` 字标色和渐变色号。字标已经读作 ROGMEM，这张图下面不再叠一个纯文字 ROGMEM 的一级标题，保留副标题。旧的吉祥物图片 `docs/brand/rogmem-mascot.jpeg` 留在仓库里不删，没有别的地方引用它。
 
 ## 改完
 

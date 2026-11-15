@@ -33,20 +33,20 @@ def test_owner_appellation_stays_as_written_and_does_not_lock_the_page(tmp_path,
     assert "林知远" not in engine.format_crystal_article(detail)
     assert [row["note"] for row in engine.revisions("owner")].count("预写真名与别名") == 0
     saved = engine.save_basic(
-        {"sketch_char_limit": "3500", "owner_appellation": "  云岚甲、甲哥   维护者  "}
+        {"sketch_char_limit": "3500", "owner_appellation": "  云岚甲、甲哥   lin  "}
     )
     assert saved["ok"] is True
-    assert engine.basic_config()["owner_appellation"] == "云岚甲、甲哥   维护者"
+    assert engine.basic_config()["owner_appellation"] == "云岚甲、甲哥   lin"
     engine.connect(tmp_path, tmp_path / "scan")
     again = engine.crystal_detail("owner")
     assert again["summary"]["真名"] == "尚无来源"
     assert again["summary"]["别名"] == "尚无来源"
-    assert engine.basic_config()["owner_appellation"] == "云岚甲、甲哥   维护者"
+    assert engine.basic_config()["owner_appellation"] == "云岚甲、甲哥   lin"
     text = engine.format_crystal_article(again).replace("真名：尚无来源", "真名：手改姓名", 1)
     assert engine.save_crystal_article("owner", text)["ok"] is True
     engine.connect(tmp_path, tmp_path / "scan")
     assert engine.crystal_detail("owner")["summary"]["真名"] == "手改姓名"
-    assert engine.basic_config()["owner_appellation"] == "云岚甲、甲哥   维护者"
+    assert engine.basic_config()["owner_appellation"] == "云岚甲、甲哥   lin"
     assert engine.save_basic({"sketch_char_limit": "3500", "owner_appellation": "另一称呼"})["ok"] is True
     assert engine.crystal_detail("owner")["summary"]["真名"] == "手改姓名"
     assert engine.crystal_detail("owner")["summary"]["别名"] == "尚无来源"

@@ -7,7 +7,7 @@ import threading
 
 from rogmem.prompts import INTEGRATE_PAGE_SYSTEM, distill_scope, worker_prompts
 
-# 维护者 指定的让位句，一个字都不能改。
+# 维护者指定的让位句，一个字都不能改。
 OWNER_SKETCH_YIELD = (
     "开场还会有别的途径装入最近的原话，近况以那些原话为准；本文（结晶速写）的字只留给原话覆盖不到、省掉就会让下一手做错的事，原话覆盖得住的近况、以及不改变下一手默认做法的经过，把字让出去。"
 )
@@ -281,7 +281,7 @@ def test_owner_appellation_is_handed_to_the_model_as_written(tmp_path, monkeypat
     from rogmem import engine
 
     engine.connect(tmp_path, tmp_path / "scan")
-    raw = "云岚甲、甲哥   维护者"
+    raw = "云岚甲、甲哥   lin"
     assert engine.save_basic({"sketch_char_limit": "3500", "owner_appellation": raw})["ok"] is True
     seen: dict[str, str] = {}
 
@@ -345,14 +345,14 @@ def test_owner_address_is_one_fact():
     from rogmem.prompts import owner_address
 
     assert owner_address("", "", "") == ("", "", "")
-    assert owner_address("", "", "  云岚甲、甲哥   维护者\n") == ("云岚甲、甲哥   维护者", "", "")
-    assert owner_address("页上的真名", "页上的别名", "云岚甲、甲哥   维护者") == (
+    assert owner_address("", "", "  云岚甲、甲哥   lin\n") == ("云岚甲、甲哥   lin", "", "")
+    assert owner_address("页上的真名", "页上的别名", "云岚甲、甲哥   lin") == (
         "页上的真名",
         "页上的别名",
-        "云岚甲、甲哥   维护者",
+        "云岚甲、甲哥   lin",
     )
-    assert owner_address("云岚甲、甲哥   维护者", "别名", "云岚甲、甲哥   维护者") == (
-        "云岚甲、甲哥   维护者",
+    assert owner_address("云岚甲、甲哥   lin", "别名", "云岚甲、甲哥   lin") == (
+        "云岚甲、甲哥   lin",
         "别名",
         "",
     )

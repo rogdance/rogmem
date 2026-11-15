@@ -221,7 +221,7 @@ def test_an_agent_draft_queues_merge_and_leaves_the_live_page(tmp_path, monkeypa
 
 def test_a_bound_engineering_page_does_not_need_the_address_repeated(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
-    repo = "https://github.com/yunlan/rogmem"
+    repo = "https://github.com/example/memory"
     engine._insert_crystal_page(engine.db(), "eng", "工程", "云岚核忆", holder="test")
     engine.db().execute("UPDATE crystallizations SET body_md=? WHERE id='eng'", (f"仓库 {repo}\n",))
     engine.db().commit()

@@ -35,7 +35,7 @@ FOCUS_QUOTE = "最近在搞云岚核忆这个仓库。"
 AGREE_QUOTE = "以后回答都先给结论。"
 MEAT_QUOTE = "我这段时间爱吃红烧肉。"
 QUIT_QUOTE = "我现在戒肉吃素了。"
-REPO = "https://github.com/yunlan/rogmem"
+REPO = "https://github.com/example/memory"
 EVENT0 = "2026-01-01T00:00:00+00:00"
 
 CORE_BODY = """## 身份速写

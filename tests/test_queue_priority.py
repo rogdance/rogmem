@@ -97,13 +97,13 @@ def test_a_later_turn_fills_an_empty_project_on_the_same_session(tmp_path, monke
         seq=2,
         agent=agent,
         event_at=now,
-        project="https://github.com/yunlan/rogmem",
+        project="https://github.com/example/memory",
     )
     refs = {
         row["id"]: row["project_ref"]
         for row in engine.db().execute("SELECT id, project_ref FROM sources WHERE session_id='s-same'")
     }
-    assert refs[first["id"]] == "https://github.com/yunlan/rogmem"
+    assert refs[first["id"]] == "https://github.com/example/memory"
     again = engine.submit_text(
         kind="user",
         text="合成句：后到的一句带上仓库。",
@@ -116,7 +116,7 @@ def test_a_later_turn_fills_an_empty_project_on_the_same_session(tmp_path, monke
     )
     assert again["duplicate"] is True
     kept = engine.db().execute("SELECT project_ref FROM sources WHERE id=?", (first["id"],)).fetchone()
-    assert kept["project_ref"] == "https://github.com/yunlan/rogmem"
+    assert kept["project_ref"] == "https://github.com/example/memory"
 
 
 def test_b_qm_ingest_paths_write_mapped_lanes(tmp_path, monkeypatch):

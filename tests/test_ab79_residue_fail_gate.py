@@ -37,7 +37,7 @@ EMPTY_EVIDENCE_DRAFT = {
     "aliases": [],
     "facts": [{"claim": "只有主张没有出处", "evidence": ""}],
 }
-yunlan_DRAFT = {
+YUNLAN_DRAFT = {
     "name": "云岚甲",
     "type": "人物",
     "aliases": ["测试员甲"],
@@ -82,7 +82,7 @@ SAME_FACT_ADD = {
     ],
     "conflicts": [],
 }
-SAME_yunlan = {
+SAME_YUNLAN = {
     "identity": "same",
     "matched_id": "c-yunlan",
     "ops": [
@@ -280,7 +280,7 @@ def test_ab_a_same_and_nloop_facts_evidence_to_statements(tmp_path, monkeypatch)
     def spy_integrate(_text, _kind="", **kw):
         name = (kw.get("draft_crystal") or {}).get("name")
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         return dict(NEW_ACCEPT)
 
     orig_apply = engine.apply_integrate
@@ -290,7 +290,7 @@ def test_ab_a_same_and_nloop_facts_evidence_to_statements(tmp_path, monkeypatch)
         seen.setdefault("results", []).append(result)
         return result
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, NEW_DRAFT))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, NEW_DRAFT))
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     monkeypatch.setattr(engine, "apply_integrate", spy_apply)
     monkeypatch.setattr(engine, "_llm_extract", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("extract")))
@@ -555,7 +555,7 @@ def test_ab_a_nloop_new_keeps_evidence_and_fills_id(tmp_path, monkeypatch):
     def spy_integrate(_text, _kind="", **kw):
         name = (kw.get("draft_crystal") or {}).get("name")
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         return dict(NEW_ACCEPT)
 
     orig_apply = engine.apply_integrate
@@ -565,7 +565,7 @@ def test_ab_a_nloop_new_keeps_evidence_and_fills_id(tmp_path, monkeypatch):
         seen.setdefault("results", []).append(result)
         return result
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, NEW_DRAFT))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, NEW_DRAFT))
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     monkeypatch.setattr(engine, "apply_integrate", spy_apply)
     monkeypatch.setattr(engine, "_llm_extract", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("extract")))
@@ -586,14 +586,14 @@ def test_ab_a_nloop_new_keeps_evidence_and_fills_id(tmp_path, monkeypatch):
     def one_none(_text, _kind="", **kw):
         name = (kw.get("draft_crystal") or {}).get("name")
         if name == "云岚甲":
-            return dict(SAME_yunlan)
+            return dict(SAME_YUNLAN)
         return None
 
     def track_apply(*args, **kwargs):
         apply_names.append((kwargs.get("draft_crystal") or {}).get("name"))
         return orig_apply(*args, **kwargs)
 
-    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(yunlan_DRAFT, SCHOOL_DRAFT))
+    monkeypatch.setattr(engine, "_llm_draft", lambda *_a, **_k: _draft_bundle(YUNLAN_DRAFT, SCHOOL_DRAFT))
     monkeypatch.setattr(engine, "_llm_integrate", one_none)
     monkeypatch.setattr(engine, "apply_integrate", track_apply)
     monkeypatch.setattr(

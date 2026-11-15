@@ -41,7 +41,7 @@ MAYBE_DRAFT = {
         }
     ],
 }
-yunlan_DRAFT = {
+YUNLAN_DRAFT = {
     "name": "云岚甲",
     "type": "人物",
     "aliases": ["测试员甲"],
@@ -264,7 +264,7 @@ def test_batch_containing_maybe_blocks_done(tmp_path, monkeypatch):
     monkeypatch.setattr(
         engine,
         "_llm_draft",
-        lambda *_a, **_k: {"crystals": [yunlan_DRAFT, MAYBE_DRAFT]},
+        lambda *_a, **_k: {"crystals": [YUNLAN_DRAFT, MAYBE_DRAFT]},
     )
     monkeypatch.setattr(engine, "_llm_integrate", spy_integrate)
     monkeypatch.setattr(

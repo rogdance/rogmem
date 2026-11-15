@@ -23,7 +23,7 @@ from rogmem.distill_resim import (
 
 pytestmark = pytest.mark.v54_project_ref_fail_gate
 
-REPO = "https://github.com/yunlan/rogmem"
+REPO = "https://github.com/example/memory"
 OTHER_REPO = "https://github.com/nangang/lecture"
 FOCUS_BODY = "今天把核心记忆的软过期又往前推了一步。"
 NO_ENGINE_BODY = "今天只谈天气，不提任何仓库。"
@@ -216,15 +216,15 @@ def test_V54_PREF_01_draft_injects_associated_project_line(tmp_path, monkeypatch
 
 def test_V54_PREF_02_match_prefers_existing_project(tmp_path, monkeypatch):
     engine = _engine(tmp_path, monkeypatch)
-    _seed_project(engine, cid="proj-yunlan", name="云岚核忆", repo=REPO)
+    _seed_project(engine, cid="proj-mem", name="云岚核忆", repo=REPO)
     miss = engine._match_integrate_parts(FOCUS_BODY)
-    assert miss == {} or "proj-yunlan" not in {
+    assert miss == {} or "proj-mem" not in {
         item.get("id") for item in (miss.get("library_candidates") or []) if isinstance(item, dict)
     }
 
     aligned = engine._align_project_candidates(FOCUS_BODY, {"project_ref": REPO})
     ids = [item["id"] for item in aligned["library_candidates"]]
-    assert ids[0] == "proj-yunlan"
+    assert ids[0] == "proj-mem"
     assert aligned["library_candidates"][0]["type"] == "工程"
     assert aligned["library_candidates"][0]["name"] == "云岚核忆"
 
@@ -237,7 +237,7 @@ def test_V54_PREF_02_match_prefers_existing_project(tmp_path, monkeypatch):
 
 def test_V54_PREF_03_integrate_aligns_existing_project(tmp_path, monkeypatch):
     engine = _engine(tmp_path, monkeypatch)
-    _seed_project(engine, cid="proj-yunlan", name="云岚核忆", repo=REPO)
+    _seed_project(engine, cid="proj-mem", name="云岚核忆", repo=REPO)
     source = _insert_source(
         engine,
         sid="pref-align",
@@ -247,11 +247,11 @@ def test_V54_PREF_03_integrate_aligns_existing_project(tmp_path, monkeypatch):
     )
     result = _apply_new(engine, source, PROJECT_DRAFT)
     assert result.decision == "accept"
-    assert result.matched_id == "proj-yunlan"
+    assert result.matched_id == "proj-mem"
     rows = _active_projects(engine)
-    assert [row["id"] for row in rows] == ["proj-yunlan"]
+    assert [row["id"] for row in rows] == ["proj-mem"]
     assert rows[0]["name"] == "云岚核忆"
-    body = engine.db().execute("SELECT body_md FROM crystallizations WHERE id='proj-yunlan'").fetchone()["body_md"]
+    body = engine.db().execute("SELECT body_md FROM crystallizations WHERE id='proj-mem'").fetchone()["body_md"]
     assert "软过期" in (body or "")
 
     seen: dict = {}
@@ -266,7 +266,7 @@ def test_V54_PREF_03_integrate_aligns_existing_project(tmp_path, monkeypatch):
         return json.dumps(
             {
                 "identity": "same",
-                "matched_id": "proj-yunlan",
+                "matched_id": "proj-mem",
                 "ops": [
                     {
                         "op": "update",
@@ -285,10 +285,10 @@ def test_V54_PREF_03_integrate_aligns_existing_project(tmp_path, monkeypatch):
     inject = engine._prompt_injection(source)
     data = engine._produce_distill_payload(FOCUS_BODY, "user", **{**inject, **engine._match_integrate_parts(FOCUS_BODY)})
     assert data.get("identity") == "same"
-    assert data.get("matched_id") == "proj-yunlan"
+    assert data.get("matched_id") == "proj-mem"
     assert f"{PROJECT_REF_LINE_PREFIX}{REPO}" in seen["draft"]
-    assert "proj-yunlan" in seen["integrate"]
-    assert _active_projects(engine)[0]["id"] == "proj-yunlan"
+    assert "proj-mem" in seen["integrate"]
+    assert _active_projects(engine)[0]["id"] == "proj-mem"
 
 
 def test_V54_PREF_04_no_project_ref_does_not_mint_zombie(tmp_path, monkeypatch):

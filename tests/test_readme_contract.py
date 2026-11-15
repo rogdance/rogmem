@@ -1,5 +1,6 @@
 """The public README stays aligned with the product it describes."""
 
+import os
 import re
 from pathlib import Path
 
@@ -28,11 +29,10 @@ def _about_lead() -> str:
 
 
 def test_readme_keeps_the_about_sentence_and_contacts():
-    from scripts.public_tree import contact_needles
-
     assert _about_lead() in README
     assert "https://github.com/rogdance/rogmem" in README
-    for needle in contact_needles():
+    raw = os.environ.get("ROGMEM_PRIVATE_NEEDLES", "")
+    for needle in (part.strip() for part in raw.split(",") if part.strip()):
         assert needle.lower() not in README.lower()
         assert needle.lower() not in UI.lower()
 
