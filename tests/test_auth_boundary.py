@@ -194,7 +194,7 @@ def test_agent_by_token_still_opens_when_last_used_is_locked(tmp_path, monkeypat
 
 
 def _login_panel(page: str) -> str:
-    """登录窗本体。帮助弹窗和页首的文案不算在内。"""
+    """登录窗本体。页首的品牌 logo 不算在内。"""
     return page.split('<main class="login-panel"', 1)[1].split("</main>", 1)[0]
 
 
@@ -296,12 +296,9 @@ def test_first_visit_opens_without_a_password(tmp_path, monkeypatch):
         assert opened[0] == 200, opened[1]
         page = login_page()
         panel = _login_panel(page)
-        assert "默认可直接进入" not in panel
-        assert "关掉免密" not in panel
         assert panel.count("初始密码") == 1
         assert "初始密码：Rogmem@2026" in panel
-        assert "默认可直接进入" in page
-        assert "关掉免密" in page
+        assert "帮助" not in page
         assert "复制给 Agent" not in page
         health, health_body, _headers = hub.req("GET", "/healthz")
         assert health == 200
@@ -323,19 +320,17 @@ def test_first_visit_opens_without_a_password(tmp_path, monkeypatch):
         hub.close()
 
 
-def test_login_page_explains_the_open_default(tmp_path, monkeypatch):
+def test_login_page_keeps_only_the_password_panel(tmp_path, monkeypatch):
     hub = Hub(tmp_path, monkeypatch)
     try:
-        from rogmem.ui import LOGIN_HELP_IMAGES
-
         closed = hub.req("POST", "/admin/api/settings/basic", {"passwordless": "0"})
         assert closed[0] == 200, closed[1]
         login, page, login_headers = hub.req("GET", "/admin/login")
         assert login == 200
-        assert "帮助" in page
+        assert "帮助" not in page
+        assert "help-dialog" not in page
+        assert "/admin/static/login/" not in page
         panel = _login_panel(page)
-        assert "默认可直接进入" not in panel
-        assert "关掉免密" not in panel
         assert panel.count("初始密码") == 1
         assert "初始密码：Rogmem@2026" in panel
         assert "ROGMEM 私人记忆中枢" in panel
@@ -344,10 +339,6 @@ def test_login_page_explains_the_open_default(tmp_path, monkeypatch):
         assert 'placeholder="输入访问密码"' in panel
         assert 'id="password-input"' in panel
         assert "color: var(--text-muted)" in page
-        assert "默认可直接进入" in page
-        assert "基础设置" in page
-        assert "关掉免密" in page
-        assert "登录密码" in page
         assert 'class="login-panel"' in page
         assert 'id="neural-network-canvas"' in page
         assert 'id="nebula"' not in page
@@ -356,14 +347,8 @@ def test_login_page_explains_the_open_default(tmp_path, monkeypatch):
         assert 'aria-label="ROGMEM"' in page
         assert 'type="password"' in page
         assert "/admin/graph" not in login_headers.get("Location", "")
-        for name in LOGIN_HELP_IMAGES:
-            image_request = urllib.request.Request(hub.base + "/admin/static/login/" + name)
-            with urllib.request.urlopen(image_request, timeout=5) as image_resp:
-                assert image_resp.status == 200
-                assert "image/png" in image_resp.headers.get("Content-Type", "")
-                assert image_resp.read(8) == b"\x89PNG\r\n\x1a\n"
-        missing, _missing_body, _missing_headers = hub.req("GET", "/admin/static/login/not-a-step.png")
-        assert missing == 404
+        missing, _missing_body, _missing_headers = hub.req("GET", "/admin/static/login/step-enter.png")
+        assert missing != 200
         script, _script_body, script_headers = hub.req("GET", "/admin/static/cosmos-graph.min.js")
         assert script == 200
         assert "javascript" in script_headers.get("Content-Type", "")
@@ -387,7 +372,6 @@ def test_login_assets_open_without_a_session():
     assert server._login_asset("/admin/static/three/examples/jsm/controls/OrbitControls.js") is True
     assert server._login_asset("/admin/static/three/") is False
     assert server._login_asset("/admin/static/three/../vendor/cosmos-graph.min.js") is False
-    assert server._login_asset("/admin/static/login/step-enter.png") is True
     assert server._login_asset("/admin/static/login/../ui.py") is False
     assert server._login_asset("/admin/api/settings/basic") is False
 

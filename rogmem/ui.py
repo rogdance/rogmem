@@ -134,37 +134,6 @@ BRAND_LOCKUP_SVG = (
 )
 
 
-LOGIN_HELP_IMAGES = (
-    "step-enter.png",
-    "step-settings.png",
-    "step-password.png",
-    "step-lock.png",
-)
-
-_LOGIN_STEPS = (
-    (
-        "step-enter.png",
-        "默认可直接进入",
-        "默认可直接进入管理台，不会被口令卡住。",
-    ),
-    (
-        "step-settings.png",
-        "基础设置里的免密登录",
-        "需要时再打开基础设置。免密登录默认开着。",
-    ),
-    (
-        "step-password.png",
-        "在基础设置设密码",
-        "在基础设置里自己设一个口令。设了之后，管理写操作才检查口令。",
-    ),
-    (
-        "step-lock.png",
-        "关掉免密之后要登录",
-        "关掉免密之后，管理写操作也会检查口令。",
-    ),
-)
-
-
 def login_page() -> str:
     """登录页。
 
@@ -174,16 +143,6 @@ def login_page() -> str:
     """
     from rogmem.engine import INITIAL_ADMIN_PASSWORD
 
-    steps = "".join(
-        '<li><img src="/admin/static/login/'
-        + name
-        + '" alt="'
-        + esc(alt)
-        + '"><p>'
-        + esc(text)
-        + "</p></li>"
-        for name, alt, text in _LOGIN_STEPS
-    )
     page = """<!doctype html>
 <html lang="zh-CN" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · rogmem</title>
 <style>
@@ -206,7 +165,6 @@ def login_page() -> str:
   --danger-text: #ffadb9;
   --brand: #ef6576;
   --focus-color: #f095a8;
-  --overlay: rgba(0, 0, 0, .65);
   --shadow-dialog: 0 20px 64px rgba(0, 0, 0, .4);
 }
 * { box-sizing: border-box; }
@@ -241,17 +199,6 @@ canvas#neural-network-canvas {
 }
 .brand { pointer-events: auto; color: var(--text-primary); text-decoration: none; }
 .brand svg { display: block; height: 26px; width: auto; }
-.help {
-  pointer-events: auto;
-  margin: 0;
-  padding: 6px 2px;
-  border: 0;
-  background: none;
-  color: var(--text-muted);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
 :focus-visible { outline: 2px solid var(--focus-color); outline-offset: 2px; }
 /* 登录窗：垂直中线 x=50% 与下方黄金分割线 y=61.8% 的交汇点 */
 .login-panel {
@@ -341,40 +288,13 @@ canvas#neural-network-canvas {
   letter-spacing: .3px;
   text-align: center;
 }
-dialog {
-  width: min(560px, calc(100% - 32px));
-  max-height: min(80vh, 720px);
-  padding: 20px 22px 8px;
-  overflow: auto;
-  color: var(--text-primary);
-  background: var(--surface-popover);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow-dialog);
-}
-dialog::backdrop { background: var(--overlay); }
-dialog h2 { margin: 0 36px 12px 0; font-size: 16px; }
-dialog ol { margin: 0; padding: 0; list-style: none; }
-dialog li { margin: 0 0 18px; }
-dialog img { display: block; width: 100%; border: 1px solid var(--border); border-radius: 8px; }
-dialog p { margin: 8px 0 0; color: var(--text-secondary); }
-dialog form { position: sticky; top: 0; float: right; }
-dialog .close {
-  min-height: 32px;
-  padding: 4px 10px;
-  border: 0;
-  background: none;
-  color: var(--text-muted);
-  font: inherit;
-  cursor: pointer;
-}
 @media (max-width: 480px) {
   .login-panel { top: 58%; padding: 24px 20px 18px; }
   .login-title { font-size: 18px; }
 }
 </style></head><body>
 <canvas id="neural-network-canvas"></canvas>
-<header class="top"><a class="brand" href="/admin/login" aria-label="ROGMEM">__BRAND__</a><button type="button" class="help" id="help">帮助</button></header>
+<header class="top"><a class="brand" href="/admin/login" aria-label="ROGMEM">__BRAND__</a></header>
 <main class="login-panel" aria-label="登录">
 <div class="login-title">ROGMEM 私人记忆中枢</div>
 <input id="password-input" class="password-input" name="password" type="password" placeholder="输入访问密码" autocomplete="current-password" spellcheck="false" aria-label="登录密码">
@@ -382,11 +302,6 @@ dialog .close {
 <p id="login-message" class="login-message" role="status" aria-live="polite"></p>
 <p class="login-hint">初始密码：__INITIAL__</p>
 </main>
-<dialog id="help-dialog" aria-labelledby="help-title">
-<form method="dialog"><button class="close" value="cancel">关闭</button></form>
-<h2 id="help-title">怎么进入管理台</h2>
-<ol>__STEPS__</ol>
-</dialog>
 <script type="importmap">
 {
   "imports": {
@@ -1358,16 +1273,11 @@ passwordInput.addEventListener('keydown', (e) => {
 passwordInput.addEventListener('input', () => {
   loginMessage.className = 'login-message';
 });
-
-document.getElementById('help').addEventListener('click', () => {
-  document.getElementById('help-dialog').showModal();
-});
 </script>
 </body></html>
 """
     return (
         page.replace("__BRAND__", BRAND_LOCKUP_SVG)
-        .replace("__STEPS__", steps)
         .replace("__INITIAL__", esc(INITIAL_ADMIN_PASSWORD))
     )
 

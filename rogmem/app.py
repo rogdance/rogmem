@@ -1405,17 +1405,6 @@ async def graph_js(_request: Request) -> Response:
     return Response(path.read_bytes(), media_type="text/javascript")
 
 
-@mcp.custom_route("/admin/static/login/{name}", methods=["GET"])
-async def login_help_image(request: Request) -> Response:
-    name = str(request.path_params.get("name") or "")
-    if name not in ui.LOGIN_HELP_IMAGES:
-        return Response(status_code=404)
-    path = Path(__file__).parent / "static" / "login" / name
-    if not path.is_file():
-        return Response(status_code=404)
-    return Response(path.read_bytes(), media_type="image/png", headers={"Cache-Control": "no-cache"})
-
-
 @mcp.custom_route("/admin/static/three/{path:path}", methods=["GET"])
 async def three_module(request: Request) -> Response:
     """登录页的 3D 视效自带 three.js，不走 CDN。只放行 vendor/three 里的文件。"""
@@ -1739,21 +1728,16 @@ def _channel_cookie(scope) -> bool:
 
 
 def _login_asset(path: str) -> bool:
-    """登录页在还没有会话时也要能画出星云、帮助图和 3D 视效。
+    """登录页在还没有会话时也要能画出 3D 视效。
 
-    帮助图目录本身不要求登录，具体文件仍由路由按名单返回。名单外是 404。
-    three.js 子集同理：路径由静态路由再校验一次，不越出 vendor/three。
+    three.js 子集不要求登录：路径由静态路由再校验一次，不越出 vendor/three。
     """
     if path == "/admin/static/cosmos-graph.min.js":
         return True
     if path.startswith("/admin/static/three/"):
         rest = path[len("/admin/static/three/"):]
         return bool(rest) and ".." not in rest.split("/")
-    prefix = "/admin/static/login/"
-    if not path.startswith(prefix):
-        return False
-    name = path[len(prefix):]
-    return bool(name) and "/" not in name and name not in {".", ".."}
+    return False
 
 
 class AdminGate:
