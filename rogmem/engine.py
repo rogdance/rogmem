@@ -665,6 +665,13 @@ def connect(data: Path, scan: Path) -> None:
         con.execute("ALTER TABLE chunks ADD COLUMN parent_id INTEGER")
     if "embed_text" not in chunk_columns:
         con.execute("ALTER TABLE chunks ADD COLUMN embed_text TEXT")
+    crystal_columns = {row[1] for row in con.execute("PRAGMA table_info(crystallizations)")}
+    if "vec_json" not in crystal_columns:
+        con.execute("ALTER TABLE crystallizations ADD COLUMN vec_json TEXT")
+    if "vec_digest" not in crystal_columns:
+        con.execute("ALTER TABLE crystallizations ADD COLUMN vec_digest TEXT")
+    if "vec_model" not in crystal_columns:
+        con.execute("ALTER TABLE crystallizations ADD COLUMN vec_model TEXT")
     con.execute(
         """CREATE TABLE IF NOT EXISTS chunk_revisions(
              id INTEGER PRIMARY KEY,
@@ -7847,10 +7854,12 @@ def _drop_unbacked_marks(text: str) -> str:
 
 SKETCH_CHAR_LIMIT_DEFAULT = 3500
 GRAPH_SPIN_SECONDS_DEFAULT = 5
-GRAPH_AUTO_LABELS_DEFAULT = False
+GRAPH_AUTO_LABELS_DEFAULT = True
 GRAPH_LABEL_BUDGET_DEFAULT = 50
 GRAPH_LABEL_BUDGET_MIN = 1
 GRAPH_LABEL_BUDGET_MAX = 200
+GRAPH_RENDERER_DEFAULT = "3d"
+GRAPH_RENDERER_VALUES = ("3d", "cosmos")
 
 COST_SPAN_VALUES = ("all", "24h", "7d", "30d")
 COST_DETAIL_VALUES = ("all", "24h", "30d")
@@ -7859,8 +7868,10 @@ _COST_STRING_LIMITS = {"worker": 200, "model": 400, "dworker": 200, "dmodel": 40
 
 
 def graph_auto_labels() -> bool:
-    """Whether the graph page draws names on points above the zoom threshold. Off by default."""
+    """Whether the graph page draws names on points above the zoom threshold. On by default."""
     raw = (get_setting("graph_auto_labels") or "").strip().lower()
+    if not raw:
+        return GRAPH_AUTO_LABELS_DEFAULT
     return raw in {"1", "on", "true", "yes"}
 
 
@@ -7880,6 +7891,16 @@ def graph_label_budget() -> int:
     if value < GRAPH_LABEL_BUDGET_MIN or value > GRAPH_LABEL_BUDGET_MAX:
         return GRAPH_LABEL_BUDGET_DEFAULT
     return value
+
+
+def graph_renderer() -> str:
+    """How the graph page draws: the 3D renderer by default, the flat star map on demand.
+
+    An unrecognised stored value degrades to the default rather than raising, so a hand-edited
+    or stale row never takes the page down.
+    """
+    raw = (get_setting("graph_renderer") or "").strip().lower()
+    return raw if raw in GRAPH_RENDERER_VALUES else GRAPH_RENDERER_DEFAULT
 
 
 def cost_filters() -> dict | None:
@@ -13673,6 +13694,118 @@ def list_connected_hosts(
     return {"rows": rows, "facets": facets, "viewer_known": viewer_known}
 
 
+def _vector_plane(vectors: list) -> list:
+    """Two principal directions of the page vectors, squashed to the unit square.
+
+    ``None`` where a page has no vector. The shapes are not the point here — only which pages
+    land on the same side of the ball.
+    """
+    known = [i for i, vec in enumerate(vectors) if vec]
+    if len(known) < 3:
+        return [None] * len(vectors)
+    try:
+        import numpy as np
+
+        width = min(len(vectors[i]) for i in known)
+        matrix = np.array([vectors[i][:width] for i in known], dtype=float)
+        matrix -= matrix.mean(axis=0)
+        _, _, vt = np.linalg.svd(matrix, full_matrices=False)
+        flat = matrix @ vt[:2].T
+        scale = np.abs(flat).max(axis=0)
+        scale[scale == 0] = 1.0
+        flat = flat / scale
+    except Exception:
+        return [None] * len(vectors)
+    out: list = [None] * len(vectors)
+    for row, i in enumerate(known):
+        out[i] = (float(flat[row, 0]), float(flat[row, 1]))
+    return out
+
+
+def _stored_crystal_vectors() -> dict:
+    """Vectors already paid for, keyed by page id. Reading the graph never waits on the model.
+
+    Pages whose vector is not in hand are left out; the layout gives them a placeholder spot and
+    the ball trues up as the library's vectors arrive through the usual distill and merge work.
+    """
+    if _EMBED == "off":
+        return {}
+    model = (get_setting("model_embed") or "") if _embed_is_remote() else embed_model_id()
+    out: dict = {}
+    try:
+        rows = db().execute(
+            "SELECT id, vec_json, vec_model FROM crystallizations "
+            "WHERE status='active' AND vec_json IS NOT NULL"
+        )
+        for row in rows:
+            if row["vec_model"] != model:
+                continue
+            vec = json.loads(row["vec_json"])
+            if vec:
+                out[str(row["id"])] = vec
+    except Exception:
+        return out
+    return out
+
+
+def _sphere_positions(nodes: list[dict], edges: list[dict]) -> None:
+    """Place every page on a ball: radius from its hop count to the root, angle from its vector.
+
+    The ball is not decoration. Radius says how far a page sits from the centre of the memory;
+    the angle keeps pages that read alike on the same side of it. A page without a vector falls
+    back to a golden-angle spread so the shape never collapses into a plane.
+    """
+    import math
+
+    count = len(nodes)
+    if not count:
+        return
+    index = {str(node.get("id")): i for i, node in enumerate(nodes)}
+    adj: list[list[int]] = [[] for _ in range(count)]
+    degree = [0] * count
+    for edge in edges:
+        a = index.get(str(edge.get("src")))
+        b = index.get(str(edge.get("dst")))
+        if a is None or b is None or a == b:
+            continue
+        adj[a].append(b)
+        adj[b].append(a)
+        degree[a] += 1
+        degree[b] += 1
+    root = index.get("owner")
+    if root is None:
+        root = max(range(count), key=lambda i: degree[i])
+    hops = [-1] * count
+    hops[root] = 0
+    queue = [root]
+    head = 0
+    while head < len(queue):
+        node = queue[head]
+        head += 1
+        for nxt in adj[node]:
+            if hops[nxt] < 0:
+                hops[nxt] = hops[node] + 1
+                queue.append(nxt)
+    far = max((hop for hop in hops if hop >= 0), default=0) or 1
+    inner, outer = 26.0, 190.0
+    vectors = _stored_crystal_vectors()
+    plane = _vector_plane([vectors.get(str(node.get("id"))) for node in nodes])
+    golden = math.pi * (3 - math.sqrt(5))
+    for i, node in enumerate(nodes):
+        hop = hops[i] if hops[i] >= 0 else far
+        radius = inner + (outer - inner) * (hop / far)
+        pair = plane[i]
+        if pair is None:
+            polar = math.acos(max(-1.0, min(1.0, 1 - 2 * (i + 0.5) / count)))
+            azimuth = golden * i
+        else:
+            polar = math.acos(max(-1.0, min(1.0, -pair[1])))
+            azimuth = pair[0] * math.pi
+        node["x"] = round(radius * math.sin(polar) * math.cos(azimuth), 2)
+        node["y"] = round(radius * math.sin(polar) * math.sin(azimuth), 2)
+        node["z"] = round(radius * math.cos(polar), 2)
+
+
 def graph() -> dict:
     """Active pages and the links a reader can still follow.
 
@@ -13698,7 +13831,9 @@ def graph() -> dict:
               )
               {alive}"""
     ).fetchall()
-    return {"nodes": nodes, "edges": [dict(row) for row in list(mentions) + list(others)]}
+    edges = [dict(row) for row in list(mentions) + list(others)]
+    _sphere_positions(nodes, edges)
+    return {"nodes": nodes, "edges": edges}
 
 
 def _crystal_by_ref(ref: str):
@@ -14913,12 +15048,38 @@ def _crystal_embed_text(row) -> str:
 _CRYSTAL_VEC_CACHE: dict[str, tuple[str, list[float]]] = {}
 
 
+def _stored_crystal_vector(row, model: str, digest: str) -> list[float] | None:
+    """A page keeps its vector beside the text it came from; a different model or text is not reused."""
+    try:
+        if not row["vec_json"] or row["vec_digest"] != digest or row["vec_model"] != model:
+            return None
+        vec = json.loads(row["vec_json"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return vec or None
+
+
+def _save_crystal_vector(crystal_id: str, model: str, digest: str, vec: list[float]) -> None:
+    try:
+        db().execute(
+            "UPDATE crystallizations SET vec_json=?, vec_digest=?, vec_model=? WHERE id=?",
+            (json.dumps(vec), digest, model, crystal_id),
+        )
+        db().commit()
+    except Exception:
+        pass
+
+
 def _crystal_vector_rows() -> list[dict]:
-    """Embed each active page once per text. Distill must not re-embed the library every passage."""
+    """Embed each active page once per text. Distill must not re-embed the library every passage.
+
+    The vector is also written back to its row, so a restart — or the graph layout — does not pay
+    for the whole library again.
+    """
     if _EMBED == "off":
         return []
-    rows = list(db().execute("SELECT * FROM crystallizations WHERE status='active'"))
     model = (get_setting("model_embed") or "") if _embed_is_remote() else embed_model_id()
+    rows = list(db().execute("SELECT * FROM crystallizations WHERE status='active'"))
     pending: list[tuple[object, str, str, str]] = []
     packed: list[dict] = []
     for row in rows:
@@ -14928,6 +15089,11 @@ def _crystal_vector_rows() -> list[dict]:
         cached = _CRYSTAL_VEC_CACHE.get(cache_key)
         if cached and cached[0] == digest:
             packed.append({"id": row["id"], "type": row["type"], "name": row["name"] or "", "vec": cached[1]})
+            continue
+        stored = _stored_crystal_vector(row, model, digest)
+        if stored is not None:
+            _CRYSTAL_VEC_CACHE[cache_key] = (digest, stored)
+            packed.append({"id": row["id"], "type": row["type"], "name": row["name"] or "", "vec": stored})
             continue
         pending.append((row, cache_key, digest, text))
     if not pending:
@@ -14939,6 +15105,7 @@ def _crystal_vector_rows() -> list[dict]:
         if not vec:
             continue
         _CRYSTAL_VEC_CACHE[cache_key] = (digest, vec)
+        _save_crystal_vector(row["id"], model, digest, vec)
         packed.append({"id": row["id"], "type": row["type"], "name": row["name"] or "", "vec": vec})
     return packed
 
@@ -16081,6 +16248,7 @@ def basic_config() -> dict:
         "nas_path": nas_configured_path(),
         "graph_auto_labels": "1" if graph_auto_labels() else "0",
         "graph_label_budget": str(graph_label_budget()),
+        "graph_renderer": graph_renderer(),
         "passwordless": "1" if passwordless_enabled() else "0",
         "store_path": store["path"],
         "store_bytes": store["bytes"],
@@ -16128,6 +16296,14 @@ def save_basic(values: dict) -> dict:
         if budget_n < GRAPH_LABEL_BUDGET_MIN or budget_n > GRAPH_LABEL_BUDGET_MAX:
             return {"ok": False, "error": f"图谱同屏名称数要是 {GRAPH_LABEL_BUDGET_MIN} 到 {GRAPH_LABEL_BUDGET_MAX} 的整数"}
         label_budget = str(budget_n)
+    graph_render: str | None = None
+    if "graph_renderer" in incoming:
+        raw_render = str(incoming.get("graph_renderer") or "").strip().lower()
+        if raw_render == "2d":
+            raw_render = "cosmos"
+        if raw_render not in GRAPH_RENDERER_VALUES:
+            return {"ok": False, "error": "图谱渲染方式要是 3d 或 cosmos"}
+        graph_render = raw_render
     nas_path: str | None = None
     if "nas_path" in incoming:
         raw_nas = str(incoming.get("nas_path") or "").strip()
@@ -16146,7 +16322,7 @@ def save_basic(values: dict) -> dict:
         if raw_open not in {"", "0", "1", "on", "off", "true", "false", "yes", "no"}:
             return {"ok": False, "error": "免密登录要是 0 或 1"}
         passwordless = "1" if raw_open in {"1", "on", "true", "yes"} else "0"
-    if all(item is None for item in (sketch, budget, spin, appellation, auto_labels, label_budget, nas_path, passwordless)):
+    if all(item is None for item in (sketch, budget, spin, appellation, auto_labels, label_budget, graph_render, nas_path, passwordless)):
         return {"ok": True, "config": basic_config()}
     sessions_reset = passwordless == "0" and passwordless_enabled()
     with LOCK:
@@ -16162,6 +16338,8 @@ def save_basic(values: dict) -> dict:
             set_setting("graph_auto_labels", auto_labels)
         if label_budget is not None:
             set_setting("graph_label_budget", label_budget)
+        if graph_render is not None:
+            set_setting("graph_renderer", graph_render)
         if nas_path is not None:
             set_setting("nas_path", nas_path)
         if passwordless is not None:

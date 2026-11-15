@@ -13,6 +13,9 @@ def _open(tmp_path, monkeypatch):
     from rogmem import engine
 
     engine.connect(tmp_path, tmp_path / "scan")
+    # 这一组契约锁的是星图（cosmos）那套词条名层；三维渲染另有自己的契约。
+    # 默认已改成开，这里显式落成关，好让"关态零泄漏"的断言有意义。
+    engine.save_basic({"graph_renderer": "cosmos", "graph_auto_labels": "0"})
     return engine
 
 
@@ -55,7 +58,7 @@ def test_switch_off_is_default_for_backward_compat():
 def test_switch_on_includes_core_pieces():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True)
+    html = graph_mount("graph", focus=True, auto_labels=True, renderer="cosmos")
     for needle in AUTO_LABEL_FINGERPRINTS:
         assert needle in html, f"开态缺 {needle!r}"
     # 50 预算 + hover/focus 合并槽
@@ -79,7 +82,7 @@ def test_switch_on_binds_real_cosmos_events_only():
     """只许 onZoom*/onResize/onSimulationStart/End/visibilitychange/webglcontextlost；禁 onDragStart/End 冒名 pan 事件。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True)
+    html = graph_mount("graph", focus=True, auto_labels=True, renderer="cosmos")
     # 不得在自动标签层绑画布拖动——节点拖动的 onDragStart/End 存在但本层不应用它冒名 pan。
     # 允许整份 HTML 里出现 onDragStart（Cosmos 本体支持），只约束：自动标签脚本块里不出现。
     label_script = html.split("rogmemAutoLabels", 1)
@@ -89,7 +92,7 @@ def test_switch_on_binds_real_cosmos_events_only():
 def test_switch_on_has_visibility_change_handler():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True)
+    html = graph_mount("graph", focus=True, auto_labels=True, renderer="cosmos")
     assert "visibilitychange" in html
 
 
@@ -116,8 +119,8 @@ def test_admin_graph_route_wires_switch_value(tmp_path, monkeypatch):
 def test_graph_page_accepts_auto_labels_kwarg():
     from rogmem.ui import graph_page
 
-    off = graph_page(auto_labels=False)
-    on = graph_page(auto_labels=True)
+    off = graph_page(auto_labels=False, renderer="cosmos")
+    on = graph_page(auto_labels=True, renderer="cosmos")
     assert "findPointsInRect" not in off
     assert "findPointsInRect" in on
 

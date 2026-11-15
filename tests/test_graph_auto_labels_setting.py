@@ -1,4 +1,4 @@
-"""基础设置新增"图谱自动展示词条名"开关：默认关、可保存、校验、既有调用方不受影响。"""
+"""基础设置"图谱自动展示词条名"开关：默认开、可保存、校验、既有调用方不受影响。"""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ def _open(tmp_path, monkeypatch):
     return engine
 
 
-def test_default_is_off(tmp_path, monkeypatch):
+def test_default_is_on(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
-    assert engine.graph_auto_labels() is False
-    assert engine.basic_config()["graph_auto_labels"] == "0"
+    assert engine.graph_auto_labels() is True
+    assert engine.basic_config()["graph_auto_labels"] == "1"
 
 
 def test_save_basic_turns_it_on_and_off(tmp_path, monkeypatch):
@@ -88,7 +88,11 @@ def test_basic_page_checkbox_reflects_state(tmp_path, monkeypatch):
 
     off = basic_page(engine.basic_config())
     off_tag = _checkbox_tag(off)
-    assert "checked" not in off_tag, f"默认关态 checkbox 不该带 checked: {off_tag!r}"
+    assert "checked" in off_tag, f"默认开态 checkbox 应带 checked: {off_tag!r}"
+    engine.save_basic({"sketch_char_limit": "3500", "graph_auto_labels": "0"})
+    shut = basic_page(engine.basic_config())
+    shut_tag = _checkbox_tag(shut)
+    assert "checked" not in shut_tag, f"关态 checkbox 不该带 checked: {shut_tag!r}"
     engine.save_basic({"sketch_char_limit": "3500", "graph_auto_labels": "1"})
     on = basic_page(engine.basic_config())
     on_tag = _checkbox_tag(on)
