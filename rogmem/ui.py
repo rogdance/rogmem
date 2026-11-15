@@ -2256,13 +2256,14 @@ tr.draft input {{ width: 100%; }}
 .about-links li:last-child {{ border-bottom: 0; }}
 .about-links span {{ color: var(--text-muted); font-size: 12px; letter-spacing: 0; }}
 .about-links a {{ color: var(--link-color); word-break: break-all; }}
-.about-credits {{ border-top: 1px solid var(--border); padding: 16px 28px 4px; }}
-.about-credits .about-label {{ margin: 0; }}
+.about-credits {{ margin: 22px 28px 26px; padding: 18px 20px 8px; background: var(--surface-subtle); border: 1px solid var(--border); border-radius: 12px; }}
+.about-credits .about-label {{ margin: 0 0 8px; }}
 .about-credits ul {{ list-style: none; margin: 0; padding: 0; }}
 .about-credits li {{ display: grid; grid-template-columns: 12em minmax(0, 1fr); gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); align-items: baseline; }}
 .about-credits li:last-child {{ border-bottom: 0; }}
-.about-credits li > span {{ color: var(--text-muted); font-size: 12px; }}
-.about-credits a {{ color: var(--link-color); word-break: break-all; }}
+.about-credits li > span:first-child {{ color: var(--text-muted); font-size: 12px; }}
+.about-credits .about-credit-meta {{ min-width: 0; color: var(--text-secondary); overflow-wrap: anywhere; }}
+.about-credits a {{ color: var(--link-color); }}
 code, kbd, pre, samp {{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }}
 .src-body {{ max-width: 100%; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
 .wiki-article code {{ font-size: .92em; background: var(--surface-subtle); border-radius: 4px; padding: 1px 5px; }}
@@ -2404,8 +2405,8 @@ table.calls td.num, table.calls th.num {{ text-align: right; font-variant-numeri
   .about-versions > div {{ padding: 14px 16px; }}
   .about-links {{ padding: 0 16px; }}
   .about-links li {{ grid-template-columns: 1fr; gap: 2px; padding: 10px 0; }}
-  .about-credits {{ padding: 14px 16px 4px; }}
-  .about-credits li {{ grid-template-columns: 1fr; gap: 2px; }}
+  .about-credits {{ margin: 16px 16px 20px; padding: 14px 16px 6px; }}
+  .about-credits li {{ grid-template-columns: 1fr; gap: 4px; }}
   .board .panel {{ min-width: 0; }}
   .ov-filters {{ flex-wrap: wrap; row-gap: 8px; }}
   .ov-filters .tabs {{ min-width: 0; }}
@@ -10143,9 +10144,9 @@ def about_page(version: str, release: dict | None = None) -> str:
 <div class='about-credits'>
 <p class='about-label'>致谢</p>
 <ul>
-<li><span>WeKnora</span>Tencent · <a href='https://github.com/Tencent/WeKnora' target='_blank' rel='noopener'>https://github.com/Tencent/WeKnora</a></li>
-<li><span>@cosmos.gl/graph</span>cosmos.gl · <a href='https://github.com/cosmosgl/graph' target='_blank' rel='noopener'>https://github.com/cosmosgl/graph</a></li>
-<li><span>Techartist</span>Techartist · <a href='https://codepen.io/VoXelo/pen/dPMeGze' target='_blank' rel='noopener'>https://codepen.io/VoXelo/pen/dPMeGze</a></li>
+<li><span>WeKnora</span><span class='about-credit-meta'>Tencent · <a href='https://github.com/Tencent/WeKnora' target='_blank' rel='noopener'>https://github.com/Tencent/WeKnora</a></span></li>
+<li><span>@cosmos.gl/graph</span><span class='about-credit-meta'>cosmos.gl · <a href='https://github.com/cosmosgl/graph' target='_blank' rel='noopener'>https://github.com/cosmosgl/graph</a></span></li>
+<li><span>Techartist</span><span class='about-credit-meta'>Techartist · <a href='https://codepen.io/VoXelo/pen/dPMeGze' target='_blank' rel='noopener'>https://codepen.io/VoXelo/pen/dPMeGze</a></span></li>
 </ul>
 </div>
 </section>
