@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextvars
 import functools
 import hashlib
@@ -22,6 +23,10 @@ from rogmem import auth, cost, engine, rate_limit, ui
 from rogmem.version import product_version
 
 mcp = FastMCP("rogmem", stateless_http=True, json_response=True, host="0.0.0.0")
+# Core and the door check do not use the default pool. A stuck opening read must not be what /healthz waits on.
+_TOOL_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="rogmem-tool")
+_GATE_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="rogmem-gate")
+_CORE_DEADLINE = 8
 _COOKIE = "rogmem_admin"
 CURRENT = contextvars.ContextVar("agent", default=None)
 
@@ -205,7 +210,8 @@ async def index_html(request: Request) -> Response:
 
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(_request: Request) -> Response:
-    return JSONResponse(await asyncio.to_thread(engine.health))
+    # On the event loop, from memory. A core call must not be what keeps this from answering.
+    return JSONResponse(engine.health_snapshot())
 
 
 def _client_response(payload: bytes | None) -> Response:
@@ -1462,13 +1468,23 @@ def off_loop(fn):
     return wrapped
 
 
-@mcp.tool()
-@off_loop
-def core(budget: int = 0, project: str = "", before: str = "") -> str:
-    """装入历史包。budget 为 0 时用基础设置里的新会话字数。本对话已有成功返回时禁止再调，除非 before 是上次给出的续读位置。"""
+def _run_core(budget: int, project: str, before: str) -> str:
     payload = engine.core_memory(engine.core_budget_for(budget), project, before=before)
     _count_memory_read()
     return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+async def core(budget: int = 0, project: str = "", before: str = "") -> str:
+    """装入历史包。budget 为 0 时用基础设置里的新会话字数。本对话已有成功返回时禁止再调，除非 before 是上次给出的续读位置。"""
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_TOOL_POOL, _run_core, budget, project, before),
+            timeout=_CORE_DEADLINE,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("core timed out") from exc
 
 
 @mcp.tool()
@@ -1676,7 +1692,11 @@ class BearerGate:
             headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
             token = headers.get("authorization", "")
             device = headers.get("x-rogmem-device")
-            agent = engine.agent_by_token(token[7:], device) if token.startswith("Bearer ") else None
+            agent = None
+            if token.startswith("Bearer "):
+                agent = await asyncio.get_running_loop().run_in_executor(
+                    _GATE_POOL, engine.agent_by_token, token[7:], device
+                )
             if agent is not None:
                 try:
                     client = scope.get("client")

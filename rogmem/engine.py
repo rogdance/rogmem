@@ -287,6 +287,8 @@ _DATA: Path | None = None
 _SCAN: Path | None = None
 _VECS: list[tuple[int, list[float]]] = []
 _EMBED = "off"
+_HUB_PUBLIC = ""
+_PASSWORD_READY = False
 _MODEL = None
 _EMBED_GATE = threading.Lock()
 _VECTOR_CATCHUP = threading.Lock()
@@ -710,6 +712,7 @@ def connect(data: Path, scan: Path) -> None:
         cost_mod._start_board_refresher()
     except Exception:
         pass
+    _remember_liveness()
     # Leave autocommit. A later request thread mints hub_id; an open write here blocks it.
     con.commit()
 
@@ -819,6 +822,7 @@ def ensure_password() -> None:
     set_setting("admin_password_generation", "1")
     set_setting("admin_password_pending", "1")
     db().commit()
+    _remember_liveness()
 
 
 def admin_login(password: str) -> bool:
@@ -880,6 +884,7 @@ def change_password(current: str, new: str, confirm: str | None = None) -> dict:
         set_setting("admin_password_pending", "0")
         set_setting("admin_password_user_set", "1")
         db().commit()
+        _remember_liveness()
     marker = _data_dir() / "admin.password"
     if marker.is_file():
         marker.unlink()
@@ -1033,14 +1038,45 @@ def hub_id() -> str:
         return minted
 
 
+def _remember_liveness() -> None:
+    """Cache what /healthz is allowed to say. The request itself must not open the database."""
+    global _HUB_PUBLIC, _PASSWORD_READY
+    try:
+        _HUB_PUBLIC = hub_id()
+    except Exception:
+        _HUB_PUBLIC = _HUB_PUBLIC or ""
+    try:
+        _PASSWORD_READY = bool(get_setting("admin_password"))
+    except Exception:
+        pass
+
+
+def health_snapshot() -> dict:
+    """Process liveness. No database, no thread pool, so a slow core cannot hide this answer."""
+    from rogmem.version import product_version
+
+    return {
+        "ok": True,
+        "service": "rogmem",
+        "hub": _HUB_PUBLIC,
+        "version": product_version(),
+        "embed": _EMBED,
+        "scan": str(_SCAN or ""),
+        "password_ready": _PASSWORD_READY,
+        "distill_concurrency": distill_concurrency(),
+        "distill_leased": 0,
+    }
+
+
 def health() -> dict:
     ok = True
     leased = 0
-    identity = ""
+    identity = _HUB_PUBLIC
     try:
         db().execute("SELECT 1").fetchone()
         leased = db().execute("SELECT COUNT(*) AS n FROM queue WHERE state='leased'").fetchone()["n"]
         identity = hub_id()
+        _remember_liveness()
     except Exception:
         ok = False
     from rogmem.version import product_version
@@ -1052,7 +1088,7 @@ def health() -> dict:
         "version": product_version(),
         "embed": _EMBED,
         "scan": str(_SCAN),
-        "password_ready": password_ready() if ok else False,
+        "password_ready": _PASSWORD_READY if ok else False,
         "distill_concurrency": distill_concurrency(),
         "distill_leased": leased if ok else 0,
     }
@@ -10639,16 +10675,29 @@ def _clip_spoken(text: str, kind: str) -> str:
     return body
 
 
-def _copy_cell_prefix(con: sqlite3.Connection, table: str, column: str, rowid: int) -> str:
-    """Copy a bounded prefix into memory for the opening table. Not used by core."""
+def _copy_cell_prefix(table: str, column: str, rowid: int) -> str:
+    """Read a bounded prefix on a private read-only connection, then close it.
+
+    core and healthz do not use this connection. The write of the short row
+    happens only after this connection is gone.
+    """
+    path = _data_dir() / "rogmem.sqlite"
     try:
-        blob = con.blobopen(table, column, rowid, readonly=True)
-    except sqlite3.OperationalError:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1, check_same_thread=False)
+    except sqlite3.Error:
         return ""
     try:
-        raw = blob.read(_OPENING_KEEP * 4)
+        con.execute("PRAGMA query_only=ON")
+        try:
+            blob = con.blobopen(table, column, rowid, readonly=True)
+        except sqlite3.OperationalError:
+            return ""
+        try:
+            raw = blob.read(_OPENING_KEEP * 4)
+        finally:
+            blob.close()
     finally:
-        blob.close()
+        con.close()
     return raw.decode("utf-8", errors="ignore")[:_OPENING_KEEP]
 
 
@@ -10688,10 +10737,8 @@ def backfill_openings(limit: int = 1) -> int:
         exists = con.execute("SELECT 1 FROM crystal_openings WHERE id=?", (row[1],)).fetchone()
         con.commit()
         if exists is None:
-            sketch = _copy_cell_prefix(con, "crystallizations", "sketch_md", row[0])
-            con.commit()
-            body = _copy_cell_prefix(con, "crystallizations", "body_md", row[0])
-            con.commit()
+            sketch = _copy_cell_prefix("crystallizations", "sketch_md", row[0])
+            body = _copy_cell_prefix("crystallizations", "body_md", row[0])
             repo = ""
             found = con.execute(
                 """SELECT text FROM statements
@@ -10716,20 +10763,18 @@ def backfill_openings(limit: int = 1) -> int:
         steps += 1
         cursor = _opening_cursor("opening_source_rowid")
         row = con.execute(
-            """SELECT rowid, id, IFNULL(kind, ''), IFNULL(event_at, ''), IFNULL(project_ref, ''),
-                      redacted
+            """SELECT rowid, id, IFNULL(kind, ''), IFNULL(event_at, ''), IFNULL(project_ref, '')
                FROM sources WHERE rowid>? ORDER BY rowid LIMIT 1""",
             (cursor,),
         ).fetchone()
         con.commit()
         if row is None:
             break
-        spoken = row[5] == 0 and row[2] in {"user", "agent"}
+        spoken = row[2] in {"user", "agent"}
         exists = con.execute("SELECT 1 FROM source_openings WHERE id=?", (row[1],)).fetchone()
         con.commit()
         if spoken and exists is None:
-            excerpt = _copy_cell_prefix(con, "sources", "body", row[0])
-            con.commit()
+            excerpt = _copy_cell_prefix("sources", "body", row[0])
             con.execute(
                 """INSERT INTO source_openings(id, kind, event_at, project_ref, excerpt)
                    VALUES (?,?,?,?,?)
@@ -10931,6 +10976,8 @@ def core_memory(
     before: str = "",
     now: str | datetime | None = None,
 ) -> dict:
+    # A locked archive must fail this call quickly. It must not sit until the client gives up.
+    db().execute("PRAGMA busy_timeout=1000")
     row = db().execute(
         "SELECT name, sketch, body FROM crystal_openings WHERE id='owner'"
     ).fetchone()

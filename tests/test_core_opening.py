@@ -268,6 +268,15 @@ def test_a_large_turn_is_not_opened_from_the_archive(tmp_path, monkeypatch):
     assert "from sources" not in "\n".join(seen).lower()
 
 
+def test_health_snapshot_does_not_open_the_database(tmp_path, monkeypatch):
+    engine = _open(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "db", lambda: (_ for _ in ()).throw(AssertionError("health opened the database")))
+    snap = engine.health_snapshot()
+    assert snap["ok"] is True
+    assert snap["service"] == "rogmem"
+    assert snap["version"]
+
+
 def test_opening_does_not_read_thick_leftover_columns(tmp_path, monkeypatch):
     """A history packet hydrates the thin page. chapters_json and summary_json stay on disk."""
     engine = _open(tmp_path, monkeypatch)
