@@ -245,6 +245,22 @@ def test_a_new_session_uses_the_configured_core_budget(tmp_path, monkeypatch):
     assert store["path"] in page
     assert 'name="store_path"' not in page
 
+def test_a_large_turn_is_not_opened_from_the_archive(tmp_path, monkeypatch):
+    """The opening packet reads the stored prefix. A long archive body stays on disk."""
+    engine = _open(tmp_path, monkeypatch)
+    _turn(engine, "huge", "user", "巨" * 1_500_000, "2026-02-02T00:00:00+00:00")
+    engine.db().execute("UPDATE sources SET excerpt='' WHERE id='huge'")
+    engine.db().commit()
+    seen: list[str] = []
+    engine.db().set_trace_callback(lambda sql: seen.append(" ".join(sql.split())))
+    loaded, truncated, _ = engine._pack_recent(80, "", "")
+    engine.db().set_trace_callback(None)
+    joined = "\n".join(seen).lower()
+    assert "substr(body" not in joined
+    assert any(item["text"].startswith("用户：巨") for item in loaded)
+    assert truncated is True
+
+
 def test_opening_does_not_read_thick_leftover_columns(tmp_path, monkeypatch):
     """A history packet hydrates the thin page. chapters_json and summary_json stay on disk."""
     engine = _open(tmp_path, monkeypatch)

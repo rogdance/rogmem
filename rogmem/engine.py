@@ -422,6 +422,8 @@ def connect(data: Path, scan: Path) -> None:
         con.execute("ALTER TABLE sources ADD COLUMN body_chars INTEGER NOT NULL DEFAULT 0")
     if "body_preview" not in source_columns:
         con.execute("ALTER TABLE sources ADD COLUMN body_preview TEXT NOT NULL DEFAULT ''")
+    if "excerpt" not in source_columns:
+        con.execute("ALTER TABLE sources ADD COLUMN excerpt TEXT NOT NULL DEFAULT ''")
     con.execute(
         """CREATE TABLE IF NOT EXISTS source_cards (
              id TEXT PRIMARY KEY,
@@ -508,6 +510,27 @@ def connect(data: Path, scan: Path) -> None:
                body_chars=excluded.body_chars,
                body_preview=excluded.body_preview;
            END"""
+    )
+    # The opening packet reads this prefix. It does not go back to the archive body.
+    con.execute("DROP TRIGGER IF EXISTS sources_excerpt_insert")
+    con.execute("DROP TRIGGER IF EXISTS sources_excerpt_update")
+    con.execute(
+        f"""CREATE TRIGGER sources_excerpt_insert
+            AFTER INSERT ON sources
+            WHEN IFNULL(NEW.excerpt, '') = ''
+            BEGIN
+              UPDATE sources SET excerpt = substr(NEW.body, 1, {_OPENING_KEEP}) WHERE id = NEW.id;
+            END"""
+    )
+    con.execute(
+        f"""CREATE TRIGGER sources_excerpt_update
+            AFTER UPDATE OF body ON sources
+            BEGIN
+              UPDATE sources SET excerpt = substr(NEW.body, 1, {_OPENING_KEEP}) WHERE id = NEW.id;
+            END"""
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS crystallizations_name ON crystallizations(name, status)"
     )
     statement_columns = {row[1] for row in con.execute("PRAGMA table_info(statements)")}
     if "home_crystal" not in statement_columns:
@@ -10456,6 +10479,8 @@ FILE_TYPES = ("txt", "md", "markdown", "pdf", "docx", "pptx", "xlsx", "xls", "cs
 DOCUMENT_MAX_BYTES = 1024 * 1024 * 1024
 REPLY_CLIP = 200
 _CLIP_MARK = "（此条已截断）"
+# Characters kept beside the archive so an opening read never opens the whole turn.
+_OPENING_KEEP = 15000
 
 
 def _parse_before(before: str) -> tuple[str, str]:
@@ -10513,13 +10538,36 @@ def _recent_identity(before_at: str, before_id: str, limit: int, offset: int):
 
 
 def _spoken_prefix(source_id: str, kind: str, room: int) -> str:
-    """Return the prefix the packer can still show. Rows the budget never reaches are not opened."""
+    """Return the prefix the packer can still show. The archive body stays unread.
+
+    The prefix was copied when the turn was written. A row from before that copy
+    can still use a known-small body, or the card preview. An unknown or large
+    archive is not opened on this read.
+    """
     need = REPLY_CLIP + _PREFIX_SLACK if kind == "agent" else max(room, 0) + _PREFIX_SLACK
+    need = min(need, _OPENING_KEEP)
     row = db().execute(
-        "SELECT substr(body, 1, ?) AS body FROM sources WHERE id=?",
+        "SELECT substr(excerpt, 1, ?) AS body FROM sources WHERE id=?",
         (need, source_id),
     ).fetchone()
-    body = redact_text(((row["body"] if row else "") or "").strip())
+    body = ((row["body"] if row else "") or "").strip()
+    if not body:
+        card = db().execute(
+            "SELECT body_chars, body_preview FROM source_cards WHERE id=?",
+            (source_id,),
+        ).fetchone()
+        chars = int(card["body_chars"] or 0) if card is not None else 0
+        if card is not None and 0 < chars <= need:
+            row = db().execute(
+                "SELECT substr(body, 1, ?) AS body FROM sources WHERE id=?",
+                (need, source_id),
+            ).fetchone()
+            body = ((row["body"] if row else "") or "").strip()
+        elif card is not None:
+            body = (card["body_preview"] or "").strip()
+    if not body:
+        return ""
+    body = redact_text(body)
     if kind == "agent" and len(body) > REPLY_CLIP:
         body = body[:REPLY_CLIP].rstrip() + _CLIP_MARK
     return body
@@ -11928,12 +11976,13 @@ def _crystal_row_by_name(name: str):
     wanted = (name or "").strip()
     if not wanted:
         return None
+    columns = _THIN_CRYSTAL + ", body_md"
     if wanted in {"记忆主人", "owner"}:
-        row = db().execute("SELECT * FROM crystallizations WHERE id='owner'").fetchone()
+        row = db().execute(f"SELECT {columns} FROM crystallizations WHERE id='owner'").fetchone()
         if row is not None:
             return row
     return db().execute(
-        "SELECT * FROM crystallizations WHERE name=? AND status='active'",
+        f"SELECT {columns} FROM crystallizations WHERE name=? AND status='active'",
         (wanted,),
     ).fetchone()
 
