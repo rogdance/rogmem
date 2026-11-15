@@ -1,0 +1,31 @@
+# 粘贴到极空间：Docker，Compose，新建项目，名称填 rogmem。
+# 已有同名项目时不要重建，不要删除 rogmem-data 或 rogmem-scan。
+# 镜像在你自己的电脑上构建并导入，不要在 NAS 上编译，也不要把业务源码打进这份文件。
+#   docker buildx build --load --platform linux/amd64 -t rogmem:local .
+# 示例资源是保守默认（2 核、4G、预算 0.5）。6 核、12G、预算 0.75 只属于一台 8 核 16GB 的机器，不要抄到更小的机器上。
+# 这是开源示例。不要用它覆盖 rogmem-dev 上已经在跑的生产项目。
+# 向量模型在构建镜像时放进 /opt/fastembed。构建机必须能下载 BAAI/bge-small-zh-v1.5。HF_ENDPOINT 是构建参数。
+# 启动后用你自己打开的入口看 /healthz。端口只有 18080:18080。
+# 首次启动在数据卷写入 admin.password。用这一次明文登录。不要设置 ROGMEM_NO_PASSWORD。
+services:
+  rogmem:
+    image: rogmem:local
+    container_name: rogmem
+    restart: unless-stopped
+    cpus: "2.0"
+    mem_limit: 4g
+    ports:
+      - "18080:18080"
+    environment:
+      PORT: "18080"
+      ROGMEM_RELEASE: "PUB"
+      ROGMEM_BUDGET: "0.5"
+      ROGMEM_DATA: /data
+      ROGMEM_SCAN: /scan
+      HF_ENDPOINT: https://hf-mirror.com
+    volumes:
+      - rogmem-data:/data
+      - rogmem-scan:/scan
+volumes:
+  rogmem-data:
+  rogmem-scan:

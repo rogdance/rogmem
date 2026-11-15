@@ -1,0 +1,1980 @@
+"""HTTP service: health, admin, enroll, and stateless MCP."""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import functools
+import hashlib
+import inspect
+import json
+import os
+import secrets
+import threading
+import time
+from pathlib import Path
+
+from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+
+from rogmem import auth, cost, engine, rate_limit, ui
+from rogmem.version import product_version
+
+mcp = FastMCP("rogmem", stateless_http=True, json_response=True, host="0.0.0.0")
+_COOKIE = "rogmem_admin"
+CURRENT = contextvars.ContextVar("agent", default=None)
+
+
+def _secret() -> bytes:
+    path = Path(os.environ["ROGMEM_DATA"]) / "cookie.key"
+    if not path.exists():
+        path.write_bytes(os.urandom(32))
+        os.chmod(path, 0o600)
+    generation = engine.get_setting("admin_password_generation") or "0"
+    return hashlib.sha256(path.read_bytes() + b"|" + generation.encode()).digest()
+
+
+def _password_bypass() -> bool:
+    raw = os.environ.get("ROGMEM_DATA", "").strip()
+    if not raw:
+        return False
+    return auth.allow_password_bypass(Path(raw))
+
+
+def _admin_ok(request: Request) -> bool:
+    """管理页和 /admin/api/* 在需要口令时才查登录会话。
+
+    免密登录默认开启，首次进入不检查口令。用户在基础设置里设了密码，或关掉免密，
+    管理写操作才检查口令。临时目录里的 ROGMEM_NO_PASSWORD=1 仍是测试口。
+    /healthz、/mcp、/host-bootstrap、/host-client.whl 不经过这里。
+    """
+    if _password_bypass():
+        return True
+    try:
+        if not engine.admin_password_required():
+            return True
+    except (KeyError, OSError, RuntimeError):
+        return False
+    token = request.cookies.get(_COOKIE, "")
+    if not token:
+        return False
+    try:
+        return auth.verify_cookie(_secret(), token) == "ok"
+    except (KeyError, OSError):
+        return False
+
+
+def _login_page() -> str:
+    return ui.login_page()
+
+
+_CSRF_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _normalized_origin(url: str) -> tuple[str, str, int] | None:
+    """Scheme + hostname + effective port，低大小写归一（评审 R2 P2-9）。
+    返回 None 表示 URL 不规范（空、无 scheme、带 userinfo 等），应直接拒绝。
+    """
+    from urllib.parse import urlsplit
+
+    if not url:
+        return None
+    try:
+        p = urlsplit(url)
+        scheme = (p.scheme or "").lower()
+        if scheme not in {"http", "https"}:
+            return None
+        if p.username or p.password:
+            # 带 userinfo 的 Origin 一律视作异常，拒绝
+            return None
+        host = (p.hostname or "").lower()
+        if not host:
+            return None
+        # .port 对非数字或超出 0–65535 的端口抛 ValueError，按无法辨认拒绝。
+        port = p.port if p.port is not None else (443 if scheme == "https" else 80)
+    except (ValueError, UnicodeError):
+        return None
+    return (scheme, host, port)
+
+
+def _same_origin_or_safe(request: Request) -> bool:
+    """CSRF 防线（不是身份认证）。
+
+    管理台经常从本机门口或极空间远程入口打开。反代改写 Host 之后，浏览器的
+    Origin 和中枢自己的地址不是同一个，本页按钮会被误判成跨站。
+
+    浏览器在 Sec-Fetch-Site 里写的是页面和这次请求的关系，页面改不了这个头。
+    只有 same-origin 表示请求就从这页发出。同一父域的另一个源是 same-site，
+    仍然拒绝。不读 X-Forwarded-Host：这个头客户端自己就能填，不拿来放行。
+
+    没有这个头时，仍要求 Origin 或 Referer 与中枢自己的地址一致。作业端点在
+    两者都没有时拒绝。非浏览器在可信网络里伪造请求头，不在这道防线里。
+    """
+    if request.method not in _CSRF_METHODS:
+        return True
+    origin_hdr = request.headers.get("origin", "").strip()
+    if origin_hdr and origin_hdr.lower() == "null":
+        return False
+    site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    if site == "same-origin":
+        return True
+    if site in {"cross-site", "same-site"}:
+        return False
+    expected = _normalized_origin(str(request.base_url))
+    if expected is None:
+        return False
+    referer_hdr = request.headers.get("referer", "").strip()
+    if origin_hdr:
+        got = _normalized_origin(origin_hdr)
+        return got is not None and got == expected
+    if referer_hdr:
+        got = _normalized_origin(referer_hdr)
+        return got is not None and got == expected
+    if request.url.path.startswith("/admin/api/hosts/jobs"):
+        return False
+    return True
+
+
+def _device(request: Request) -> str | None:
+    return request.headers.get("x-rogmem-device")
+
+
+def _viewing_computer(request: Request) -> tuple[str, str]:
+    """The computer opening this page, when the request can prove it.
+
+    The local door sends the saved identity. A page opened straight at the hub
+    has no such header; a private address that this computer just proved with
+    its own key is the same computer. A tunnel or a public proxy is not.
+    """
+    from rogmem.device_identity import read_device_name_header
+
+    viewer_id = (_device(request) or "").strip()
+    viewer_name = read_device_name_header(request.headers.get("x-rogmem-device-name") or "")
+    if not viewer_id and request.client is not None:
+        viewer_id = engine.viewer_for_peer(request.client.host or "")
+    return viewer_id, viewer_name
+
+
+def _requested_device_name(request: Request, extra: str = "") -> str:
+    header = (request.headers.get("x-rogmem-device-name") or "").strip()
+    return engine.resolve_device_name(header or extra or None)
+
+
+def _bearer(request: Request):
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Bearer "):
+        return None
+    return engine.agent_by_token(header[7:], _device(request))
+
+
+def _mark_channel(response: Response) -> Response:
+    ui.CHANNEL.set(True)
+    response.set_cookie("rogmem_channel", "1", path="/", samesite="lax")
+    return response
+
+
+def _graph_label_flags() -> tuple[bool, int]:
+    """记忆图谱和结晶页关联图谱共用这一对设置，不另做开关。"""
+    return engine.graph_auto_labels(), engine.graph_label_budget()
+
+
+def _graph_document() -> str:
+    """The console front door. Remote open and /admin/graph render this same page."""
+    auto_labels, label_budget = _graph_label_flags()
+    return ui.graph_page(auto_labels=auto_labels, label_budget=label_budget)
+
+
+async def channel_home(request: Request) -> Response:
+    """Remote open loads /. The graph is the admin door, so it needs the password session."""
+    if not _admin_ok(request):
+        return RedirectResponse("/admin/login", status_code=302)
+    ui.CHANNEL.set(True)
+    return _mark_channel(HTMLResponse(_graph_document()))
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def root(request: Request) -> Response:
+    return await channel_home(request)
+
+
+@mcp.custom_route("/index.html", methods=["GET"])
+async def index_html(request: Request) -> Response:
+    return await channel_home(request)
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_request: Request) -> Response:
+    return JSONResponse(await asyncio.to_thread(engine.health))
+
+
+def _client_response(payload: bytes | None) -> Response:
+    from rogmem.host_client import bundle_filename
+
+    if not payload:
+        return JSONResponse({"ok": False, "error": "宿主客户端不在这个服务里"}, status_code=404)
+    return Response(
+        payload,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{bundle_filename()}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@mcp.custom_route("/host-client", methods=["GET"])
+async def host_client(request: Request) -> Response:
+    return await host_client_whl(request)
+
+
+@mcp.custom_route("/host-client.whl", methods=["GET"])
+async def host_client_whl(_request: Request) -> Response:
+    """The computer being enrolled installs this wheel from the same origin as /healthz."""
+    from rogmem.host_client import bundle_bytes
+
+    payload = await asyncio.to_thread(bundle_bytes)
+    return _client_response(payload)
+
+
+@mcp.custom_route("/host-bootstrap", methods=["GET"])
+async def host_bootstrap(_request: Request) -> Response:
+    """Stdlib installer. It runs before python -m rogmem exists."""
+    from rogmem import host_bootstrap as bootstrap
+
+    text = Path(bootstrap.__file__).read_text(encoding="utf-8")
+    return Response(text, media_type="text/x-python; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
+@mcp.custom_route("/client/open-browser", methods=["GET"])
+async def open_browser(request: Request) -> Response:
+    """NAS cannot open the visitor's browser. The local installer proxy does that before forwarding."""
+    del request
+    return Response(status_code=204)
+
+
+@mcp.custom_route("/enroll/apply", methods=["POST"])
+async def enroll_apply(request: Request) -> Response:
+    data = await request.json()
+    result = engine.enroll_apply(
+        data["device_id"],
+        engine.resolve_device_name(data.get("device_name")),
+        data["program"],
+        data["pubkey"],
+    )
+    return JSONResponse(result, status_code=200 if result.get("ok") else 403)
+
+
+@mcp.custom_route("/enroll/reclaim", methods=["POST"])
+async def enroll_reclaim(request: Request) -> Response:
+    data = await request.json()
+    result = engine.enroll_reclaim(
+        str(data.get("pubkey") or ""),
+        str(data.get("device_id") or ""),
+        str(data.get("program") or ""),
+    )
+    return JSONResponse(result, status_code=200 if result.get("ok") else 403)
+
+
+@mcp.custom_route("/enroll/redeem", methods=["POST"])
+async def enroll_redeem(request: Request) -> Response:
+    data = await request.json()
+    result = engine.redeem_enroll_grant(
+        str(data.get("grant") or ""),
+        str(data.get("device_id") or ""),
+        engine.resolve_device_name(data.get("device_name")),
+        str(data.get("program") or ""),
+        str(data.get("pubkey") or ""),
+    )
+    return JSONResponse(result, status_code=200 if result.get("ok") else 403)
+
+
+@mcp.custom_route("/admin/api/enroll-grants", methods=["POST"])
+async def admin_enroll_grant(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    from rogmem.onboard import HUB_MARK, onboard_prompt
+
+    minted = await asyncio.to_thread(engine.create_enroll_grant)
+    identity = await asyncio.to_thread(engine.hub_id)
+    prompt = await asyncio.to_thread(onboard_prompt, minted["secret"])
+    prompt = prompt.replace(HUB_MARK, identity)
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": minted["id"],
+            "secret": minted["secret"],
+            "expires_at": minted["expires_at"],
+            "hub": identity,
+            "prompt": prompt,
+        }
+    )
+
+
+@mcp.custom_route("/enroll/claim", methods=["POST"])
+async def enroll_claim(request: Request) -> Response:
+    data = await request.json()
+    result = engine.enroll_claim(data["pubkey"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 403)
+
+
+@mcp.custom_route("/admin/login", methods=["GET", "POST"])
+async def admin_login(request: Request) -> Response:
+    if request.method == "GET":
+        # 已经登录就进记忆图谱。还没有会话时停在口令页，不再跳过口令。
+        if _admin_ok(request):
+            return RedirectResponse("/admin/graph", status_code=302)
+        return HTMLResponse(_login_page())
+    data = await _body(request)
+    password = str(data.get("password") or "")
+    if not engine.admin_login(password):
+        return JSONResponse({"ok": False, "error": "口令不对"}, status_code=401)
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        _COOKIE,
+        auth.sign_cookie(_secret(), "ok"),
+        httponly=True,
+        samesite="lax",
+        path="/",
+        max_age=86400 * 14,
+    )
+    return response
+
+
+@mcp.custom_route("/admin", methods=["GET"])
+async def admin_home(_request: Request) -> Response:
+    # 默认入口进"记忆图谱"（t205）。深链 /admin/<page> 自身路由不走这里。
+    return RedirectResponse("/admin/graph", status_code=302)
+
+
+def _guard(request: Request) -> Response | None:
+    if _admin_ok(request):
+        return None
+    if request.url.path.startswith("/admin/api/"):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    return RedirectResponse("/admin/login", status_code=302)
+
+
+@mcp.custom_route("/admin/sources", methods=["GET"])
+async def admin_sources(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    tab = request.query_params.get("tab", "session")
+    filters = {
+        key: request.query_params.get(key, "")
+        for key in ("q", "kind", "device", "agent", "project", "status", "session", "turn")
+    }
+    try:
+        page_no = int(request.query_params.get("page") or "1")
+    except ValueError:
+        page_no = 1
+    return await asyncio.to_thread(_sources_response, tab, filters, page_no)
+
+
+def _sources_response(tab: str, filters: dict, page_no: int) -> HTMLResponse:
+    listed = engine.list_sources(
+        tab,
+        query=filters["q"],
+        kind=filters["kind"],
+        device=filters["device"],
+        agent=filters["agent"],
+        project=filters["project"],
+        status=filters["status"],
+        session=filters["session"],
+        turn=filters["turn"],
+        page=page_no,
+    )
+    return HTMLResponse(ui.sources_page(listed["rows"], tab, filters, engine.source_facets(tab), listed))
+
+
+def _import_receipt(item: dict) -> dict:
+    """A committed import is a list row. A duplicate already has its row."""
+    receipt = dict(item)
+    source_id = str(item.get("id") or "")
+    if not source_id or item.get("duplicate"):
+        return receipt
+    row = engine.db().execute(
+        """SELECT id, kind, filename, device_name, agent_name, project_ref, ingested_at,
+                  status, pipeline, last_error, redacted, coverage
+           FROM sources WHERE id=?""",
+        (source_id,),
+    ).fetchone()
+    if row is None:
+        return receipt
+    shown = dict(row)
+    shown["note"] = engine.list_note(shown)
+    receipt["row_html"] = ui.source_row_html(shown, "file")
+    return receipt
+
+
+def _too_large_receipt() -> JSONResponse:
+    item = {"ok": False, "error": "文件太大"}
+    return JSONResponse({"ok": False, "error": "文件太大", "imported": [item]}, status_code=413)
+
+
+def _land_upload(name: str, upload, label: str) -> dict:
+    """Write one upload onto disk, then read that file. Do not hold the whole body."""
+    safe = Path(name).name
+    root = engine.active_scan()
+    if root is None:
+        return {"ok": False, "error": "没有扫描目录", "filename": safe}
+    root.mkdir(parents=True, exist_ok=True)
+    staged = root / f".part-{secrets.token_hex(8)}"
+    try:
+        handle = getattr(upload, "file", None)
+        if handle is None:
+            return {"ok": False, "error": "没有文件", "filename": safe}
+        handle.seek(0)
+        total = 0
+        with staged.open("wb") as out:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > engine.DOCUMENT_MAX_BYTES:
+                    return {"ok": False, "error": "文件太大", "filename": safe}
+                out.write(chunk)
+        return _import_receipt(engine.ingest_saved(safe, staged, label))
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+@mcp.custom_route("/admin/api/sources/import", methods=["POST"])
+async def import_sources(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    raw_length = request.headers.get("content-length", "")
+    if raw_length.isdigit() and int(raw_length) > engine.DOCUMENT_MAX_BYTES + 65536:
+        return _too_large_receipt()
+    form = await request.form()
+    uploads = form.getlist("files")
+    if not uploads:
+        return JSONResponse({"ok": False, "error": "没有文件"}, status_code=400)
+    label = _requested_device_name(request, str(form.get("device_name") or ""))
+    imported = []
+    for upload in uploads:
+        name = getattr(upload, "filename", "") or ""
+        imported.append(await asyncio.to_thread(_land_upload, name, upload, label))
+    failed = [item for item in imported if not item.get("ok")]
+    return JSONResponse({"ok": not failed or any(item.get("ok") for item in imported), "imported": imported})
+
+
+def _nas_http(result: dict) -> JSONResponse:
+    if "imported" in result:
+        copied = dict(result)
+        copied["imported"] = [_import_receipt(item) for item in result["imported"]]
+        return JSONResponse(copied)
+    if result.get("ok") or result.get("error") == "极空间目录还没挂进容器":
+        return JSONResponse(result)
+    return JSONResponse(result, status_code=400)
+
+
+@mcp.custom_route("/admin/api/sources/nas", methods=["GET"])
+async def list_import_nas(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    raw_offset = request.query_params.get("offset", "")
+    try:
+        offset = int(raw_offset) if str(raw_offset).strip() else 0
+    except ValueError:
+        offset = 0
+    result = await asyncio.to_thread(engine.list_nas, request.query_params.get("path", ""), offset)
+    return _nas_http(result)
+
+
+@mcp.custom_route("/admin/api/sources/import-nas", methods=["POST"])
+async def import_from_nas(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    has_paths = "paths" in data
+    has_dir = "dir" in data
+    if has_paths == has_dir:
+        return JSONResponse({"ok": False, "error": "没有文件"}, status_code=400)
+    label = _requested_device_name(request, str(data.get("device_name") or ""))
+    if has_paths:
+        paths = data.get("paths")
+        if not isinstance(paths, list) or not paths:
+            return JSONResponse({"ok": False, "error": "没有文件"}, status_code=400)
+        result = await asyncio.to_thread(engine.import_nas, paths, label)
+    else:
+        folder = data.get("dir")
+        if not isinstance(folder, str):
+            return JSONResponse({"ok": False, "error": "没有文件"}, status_code=400)
+        result = await asyncio.to_thread(engine.import_nas_dir, folder, label)
+    return _nas_http(result)
+
+
+@mcp.custom_route("/admin/sources/{sid}", methods=["GET"])
+async def admin_source(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    detail = engine.source_detail(request.path_params["sid"])
+    if not detail:
+        return HTMLResponse("没有这条", status_code=404)
+    origin = request.query_params.get("from", "")
+    source = detail["source"]
+    source["_part"] = request.query_params.get("part", "")
+    source["_cite"] = request.query_params.get("cite", "")
+    return HTMLResponse(ui.source_detail(source, detail["statements"], detail["mate"], origin))
+
+
+@mcp.custom_route("/admin/api/crystals/nav", methods=["GET"])
+async def crystal_nav(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    type_name = request.query_params.get("type", "")
+    status = request.query_params.get("status", "active") or "active"
+    try:
+        offset = int(request.query_params.get("offset") or "0")
+    except ValueError:
+        offset = 0
+    return JSONResponse(engine.crystal_nav_slice(type_name, status, offset))
+
+
+@mcp.custom_route("/admin/crystals", methods=["GET"])
+async def admin_crystals(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return await asyncio.to_thread(_crystal_page, request, "owner")
+
+
+@mcp.custom_route("/admin/api/crystals/{cid}/body", methods=["POST"])
+async def save_crystal_body(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    cid = request.path_params["cid"]
+    fields = data.get("fields") if isinstance(data.get("fields"), dict) else None
+    chapters = data.get("chapters") if isinstance(data.get("chapters"), dict) else None
+    if "markdown" in data:
+        address = data.get("address") if "address" in data else None
+        result = engine.save_crystal_markdown(
+            cid, str(data.get("markdown") or ""), data.get("sketch"), address=address
+        )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+    if fields is not None or chapters is not None:
+        result = engine.save_crystal_fields(cid, fields or {}, chapters or {})
+    else:
+        result = engine.save_crystal_article(cid, str(data.get("text") or ""))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/crystals/{cid}", methods=["GET"])
+async def admin_crystal(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return await asyncio.to_thread(_crystal_page, request, request.path_params["cid"])
+
+
+def _open_matches_nav_filter(detail: dict, type_name: str, status: str) -> bool:
+    """The page already open belongs in this filter. A blank type is every type."""
+    if type_name and (detail.get("type") or "") != type_name:
+        return False
+    if status and status != "全部" and (detail.get("status") or "") != status:
+        return False
+    return True
+
+
+def crystal_nav_decision(detail: dict, type_name: str, status: str) -> dict:
+    """Nav for the open page. A filter that excludes it jumps to a page that matches.
+
+    The old path pinned the open page onto every result, so choosing 组织 while
+    reading a 人物 still left that 人物 at the top and looked like the type was ignored.
+    """
+    window = engine.crystal_nav_slice(type_name, status, 0)
+    nav = list(window["items"])
+    if any(item["id"] == detail["id"] for item in nav):
+        return {"nav": nav, "window": window, "redirect": ""}
+    if _open_matches_nav_filter(detail, type_name, status):
+        nav.insert(0, {"id": detail["id"], "type": detail["type"], "name": detail["name"], "status": detail["status"]})
+        return {"nav": nav, "window": window, "redirect": ""}
+    if nav:
+        return {"nav": nav, "window": window, "redirect": nav[0]["id"]}
+    return {"nav": [], "window": window, "redirect": ""}
+
+
+def _crystal_filter_location(cid: str, type_name: str, status: str, view: str) -> str:
+    from urllib.parse import urlencode
+
+    params = {}
+    if type_name:
+        params["type"] = type_name
+    if status and status != "active":
+        params["status"] = status
+    if view and view not in ("", "body"):
+        params["view"] = view
+    query = urlencode(params)
+    return f"/admin/crystals/{cid}" + (f"?{query}" if query else "")
+
+
+def _crystal_page(request: Request, cid: str) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    type_name = request.query_params.get("type", "")
+    status = request.query_params.get("status", "active") or "active"
+    view = request.query_params.get("view", "body") or "body"
+    editing = request.query_params.get("edit") == "1"
+    if editing:
+        view = "body"
+    detail = engine.crystal_detail(cid)
+    if not detail:
+        return HTMLResponse("没有这篇", status_code=404)
+    decision = crystal_nav_decision(detail, type_name, status)
+    if decision["redirect"]:
+        return RedirectResponse(
+            _crystal_filter_location(decision["redirect"], type_name, status, view),
+            status_code=302,
+        )
+    nav = decision["nav"]
+    window = decision["window"]
+    revs = engine.revisions(detail["id"]) if view == "log" else []
+    auto_labels, label_budget = _graph_label_flags()
+    return HTMLResponse(
+        ui.crystal_page(
+            detail,
+            revs,
+            nav,
+            type_name,
+            status,
+            view,
+            {"total": window["total"], "next": window["next"]},
+            editing,
+            auto_labels=auto_labels,
+            label_budget=label_budget,
+        )
+    )
+
+
+@mcp.custom_route("/admin/hosts", methods=["GET"])
+async def admin_hosts(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    filters = {
+        "device": request.query_params.get("device", ""),
+        "agent": request.query_params.get("agent", ""),
+    }
+    viewer_id, viewer_name = _viewing_computer(request)
+
+    def render() -> str:
+        fleet = engine.list_connected_hosts(
+            viewer_device_id=viewer_id,
+            viewer_device_name=viewer_name,
+            device=filters["device"],
+            agent=filters["agent"],
+        )
+        return ui.hosts_page(engine.list_hosts(), fleet, filters)
+
+    return HTMLResponse(await asyncio.to_thread(render))
+
+
+@mcp.custom_route("/admin/api/hosts/progress", methods=["GET"])
+async def hosts_progress(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    viewer_id = _device(request) or ""
+    viewer_name = request.headers.get("x-rogmem-device-name") or ""
+
+    def load() -> dict:
+        fleet = engine.list_connected_hosts(viewer_device_id=viewer_id, viewer_device_name=viewer_name)
+        return {
+            "rows": [
+                {
+                    "device_id": row.get("device_id") or "",
+                    "program": row.get("program") or "",
+                    "imported": int(row.get("history_count") or 0),
+                }
+                for row in fleet.get("rows") or []
+            ]
+        }
+
+    return JSONResponse(await asyncio.to_thread(load))
+
+
+@mcp.custom_route("/admin/api/hosts/report", methods=["POST"])
+async def admin_hosts_report(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    data = await request.json()
+    items = data.get("hosts") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return JSONResponse({"error": "没有宿主清单"}, status_code=400)
+    return JSONResponse(engine.report_hosts(items))
+
+
+@mcp.custom_route("/admin/api/hosts/connect", methods=["POST"])
+async def admin_hosts_connect(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    data = await request.json()
+    program = str(data.get("program") or "") if isinstance(data, dict) else ""
+    confirm = data.get("confirm") is True if isinstance(data, dict) else False
+    result = engine.confirm_host(program, confirm)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/admin/api/hosts/import", methods=["POST"])
+async def admin_hosts_import(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    data = await request.json()
+    program = str(data.get("program") or "") if isinstance(data, dict) else ""
+    confirm = data.get("confirm") is True if isinstance(data, dict) else False
+    result = engine.confirm_import(program, confirm)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/admin/api/hosts/jobs", methods=["POST"])
+async def admin_hosts_jobs_create(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    if not _same_origin_or_safe(request):
+        return JSONResponse({"ok": False, "refused": "cross-origin"}, status_code=403)
+    data = await request.json()
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "refused": "bad-request"}, status_code=400)
+    agent_id = str(data.get("agent_id") or "").strip()
+    program = str(data.get("program") or "").strip()
+    request_id = str(data.get("request_id") or "").strip() or f"admin:{int(time.time()*1000)}"
+    if not agent_id or not program:
+        return JSONResponse({"ok": False, "refused": "missing-agent-or-program"}, status_code=400)
+    result = await asyncio.to_thread(
+        engine.create_host_import_job,
+        agent_id=agent_id,
+        program=program,
+        request_id=request_id,
+    )
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/host/presence", methods=["POST"])
+async def host_presence(request: Request) -> Response:
+    """The computer's door says which machine it is. Last-used stays untouched."""
+    header = request.headers.get("authorization", "")
+    token = header[7:] if header.startswith("Bearer ") else ""
+    device = await asyncio.to_thread(engine.device_for_key, token, _device(request))
+    if not device:
+        return JSONResponse({"ok": False}, status_code=401)
+    peer = request.client.host if request.client is not None else ""
+    engine.note_viewer_peer(device, peer)
+    return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/admin/api/hosts/jobs", methods=["GET"])
+async def admin_hosts_jobs_list(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    agent_id = request.query_params.get("agent_id", "") or None
+    device_id = request.query_params.get("device_id", "") or None
+    program = request.query_params.get("program", "") or None
+    status = request.query_params.get("status", "") or None
+    rows = await asyncio.to_thread(
+        engine.list_host_import_jobs,
+        agent_id=agent_id, device_id=device_id, program=program, status=status,
+    )
+    return JSONResponse({"ok": True, "jobs": rows})
+
+
+@mcp.custom_route("/admin/api/hosts/jobs/{job_id}/cancel", methods=["POST"])
+async def admin_hosts_jobs_cancel(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    if not _same_origin_or_safe(request):
+        return JSONResponse({"ok": False, "refused": "cross-origin"}, status_code=403)
+    job_id = request.path_params["job_id"]
+    result = await asyncio.to_thread(engine.cancel_host_import_job, job_id=job_id)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/host/jobs/{job_id}/upload", methods=["POST"])
+async def host_job_upload(request: Request) -> Response:
+    """受作业与 lease 约束的上传入口。
+
+    评审 PR #116 §3 与 §4：
+    - 必须带 Bearer 对应本 agent（通过 BearerGate 已装入 CURRENT）。
+    - 必须 Header `X-Rogmem-Lease-Token` 与 job 当前 lease 完全匹配。
+    - job 必须是本 agent 的，且处于 claimed/running/partial。
+    - 服务器调用 engine.ingest_history 真实入库并回真实计数；
+      客户端不能自报 posted。
+    - 若 job 已 cancelled/expired/terminal，整批拒绝。
+    """
+    agent = CURRENT.get()
+    if agent is None:
+        return JSONResponse({"error": "未授权"}, status_code=401)
+    job_id = request.path_params["job_id"]
+    lease_token = request.headers.get("x-rogmem-lease-token", "")
+    data = await request.json()
+    turns = data.get("turns") or [] if isinstance(data, dict) else []
+    label = _requested_device_name(request, str((data or {}).get("device_name") or ""))
+    result = await asyncio.to_thread(
+        engine.ingest_history_for_job,
+        agent_id=str(agent["id"]),
+        job_id=job_id,
+        lease_token=lease_token,
+        program=str((data or {}).get("program") or ""),
+        turns=turns,
+        device_name=label,
+    )
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(result, status_code=status)
+
+
+@mcp.custom_route("/admin/graph", methods=["GET"])
+async def admin_graph(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return HTMLResponse(_graph_document())
+
+
+@mcp.custom_route("/admin/api/graph", methods=["GET"])
+async def admin_graph_api(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    return JSONResponse(await asyncio.to_thread(engine.graph))
+
+
+def _log_page(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    try:
+        page_no = int(request.query_params.get("page") or "1")
+    except ValueError:
+        page_no = 1
+    log = engine.operation_log_view(request.query_params.get("kind", ""), page_no)
+    return HTMLResponse(
+        ui.logs_page(
+            log["entries"],
+            log["kinds"],
+            log["selected"],
+            engine.get_setting("alert_webhook"),
+            page=int(log.get("page") or 1),
+            total=int(log["total"]) if log.get("total") is not None else len(log["entries"]),
+            page_size=log.get("page_size"),
+        )
+    )
+
+
+@mcp.custom_route("/admin/settings", methods=["GET"])
+async def admin_settings(request: Request) -> Response:
+    from starlette.concurrency import run_in_threadpool
+
+    return await run_in_threadpool(_log_page, request)
+
+
+@mcp.custom_route("/admin/settings/about", methods=["GET"])
+async def admin_about(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return HTMLResponse(ui.about_page(product_version(), engine.release_view()))
+
+
+@mcp.custom_route("/admin/settings/models", methods=["GET"])
+async def admin_models(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return HTMLResponse(ui.models_page(engine.public_providers(), engine.assignments(), engine.llm_public()))
+
+
+@mcp.custom_route("/admin/settings/agents", methods=["GET"])
+async def admin_agents(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return RedirectResponse("/admin/hosts", status_code=302)
+
+
+@mcp.custom_route("/admin/settings/basic", methods=["GET"])
+async def admin_basic(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    cfg = engine.basic_config()
+    cfg.update(engine.collect_config())
+    return HTMLResponse(ui.basic_page(cfg))
+
+
+@mcp.custom_route("/admin/settings/pipeline", methods=["GET"])
+async def admin_pipeline(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return HTMLResponse(
+        ui.pipeline_page(
+            engine.public_providers(),
+            engine.assignments(),
+            engine.llm_public(),
+            engine.pipeline_config(),
+        )
+    )
+
+
+@mcp.custom_route("/admin/settings/queue", methods=["GET"])
+async def admin_queue(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    from rogmem.queue_board import view
+
+    try:
+        page_no = int(request.query_params.get("page") or "1")
+    except ValueError:
+        page_no = 1
+    board = await asyncio.to_thread(
+        view,
+        request.query_params.get("span", "24h"),
+        request.query_params.get("tab", "all"),
+        page_no,
+    )
+    return HTMLResponse(ui.queue_page(board))
+
+
+@mcp.custom_route("/admin/settings/collect", methods=["GET"])
+async def admin_collect(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return RedirectResponse("/admin/settings/basic", status_code=302)
+
+
+def _cost_page_no(value: str) -> int:
+    try:
+        return int(value or "1")
+    except ValueError:
+        return 1
+
+
+_COST_FILTER_KEYS = ("span", "detail", "worker", "model", "dworker", "dmodel")
+
+
+def _cost_page(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    from datetime import datetime, timezone
+
+    query = request.query_params
+    url_mode = any(key in query for key in _COST_FILTER_KEYS)
+    stored = {} if url_mode else (engine.cost_filters() or {})
+
+    def pick(key: str, default: str) -> str:
+        if url_mode:
+            return str(query.get(key) or default)
+        return str(stored.get(key) or default)
+
+    view = {
+        "now": datetime.now(timezone.utc),
+        "span": pick("span", "30d"),
+        "worker": pick("worker", ""),
+        "model": pick("model", ""),
+        "detail": pick("detail", "30d"),
+        "dworker": pick("dworker", ""),
+        "dmodel": pick("dmodel", ""),
+        "page": _cost_page_no(str(query.get("page") or "")),
+    }
+    wants_status = request.query_params.get("observe") == "1" or request.headers.get(ui.COST_OBSERVE_HEADER) == "1"
+    board, prices = cost.board_and_prices(**view)
+    obs = board.get("observation") if isinstance(board.get("observation"), dict) else {}
+    # A switch asks for a view that is not published yet. The document may wait
+    # for that gather. A status probe must not: it only reports the current
+    # observation, and waiting here would hold the worker the next page needs.
+    if obs.get("state") == "pending" and cost.VIEW_WAIT_SECONDS > 0 and not wants_status:
+        cost.wait_for_view(cost.view_key(**view), cost.VIEW_WAIT_SECONDS)
+        board, prices = cost.board_and_prices(**view)
+        obs = board.get("observation") if isinstance(board.get("observation"), dict) else {}
+    headers = {"Cache-Control": "no-store"}
+    if wants_status:
+        obs = board.get("observation") if isinstance(board.get("observation"), dict) else {}
+        state = str(obs.get("state") or ("pending" if board.get("observed") is False else "ready"))
+        return JSONResponse(
+            {
+                "state": state,
+                "epoch": obs.get("epoch"),
+                "as_of": obs.get("as_of"),
+                "observed": state == "ready",
+            },
+            headers=headers,
+        )
+    return HTMLResponse(ui.cost_page(board, engine.public_providers(), prices), headers=headers)
+
+
+@mcp.custom_route("/admin/costs", methods=["GET"])
+async def admin_costs(request: Request) -> Response:
+    from starlette.concurrency import run_in_threadpool
+
+    return await run_in_threadpool(_cost_page, request)
+
+
+@mcp.custom_route("/admin/api/costs/filters", methods=["POST"])
+async def save_cost_filters(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "error": "成本筛选不是一份清单"}, status_code=400)
+    result = engine.save_cost_filters(data)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/costs", methods=["POST"])
+async def save_costs(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return JSONResponse({"ok": False, "error": "价格不是一份清单"}, status_code=400)
+    try:
+        cost.save_book(data.get("rate"), items)
+    except cost.BadBook as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/admin/api/agents/approve-device", methods=["POST"])
+async def approve_device(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await request.json()
+    device_id = str(data.get("device_id") or "") if isinstance(data, dict) else ""
+    result = engine.approve_device(device_id)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/agents/{aid}/rename", methods=["POST"])
+async def rename_agent(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await request.json()
+    name = str(data.get("display_name") or "") if isinstance(data, dict) else ""
+    result = engine.rename_agent(request.path_params["aid"], name)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/agents/{aid}/approve", methods=["POST"])
+async def approve(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return JSONResponse(engine.enroll_approve(request.path_params["aid"]))
+
+
+@mcp.custom_route("/admin/api/agents/{aid}/disable", methods=["POST"])
+async def disable(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    engine.disable_agent(request.path_params["aid"])
+    return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/admin/api/agents/{aid}/enable", methods=["POST"])
+async def enable(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.enable_agent(request.path_params["aid"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/sweep", methods=["POST"])
+async def admin_sweep(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return JSONResponse(await asyncio.to_thread(engine.sweep))
+
+
+@mcp.custom_route("/admin/api/crystals/{cid}/revisions", methods=["GET"])
+async def admin_revisions(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    return JSONResponse(engine.revisions(request.path_params["cid"]))
+
+
+@mcp.custom_route("/admin/api/crystals/{cid}/revisions/{rid}", methods=["GET"])
+async def admin_revision_detail(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    try:
+        revision_id = int(request.path_params["rid"])
+    except (TypeError, ValueError):
+        return HTMLResponse("没有这一条", status_code=404)
+    rows = engine.revisions(request.path_params["cid"], revision_id)
+    if not rows:
+        return HTMLResponse("没有这一条", status_code=404)
+    from rogmem.ui import revision_detail
+
+    return HTMLResponse(revision_detail(rows[0]))
+
+
+@mcp.custom_route("/admin/api/crystals/{cid}/rollback", methods=["POST"])
+async def admin_rollback(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    revision = data.get("revision_id")
+    return JSONResponse(engine.rollback(request.path_params["cid"], int(revision) if revision else None))
+
+
+@mcp.custom_route("/admin/api/sources/{sid}", methods=["GET"])
+async def admin_source_snapshot(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    snap = engine.source_snapshot(request.path_params["sid"])
+    if not snap:
+        return JSONResponse({"ok": False, "error": "没有这条"}, status_code=404)
+    return JSONResponse({"ok": True, **snap})
+
+
+@mcp.custom_route("/admin/api/sources/{sid}/origin", methods=["GET"])
+async def admin_source_origin(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    origin = engine.resolve_source_origin(request.path_params["sid"])
+    status = 200 if origin.get("ok") else 404
+    return JSONResponse(origin, status_code=status)
+
+
+@mcp.custom_route("/admin/api/sources/{sid}/retry", methods=["POST"])
+async def admin_retry(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = await asyncio.to_thread(engine.retry_source, request.path_params["sid"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/sources/{sid}/rebench", methods=["POST"])
+async def admin_rebench(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.rebench_source(request.path_params["sid"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/agents/{aid}/reject", methods=["POST"])
+async def reject(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.reject_agent(request.path_params["aid"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/agents/{aid}/delete", methods=["POST"])
+async def delete_agent(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.delete_agent(request.path_params["aid"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+async def _body(request: Request) -> dict:
+    if request.headers.get("content-type", "").startswith("application/json"):
+        return await request.json()
+    return {}
+
+
+@mcp.custom_route("/admin/api/settings/models", methods=["POST"])
+async def save_model(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    result = engine.save_provider(
+        str(data.get("name", "")),
+        str(data.get("base_url", "")),
+        str(data.get("api_key", "")),
+        str(data.get("models", "")),
+        str(data.get("kind") or ""),
+    )
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/settings/models/key", methods=["POST"])
+async def save_model_key(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    result = engine.set_provider_key(str(data.get("id", "")), str(data.get("api_key", "")))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/settings/models/delete", methods=["POST"])
+async def remove_model(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    return JSONResponse(engine.delete_provider(str(data.get("id", ""))))
+
+
+@mcp.custom_route("/admin/api/settings/assign", methods=["POST"])
+async def assign_models(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.assign_models(await _body(request))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/settings/embed", methods=["POST"])
+async def save_embed(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    result = engine.select_embed_model(str(data.get("model") or ""))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/settings/effective", methods=["GET"])
+async def effective_model(request: Request) -> Response:
+    if not _admin_ok(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    return JSONResponse(engine.llm_public())
+
+
+@mcp.custom_route("/admin/api/settings/webhook", methods=["POST"])
+async def save_webhook(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    result = engine.save_webhook(str(data.get("url") or ""))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/password", methods=["POST"])
+async def change_password(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    data = await _body(request)
+    new = str(data.get("password") or "")
+    confirm = None if "confirm" not in data else str(data.get("confirm") or "")
+    result = engine.change_password(str(data.get("current") or ""), new, confirm)
+    response = JSONResponse(result, status_code=200 if result.get("ok") else 400)
+    if result.get("ok"):
+        response.set_cookie(
+            _COOKIE,
+            auth.sign_cookie(_secret(), "ok"),
+            httponly=True,
+            samesite="lax",
+            path="/",
+            max_age=86400 * 14,
+        )
+    return response
+
+
+@mcp.custom_route("/admin/api/settings/basic", methods=["POST"])
+async def save_basic(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.save_basic(await _body(request))
+    response = JSONResponse(result, status_code=200 if result.get("ok") else 400)
+    if result.get("sessions_reset"):
+        response.delete_cookie(_COOKIE, path="/")
+    return response
+
+
+@mcp.custom_route("/admin/api/settings/pipeline", methods=["POST"])
+async def save_pipeline(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.save_pipeline(await _body(request))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/settings/collect", methods=["POST"])
+async def save_collect(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.save_collect(await _body(request))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/settings/release-refresh", methods=["POST"])
+async def refresh_release_now(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = await asyncio.to_thread(engine.refresh_release)
+    view = result.get("view") or {}
+    result["html"] = ui._about_line_html(view)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/settings/release-view", methods=["GET"])
+async def view_release(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    view = await asyncio.to_thread(engine.release_view)
+    return JSONResponse({"ok": True, "view": view, "html": ui._about_line_html(view)})
+
+
+@mcp.custom_route("/admin/api/settings/release-source", methods=["POST"])
+async def set_release_source(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    body = await _body(request)
+    url = str(body.get("url") or "").strip()
+    result = await asyncio.to_thread(engine.set_release_source_url, url)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@mcp.custom_route("/admin/api/history", methods=["POST"])
+async def import_history(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    body = await _body(request)
+    label = _requested_device_name(request, str(body.get("device_name") or ""))
+    projects = body.get("projects") or []
+    turns = body.get("turns") or []
+    if turns:
+        result = await asyncio.to_thread(
+            engine.ingest_history,
+            turns,
+            str(body.get("program") or "历史导入"),
+            label,
+        )
+    else:
+        result = {"ok": True, "imported": [], "duplicates": 0, "refused": 0}
+    if projects:
+        bound = await asyncio.to_thread(engine.bind_session_projects, projects)
+        result["projects"] = int(bound.get("updated") or 0)
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/admin/api/pump", methods=["POST"])
+async def pump(request: Request) -> Response:
+    if os.environ.get("ROGMEM_TEST_PUMP") != "1":
+        return JSONResponse({"error": "没有这个接口"}, status_code=404)
+    denied = _guard(request)
+    if denied:
+        return denied
+    engine.scan_dir()
+    engine.ensure_pending_vectors()
+    return JSONResponse({"next": engine.queue_next_lane(), "done": engine.pump_one()})
+
+
+@mcp.custom_route("/admin/static/cosmos-graph.min.js", methods=["GET"])
+async def graph_js(_request: Request) -> Response:
+    path = Path(__file__).parent / "vendor" / "cosmos-graph.min.js"
+    if not path.exists():
+        return Response("missing graph library", status_code=404)
+    return Response(path.read_bytes(), media_type="text/javascript")
+
+
+@mcp.custom_route("/admin/static/login/{name}", methods=["GET"])
+async def login_help_image(request: Request) -> Response:
+    name = str(request.path_params.get("name") or "")
+    if name not in ui.LOGIN_HELP_IMAGES:
+        return Response(status_code=404)
+    path = Path(__file__).parent / "static" / "login" / name
+    if not path.is_file():
+        return Response(status_code=404)
+    return Response(path.read_bytes(), media_type="image/png", headers={"Cache-Control": "no-cache"})
+
+
+def _count_memory_read() -> None:
+    agent = CURRENT.get()
+    if agent is None:
+        return
+    engine.note_memory_call(str(agent["id"]))
+
+
+def off_loop(fn):
+    """Run a sync tool off the request thread. Memory work must not stall the admin page."""
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def wrapped(*args, **kwargs):
+        return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
+
+    wrapped.__signature__ = signature
+    return wrapped
+
+
+@mcp.tool()
+@off_loop
+def core(budget: int = 0, project: str = "", before: str = "") -> str:
+    """装入历史包。budget 为 0 时用基础设置里的新会话字数。本对话已有成功返回时禁止再调，除非 before 是上次给出的续读位置。"""
+    payload = engine.core_memory(engine.core_budget_for(budget), project, before=before)
+    _count_memory_read()
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def search(query: str, limit: int = 5) -> str:
+    """检索结晶和原文。三路按相关度合并。问密钥、法条或字段值时只返回原文。"""
+    payload = engine.search(query, limit)
+    _count_memory_read()
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def read_section(crystal: str, section: str) -> str:
+    """读这一页正文里的一节。节名是该页的二级标题。对不上时，返回里的 sections 是这一页实际有的标题。"""
+    payload = engine.read_section(crystal, section)
+    _count_memory_read()
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def read_chain(crystal: str, section: str) -> str:
+    """按这一页上的一节，取出先后写下的说法和每一环记下的修改理由。节名与 read_section 相同。"""
+    payload = engine.read_chain(crystal, section)
+    _count_memory_read()
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def read_source(source_id: str) -> str:
+    """按来源编号读原文。"""
+    row = engine.db().execute("SELECT id, body, redacted, status, last_error FROM sources WHERE id=?", (source_id,)).fetchone()
+    _count_memory_read()
+    if not row:
+        return json.dumps({"error": "没有这条"}, ensure_ascii=False)
+    return json.dumps({"id": row["id"], "body": row["body"], "redacted": row["redacted"], "status": row["status"], "last_error": row["last_error"]}, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def submit_turn(
+    session_id: str,
+    turn_id: str,
+    seq: int,
+    role: str,
+    text: str,
+    event_at: str = "",
+    project: str = "",
+    event_basis: str = "",
+) -> str:
+    """提交用户输入或看得见的回复。"""
+    agent = CURRENT.get()
+    if agent is None:
+        return json.dumps({"error": "未授权"}, ensure_ascii=False)
+    kind = {"user": "user", "assistant": "agent", "summary": "summary"}.get(role, "agent")
+    lane = "slow" if kind == "summary" else "fast"
+    return json.dumps(
+        engine.submit_text(
+            kind=kind,
+            text=text,
+            session_id=session_id,
+            turn_id=turn_id,
+            seq=seq,
+            agent=agent,
+            event_at=event_at or None,
+            project=project or None,
+            lane=lane,
+            event_basis=event_basis,
+        ),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+@off_loop
+def read_revisions(crystal: str) -> str:
+    """按名称或编号读取一篇结晶的修订记录，顺着变更看它为什么是现在这样。"""
+    if CURRENT.get() is None:
+        return json.dumps({"error": "未授权"}, ensure_ascii=False)
+    payload = engine.revisions_for_agent(crystal)
+    _count_memory_read()
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def pending_host_import_jobs() -> str:
+    """认领本机历史导入作业。只认 Authorization 身份对应的 agent，拒绝越权。"""
+    agent = CURRENT.get()
+    if agent is None:
+        return json.dumps({"error": "未授权"}, ensure_ascii=False)
+    claimed = engine.claim_host_import_jobs(agent_id=str(agent["id"]))
+    public = [
+        {
+            "job_id": item["id"],
+            "program": item["program"],
+            "request_id": item["request_id"],
+            "lease_until": item["lease_until"],
+            "lease_token": item["lease_token"],
+            "max_attempts": item["max_attempts"],
+            "attempts": item["attempts"],
+        }
+        for item in claimed
+    ]
+    return json.dumps({"ok": True, "jobs": public}, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def ack_host_import_job(
+    job_id: str,
+    lease_token: str,
+    status: str,
+    posted: int = 0,
+    duplicates: int = 0,
+    refused: int = 0,
+    failed: int = 0,
+    last_error_class: str = "",
+) -> str:
+    """回传作业结果。必须带 claim 时服务端签发的 lease_token。"""
+    agent = CURRENT.get()
+    if agent is None:
+        return json.dumps({"error": "未授权"}, ensure_ascii=False)
+    result = engine.ack_host_import_job(
+        agent_id=str(agent["id"]),
+        job_id=job_id,
+        lease_token=lease_token,
+        status=status,
+        posted=int(posted or 0),
+        duplicates=int(duplicates or 0),
+        refused=int(refused or 0),
+        failed=int(failed or 0),
+        last_error_class=last_error_class,
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def renew_host_import_lease(job_id: str, lease_token: str, lease_s: int = 600) -> str:
+    """续租。必须带 claim 时签发的 lease_token。"""
+    agent = CURRENT.get()
+    if agent is None:
+        return json.dumps({"error": "未授权"}, ensure_ascii=False)
+    result = engine.renew_host_import_lease(
+        agent_id=str(agent["id"]),
+        job_id=job_id,
+        lease_token=lease_token,
+        lease_s=int(lease_s or 600),
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def announce_capabilities(capabilities: str) -> str:
+    """客户端上报自身能力。老 client 从不调用这一步，capabilities 保持空字符串。"""
+    agent = CURRENT.get()
+    if agent is None:
+        return json.dumps({"error": "未授权"}, ensure_ascii=False)
+    result = engine.set_agent_capabilities(agent_id=str(agent["id"]), capabilities=capabilities)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+@off_loop
+def submit_draft(markdown: str) -> str:
+    """提交一页和首蒸相同的 Markdown 草稿。篇名必须对上已有结晶。收下后插队进入并页、速写，不改正在用的正文和速写。"""
+    agent = CURRENT.get()
+    if agent is None:
+        return json.dumps({"error": "未授权"}, ensure_ascii=False)
+    payload = engine.submit_draft(markdown, agent)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+def guide(level: str = "brief") -> str:
+    """读取怎么用这份记忆。"""
+    brief = (
+        "本对话还没有 core 的成功返回时，必须先 core，读完再回答。已经有了，绝对禁止再调不带 before 的 core。"
+        "历史包是人物速写、工程速写，余量才是最近摘录。返回写明截断时，要更早原文必须按 continuation.before 再调 core，这次只有更早摘录。"
+        "这一问的事实包里没有，才 search，绝对禁止用 search 翻页。要读某一节，用 read_section，节名是这一页正文里的二级标题；对不上时看返回的 sections。"
+        "要看这一节先后怎么变的、每次为什么改，用 read_chain，节名与那一节相同。"
+        "要原文再用 read_source。整页为什么变成现在这样，用 read_revisions。"
+        "要改已经有的一页，用 submit_draft，交一页和首蒸相同的 Markdown，篇名对上那一页。不按这个形状写的不会收下，收下也不直接改正在用的正文和速写。本场原话优先于历史包。"
+    )
+    full = brief + " submit_turn 只收用户句和看得见的回复。系统提示、召回、压缩摘要和隐藏推理不要提交。"
+    return full if level == "full" else brief
+
+
+_BEARER_PROTECTED_PREFIXES = ("/mcp", "/host/jobs/")
+
+
+class BearerGate:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and any(
+            scope.get("path", "").startswith(prefix)
+            for prefix in _BEARER_PROTECTED_PREFIXES
+        ):
+            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+            token = headers.get("authorization", "")
+            device = headers.get("x-rogmem-device")
+            agent = engine.agent_by_token(token[7:], device) if token.startswith("Bearer ") else None
+            if agent is not None:
+                try:
+                    client = scope.get("client")
+                    peer = str(client[0] or "") if client else ""
+                    engine.note_viewer_peer(str(agent["device_id"] or ""), peer)
+                except Exception:
+                    pass
+            if agent is None:
+                await JSONResponse({"error": "未授权"}, status_code=401)(scope, receive, send)
+                return
+            CURRENT.set(agent)
+        await self.app(scope, receive, send)
+
+
+def _client_ip(scope) -> str:
+    client = scope.get("client")
+    if client and client[0]:
+        return str(client[0])
+    return "unknown"
+
+
+def _rate_bucket(method: str, path: str) -> tuple[str, str] | None:
+    if method != "POST":
+        return None
+    if path == "/enroll/apply":
+        return "enroll-apply", "enroll"
+    if path in {"/enroll/claim", "/enroll/reclaim", "/enroll/redeem"}:
+        return "enroll-claim", "enroll"
+    if path == "/admin/login":
+        return "admin-login", "admin"
+    if path.startswith("/admin/api/"):
+        return "admin-write", "admin"
+    return None
+
+
+class RateGate:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            bucket = _rate_bucket(scope.get("method", ""), scope.get("path", ""))
+            if bucket is not None:
+                name, kind = bucket
+                limit, window = rate_limit.configured_quota(kind)
+                if not rate_limit.allow(f"{name}:{_client_ip(scope)}", limit, window):
+                    response = JSONResponse({"error": "太频繁"}, status_code=429, headers={"Retry-After": str(window)})
+                    await response(scope, receive, send)
+                    return
+        await self.app(scope, receive, send)
+
+
+class ChannelMark:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            ui.CHANNEL.set(_channel_cookie(scope))
+        await self.app(scope, receive, send)
+
+
+def _channel_cookie(scope) -> bool:
+    for key, value in scope.get("headers") or []:
+        if key.lower() != b"cookie":
+            continue
+        for part in value.decode("latin1").split(";"):
+            name, _, raw = part.strip().partition("=")
+            if name == "rogmem_channel" and raw == "1":
+                return True
+    return False
+
+
+def _login_asset(path: str) -> bool:
+    """登录页在还没有会话时也要能画出星云和帮助图。
+
+    帮助图目录本身不要求登录，具体文件仍由路由按名单返回。名单外是 404。
+    """
+    if path == "/admin/static/cosmos-graph.min.js":
+        return True
+    prefix = "/admin/static/login/"
+    if not path.startswith(prefix):
+        return False
+    name = path[len(prefix):]
+    return bool(name) and "/" not in name and name not in {".", ".."}
+
+
+class AdminGate:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            path = scope.get("path", "")
+            if path != "/admin/login" and not _login_asset(path) and (path == "/admin" or path.startswith("/admin/")):
+                if not _admin_ok(Request(scope)):
+                    if path.startswith("/admin/api/"):
+                        response = JSONResponse({"error": "未登录"}, status_code=401)
+                    else:
+                        response = RedirectResponse("/admin/login", status_code=302)
+                    await response(scope, receive, send)
+                    return
+        await self.app(scope, receive, send)
+
+
+def build_app():
+    app = mcp.streamable_http_app()
+    return ChannelMark(RateGate(AdminGate(BearerGate(app))))
+
+
+def _poll_seconds() -> float:
+    return float(os.environ.get("ROGMEM_POLL", "0.2"))
+
+
+def _distill_loop(stop: threading.Event | None = None) -> None:
+    while stop is None or not stop.is_set():
+        done = engine.pump_one()
+        if done:
+            continue
+        if stop is None:
+            time.sleep(_poll_seconds())
+        elif stop.wait(_poll_seconds()):
+            break
+
+
+def start_distill_workers(n: int | None = None, stop: threading.Event | None = None) -> list[threading.Thread]:
+    count = engine.distill_concurrency() if n is None else max(1, n)
+    threads = []
+    for i in range(count):
+        thread = threading.Thread(
+            target=_distill_loop,
+            kwargs={"stop": stop},
+            daemon=True,
+            name=f"rogmem-distill-{i}",
+        )
+        thread.start()
+        threads.append(thread)
+    return threads
+
+
+# A step that fails waits this long before another try. The maintenance loop
+# itself keeps polling, so a locked database cannot spin the log or end the thread.
+_SCHEDULE_BACKOFF = 30.0
+_PROBE_THREAD: threading.Thread | None = None
+_PROBE_LOCK = threading.Lock()
+_RECONCILE_THREAD: threading.Thread | None = None
+_RECONCILE_LOCK = threading.Lock()
+
+
+def _maintenance_steps():
+    """Resolved when the tick runs, so a step sees the engine as it is now.
+
+    Reconcile is not in this list. A scan that never returns must not be what
+    keeps same-name pages from being folded.
+    """
+
+    return (
+        ("scan", lambda: engine.scan_dir(force=False)),
+        ("release", lambda: engine.probe_release_if_due()),
+        ("sweep", lambda: engine.run_scheduled_sweep()),
+        ("host_import", lambda: engine.sweep_host_import_jobs()),
+        ("maintain", lambda: engine.maintain()),
+    )
+
+
+def _schedule_backoff() -> float:
+    return _SCHEDULE_BACKOFF
+
+
+def _run_guarded(name: str, fn, quiet_until: dict[str, float]) -> None:
+    """One scheduled step. A failure is remembered, then the caller moves on.
+
+    The quiet window stops a step that raises every time from being called
+    again on the next 0.2s tick. Other steps keep their own windows.
+    """
+
+    now = time.monotonic()
+    if now < quiet_until.get(name, 0.0):
+        return
+    try:
+        fn()
+    except Exception as exc:
+        quiet_until[name] = now + _schedule_backoff()
+        print(f"ROGMEM_SCHEDULE {name} {type(exc).__name__}", flush=True)
+
+
+def run_probe_tick(quiet_until: dict[str, float] | None = None) -> None:
+    _run_guarded("probe", engine.probe_providers_if_due, quiet_until if quiet_until is not None else {})
+
+
+def run_maintenance_tick(quiet_until: dict[str, float] | None = None) -> None:
+    window = quiet_until if quiet_until is not None else {}
+    for name, fn in _maintenance_steps():
+        _run_guarded(name, fn, window)
+
+
+def _probe_loop(stop: threading.Event | None = None) -> None:
+    quiet: dict[str, float] = {}
+    while stop is None or not stop.is_set():
+        try:
+            run_probe_tick(quiet)
+        except Exception as exc:
+            quiet["probe"] = time.monotonic() + _schedule_backoff()
+            print(f"ROGMEM_SCHEDULE probe {type(exc).__name__}", flush=True)
+        if stop is None:
+            time.sleep(_poll_seconds())
+        elif stop.wait(_poll_seconds()):
+            break
+
+
+def start_probe_loop(stop: threading.Event | None = None) -> threading.Thread:
+    """Probe on its own thread. A stuck scan, sweep, or reconcile cannot pause it.
+
+    A private loop (one that is given stop) does not replace the process loop.
+    The process loop is started again when its thread has exited.
+    """
+
+    global _PROBE_THREAD
+    if stop is not None:
+        thread = threading.Thread(
+            target=_probe_loop,
+            kwargs={"stop": stop},
+            daemon=True,
+            name="rogmem-probe",
+        )
+        thread.start()
+        return thread
+    with _PROBE_LOCK:
+        if _PROBE_THREAD is not None and _PROBE_THREAD.is_alive():
+            return _PROBE_THREAD
+        thread = threading.Thread(
+            target=_probe_loop,
+            kwargs={"stop": None},
+            daemon=True,
+            name="rogmem-probe",
+        )
+        _PROBE_THREAD = thread
+        thread.start()
+        return thread
+
+
+def run_reconcile_tick(quiet_until: dict[str, float] | None = None) -> None:
+    _run_guarded("reconcile", engine.run_scheduled_reconcile, quiet_until if quiet_until is not None else {})
+
+
+def _reconcile_loop(stop: threading.Event | None = None) -> None:
+    quiet: dict[str, float] = {}
+    while stop is None or not stop.is_set():
+        try:
+            run_reconcile_tick(quiet)
+        except Exception as exc:
+            quiet["reconcile"] = time.monotonic() + _schedule_backoff()
+            print(f"ROGMEM_SCHEDULE reconcile {type(exc).__name__}", flush=True)
+        if stop is None:
+            time.sleep(_poll_seconds())
+        elif stop.wait(_poll_seconds()):
+            break
+
+
+def start_reconcile_loop(stop: threading.Event | None = None) -> threading.Thread:
+    """Fold same-named pages on their own thread. A stuck scan cannot pause it.
+
+    A private loop (one that is given stop) does not replace the process loop.
+    The process loop is started again when its thread has exited.
+    """
+
+    global _RECONCILE_THREAD
+    if stop is not None:
+        thread = threading.Thread(
+            target=_reconcile_loop,
+            kwargs={"stop": stop},
+            daemon=True,
+            name="rogmem-reconcile",
+        )
+        thread.start()
+        return thread
+    with _RECONCILE_LOCK:
+        if _RECONCILE_THREAD is not None and _RECONCILE_THREAD.is_alive():
+            return _RECONCILE_THREAD
+        thread = threading.Thread(
+            target=_reconcile_loop,
+            kwargs={"stop": None},
+            daemon=True,
+            name="rogmem-reconcile",
+        )
+        _RECONCILE_THREAD = thread
+        thread.start()
+        return thread
+
+
+def worker() -> None:
+    n = engine.distill_concurrency()
+    print("ROGMEM_DISTILL_CONCURRENCY " + str(n), flush=True)
+    start_distill_workers(n)
+    # Start probes before the first maintenance tick. A scan that never returns
+    # must not be what keeps the first probe from running.
+    start_probe_loop()
+    start_reconcile_loop()
+    quiet: dict[str, float] = {}
+    while True:
+        run_maintenance_tick(quiet)
+        start_probe_loop()
+        start_reconcile_loop()
+        time.sleep(_poll_seconds())
+
+
+def main() -> None:
+    import uvicorn
+
+    data = Path(os.environ.get("ROGMEM_DATA", "/data"))
+    scan = Path(os.environ.get("ROGMEM_SCAN", "/scan"))
+    engine.connect(data, scan)
+    os.environ["ROGMEM_DATA"] = str(data)
+    threading.Thread(target=_load_embed, daemon=True).start()
+    threading.Thread(target=worker, daemon=True).start()
+    print("ROGMEM_LISTEN " + os.environ.get("PORT", "18080"), flush=True)
+    uvicorn.run(build_app(), host="0.0.0.0", port=int(os.environ.get("PORT", "18080")), lifespan="on")
+
+
+def _load_embed() -> None:
+    mode = os.environ.get("ROGMEM_EMBED", "fastembed")
+    try:
+        engine.set_embed_mode(mode)
+        print("ROGMEM_EMBED_READY " + engine.health().get("embed", ""), flush=True)
+    except Exception as exc:
+        engine.set_embed_mode("off")
+        detail = str(exc).strip().splitlines()[-1][:180] if str(exc).strip() else ""
+        print("ROGMEM_EMBED_OFF " + type(exc).__name__ + (" " + detail if detail else ""), flush=True)

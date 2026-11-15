@@ -1,0 +1,11 @@
+WeKnora document parsers vendored for rogmem file import.
+
+Source: https://github.com/Tencent/WeKnora
+Revision: 22a331a2eac6d9ca367cd2fd2cf295cf42c4526e
+Copyright (C) 2026 Tencent. All rights reserved.
+Licensed under the MIT License. The upstream terms at revision
+22a331a2eac6d9ca367cd2fd2cf295cf42c4526e are copied in LICENSE next to this file.
+
+This directory contains the Python parsers that turn office files and PDFs into
+markdown. The gRPC service, MinerU, the web fetcher, and image OCR preprocess
+are not included.
