@@ -10652,76 +10652,93 @@ def _copy_cell_prefix(con: sqlite3.Connection, table: str, column: str, rowid: i
     return raw.decode("utf-8", errors="ignore")[:_OPENING_KEEP]
 
 
-def backfill_openings(limit: int = 1) -> int:
-    """Fill opening rows that were written before the short fields existed.
+def _opening_cursor(name: str) -> int:
+    raw = get_setting(name) or "0"
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
 
-    One row, then commit. core does not call this. A missing row is skipped
-    by the opening read until this copy lands.
+
+def _advance_opening_cursor(name: str, rowid: int) -> None:
+    set_setting(name, str(rowid))
+    db().commit()
+
+
+def backfill_openings(limit: int = 1) -> int:
+    """Copy one old row into its opening table, then commit.
+
+    The archive read is not inside a write transaction, and each step is a
+    single primary-key lookup. core does not call this.
     """
     con = db()
+    con.commit()
     made = 0
-    owner = con.execute(
-        """SELECT c.rowid, c.id, IFNULL(c.name, '')
-           FROM crystallizations AS c
-           WHERE c.id='owner'
-             AND NOT EXISTS (SELECT 1 FROM crystal_openings o WHERE o.id=c.id)"""
-    ).fetchone()
-    pending = [owner] if owner is not None else []
-    if len(pending) < limit:
-        pending.extend(
-            con.execute(
-                """SELECT c.rowid, c.id, IFNULL(c.name, '')
-                   FROM crystallizations AS c
-                   WHERE NOT EXISTS (SELECT 1 FROM crystal_openings o WHERE o.id=c.id)
-                   LIMIT ?""",
-                (limit,),
-            ).fetchall()
-        )
-    seen: set[str] = set()
-    for row in pending:
-        if row is None or row[1] in seen or made >= limit:
-            continue
-        seen.add(row[1])
-        sketch = _copy_cell_prefix(con, "crystallizations", "sketch_md", row[0])
-        body = _copy_cell_prefix(con, "crystallizations", "body_md", row[0])
-        repo = ""
-        found = con.execute(
-            """SELECT text FROM statements
-               WHERE crystal_id=? AND field IN ('仓库地址','repo') AND invalid_at IS NULL
-               LIMIT 1""",
-            (row[1],),
+    steps = 0
+    while made < limit and steps < 40:
+        steps += 1
+        cursor = _opening_cursor("opening_crystal_rowid")
+        row = con.execute(
+            "SELECT rowid, id, IFNULL(name, '') FROM crystallizations WHERE rowid>? ORDER BY rowid LIMIT 1",
+            (cursor,),
         ).fetchone()
-        if found is not None:
-            repo = str(found["text"] or "")[:500]
-        con.execute(
-            """INSERT INTO crystal_openings(id, name, sketch, body, repo)
-               VALUES (?,?,?,?,?)
-               ON CONFLICT(id) DO NOTHING""",
-            (row[1], row[2], sketch, body, repo),
-        )
         con.commit()
-        made += 1
-    if made >= limit:
-        return made
-    sources = con.execute(
-        """SELECT rowid, id, IFNULL(kind, ''), IFNULL(event_at, ''), IFNULL(project_ref, '')
-           FROM sources
-           WHERE redacted=0 AND kind IN ('user','agent')
-             AND id NOT IN (SELECT id FROM source_openings)
-           ORDER BY IFNULL(event_at, '') DESC
-           LIMIT ?""",
-        (limit - made,),
-    ).fetchall()
-    for row in sources:
-        excerpt = _copy_cell_prefix(con, "sources", "body", row[0])
-        con.execute(
-            """INSERT INTO source_openings(id, kind, event_at, project_ref, excerpt)
-               VALUES (?,?,?,?,?)
-               ON CONFLICT(id) DO NOTHING""",
-            (row[1], row[2], row[3], row[4], excerpt),
-        )
+        if row is None:
+            break
+        exists = con.execute("SELECT 1 FROM crystal_openings WHERE id=?", (row[1],)).fetchone()
         con.commit()
-        made += 1
+        if exists is None:
+            sketch = _copy_cell_prefix(con, "crystallizations", "sketch_md", row[0])
+            con.commit()
+            body = _copy_cell_prefix(con, "crystallizations", "body_md", row[0])
+            con.commit()
+            repo = ""
+            found = con.execute(
+                """SELECT text FROM statements
+                   WHERE crystal_id=? AND field IN ('仓库地址','repo') AND invalid_at IS NULL
+                   LIMIT 1""",
+                (row[1],),
+            ).fetchone()
+            con.commit()
+            if found is not None:
+                repo = str(found["text"] or "")[:500]
+            con.execute(
+                """INSERT INTO crystal_openings(id, name, sketch, body, repo)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(id) DO NOTHING""",
+                (row[1], row[2], sketch, body, repo),
+            )
+            con.commit()
+            made += 1
+        _advance_opening_cursor("opening_crystal_rowid", row[0])
+    steps = 0
+    while made < limit and steps < 40:
+        steps += 1
+        cursor = _opening_cursor("opening_source_rowid")
+        row = con.execute(
+            """SELECT rowid, id, IFNULL(kind, ''), IFNULL(event_at, ''), IFNULL(project_ref, ''),
+                      redacted
+               FROM sources WHERE rowid>? ORDER BY rowid LIMIT 1""",
+            (cursor,),
+        ).fetchone()
+        con.commit()
+        if row is None:
+            break
+        spoken = row[5] == 0 and row[2] in {"user", "agent"}
+        exists = con.execute("SELECT 1 FROM source_openings WHERE id=?", (row[1],)).fetchone()
+        con.commit()
+        if spoken and exists is None:
+            excerpt = _copy_cell_prefix(con, "sources", "body", row[0])
+            con.commit()
+            con.execute(
+                """INSERT INTO source_openings(id, kind, event_at, project_ref, excerpt)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(id) DO NOTHING""",
+                (row[1], row[2], row[3], row[4], excerpt),
+            )
+            con.commit()
+            made += 1
+        _advance_opening_cursor("opening_source_rowid", row[0])
     return made
 
 
