@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS sources (
   body TEXT NOT NULL,
   body_chars INTEGER NOT NULL DEFAULT 0,
   body_preview TEXT NOT NULL DEFAULT '',
+  excerpt TEXT NOT NULL DEFAULT '',
   redacted INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   lane TEXT NOT NULL,
@@ -118,6 +119,7 @@ CREATE TABLE IF NOT EXISTS crystal_events (
 );
 
 CREATE INDEX IF NOT EXISTS crystal_events_crystal_at ON crystal_events(crystal_id, at);
+CREATE INDEX IF NOT EXISTS crystallizations_name ON crystallizations(name, status);
 
 CREATE TABLE IF NOT EXISTS crystal_leases (
   crystal_id TEXT PRIMARY KEY,
