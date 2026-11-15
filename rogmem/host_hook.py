@@ -31,7 +31,7 @@ def stable_seq(session_id: str, role: str, text: str) -> int:
     return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
-_PROGRAMS = {"Cursor", "Hermes", "Codex", "WorkBuddy", "CodeBuddy", "DSH"}
+_PROGRAMS = {"Cursor", "Trae", "Hermes", "Codex", "WorkBuddy", "CodeBuddy", "DSH"}
 
 
 def program_of(script: Path, explicit: str = "") -> str:
@@ -41,6 +41,8 @@ def program_of(script: Path, explicit: str = "") -> str:
     parts = set(script.resolve().parts)
     if ".cursor" in parts:
         return "Cursor"
+    if ".trae" in parts:
+        return "Trae"
     if ".hermes" in parts:
         return "Hermes"
     if ".codex" in parts:
@@ -57,7 +59,7 @@ def program_of(script: Path, explicit: str = "") -> str:
 def home_of(script: Path) -> Path:
     resolved = script.resolve()
     parts = resolved.parts
-    for name in (".cursor", ".hermes", ".codex", ".workbuddy", ".codebuddy", ".dsh"):
+    for name in (".cursor", ".trae", ".hermes", ".codex", ".workbuddy", ".codebuddy", ".dsh"):
         if name in parts:
             return Path(*parts[: parts.index(name)])
     return resolved.parents[2]
@@ -208,9 +210,22 @@ def _toml_rogmem(path: Path, home: Path) -> tuple[str, str, str]:
     return _toml_value(body, "url"), _toml_value(body, "bearer_token"), _device_id(home)
 
 
+def _trae_mcp_path(home: Path) -> Path:
+    """Trae keeps user-level MCP in its VS Code-style User dir, not in ~/.trae."""
+    if sys.platform.startswith("win"):
+        base = home / "AppData" / "Roaming" / "Trae"
+    elif sys.platform.startswith("linux"):
+        base = home / ".config" / "Trae"
+    else:
+        base = home / "Library" / "Application Support" / "Trae"
+    return base / "User" / "mcp.json"
+
+
 def _endpoint(home: Path, program: str) -> tuple[str, str, str]:
     if program == "Cursor":
         return _mcp_endpoint(home / ".cursor" / "mcp.json", home)
+    if program == "Trae":
+        return _mcp_endpoint(_trae_mcp_path(home), home)
     if program == "WorkBuddy":
         return _mcp_endpoint(home / ".workbuddy" / "mcp.json", home)
     if program == "CodeBuddy":
@@ -399,8 +414,7 @@ def _session_project(home: Path, program: str, session_id: str, payload: dict) -
     found = _remote_project(payload)
     path = _marker(home, program, session_id, "project")
     if found:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(found + "\n", encoding="utf-8")
+        _remember(path, found + "\n")
         return found
     try:
         return path.read_text(encoding="utf-8").strip()
@@ -421,6 +435,15 @@ def _core_text(home: Path, program: str, project: str = "") -> str:
 
 def _marker(home: Path, program: str, session_id: str, kind: str) -> Path:
     return home / ".rogmem" / "hook-core" / f"{program}-{session_id}.{kind}"
+
+
+def _remember(path: Path, text: str) -> None:
+    """Local bookkeeping is best-effort. A state dir the host refuses must not cost the packet."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError:
+        return
 
 
 def _quiet(path: Path) -> bool:
@@ -634,12 +657,11 @@ def handle(payload: dict, *, home: Path, program: str) -> dict:
                 text = _core_text(home, program, project)
             except Exception:
                 text = ""
-            ok_mark.parent.mkdir(parents=True, exist_ok=True)
             if not text:
-                down_mark.write_text("down\n", encoding="utf-8")
+                _remember(down_mark, "down\n")
             else:
                 packet = f"{PACKET_MARK}\n{text}"
-                ok_mark.write_text("ok\n", encoding="utf-8")
+                _remember(ok_mark, "ok\n")
     result = _context_response(event, packet) if packet else {}
     try:
         # The opening response has to leave before the host's deadline.

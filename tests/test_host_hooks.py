@@ -447,6 +447,61 @@ def test_codex_reads_its_toml_and_the_shared_device_file(tmp_path):
     assert _endpoint(home, "Codex") == ("http://127.0.0.1:18780/mcp", "rm_codex", "dev-codex")
 
 
+def test_trae_reads_mcp_from_its_user_dir_not_the_dot_trae_dir(tmp_path):
+    from rogmem.host_hook import _endpoint, _trae_mcp_path
+
+    home = tmp_path / "home"
+    (home / ".trae").mkdir(parents=True)
+    target = _trae_mcp_path(home)
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "rogmem": {
+                        "url": "http://127.0.0.1:18780/mcp",
+                        "headers": {"Authorization": "Bearer rm_trae"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home / ".rogmem").mkdir()
+    (home / ".rogmem" / "device_id").write_text("dev-trae\n", encoding="utf-8")
+    assert _endpoint(home, "Trae") == ("http://127.0.0.1:18780/mcp", "rm_trae", "dev-trae")
+
+
+def test_trae_hooks_keep_the_version_and_the_shared_script(tmp_path):
+    from installer.rogmem_installer import install_host_hooks
+
+    home = tmp_path / "home"
+    (home / ".trae").mkdir(parents=True)
+    assert install_host_hooks(home, ["Trae"]) == ["Trae"]
+    data = json.loads((home / ".trae" / "hooks.json").read_text(encoding="utf-8"))
+    assert data["version"] == 1
+    assert set(data["hooks"]) == {"SessionStart", "UserPromptSubmit", "Stop"}
+    commands = [
+        item["command"] for group in data["hooks"]["UserPromptSubmit"] for item in group["hooks"]
+    ]
+    assert str(home / ".trae" / "hooks" / "rogmem.py") in commands
+    assert (home / ".trae" / "hooks" / "rogmem.py").is_file()
+
+
+def test_a_packet_survives_a_state_dir_the_host_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr("rogmem.host_hook._core_text", lambda home, program, project="": "历史包")
+
+    home = tmp_path / "home"
+    (home / ".trae").mkdir(parents=True)
+    (home / ".rogmem").write_text("not a directory\n", encoding="utf-8")
+    result = handle(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "合成句：问一句。"},
+        home=home,
+        program="Trae",
+    )
+    assert result == {"hookSpecificOutput": {"additionalContext": "【rogmem 历史包】\n历史包"}}
+
+
 def test_a_prompt_without_a_session_start_still_loads_once_and_a_stop_reads_the_transcript(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(

@@ -102,7 +102,7 @@ flowchart LR
 
 | 宿主 | 接入方式 |
 | --- | --- |
-| Cursor、Hermes、Codex、WorkBuddy、CodeBuddy | 同一份 hook |
+| Cursor、Trae、Hermes、Codex、WorkBuddy、CodeBuddy | 同一份 hook |
 | DSH | 插件 |
 
 宿主管理列出所有设备上的宿主。列表不单列设备名，筛选仍按设备。当前这台电脑只在显示名后面加「（本机）」，这个字不写进设备名。

@@ -476,7 +476,7 @@ def _fold_done_range(con, start: datetime, end: datetime, *, inclusive_end: bool
 
 
 def _seal_done_hours(con, keys: list[str]) -> None:
-    """One closed hour per commit, on the caller's connection. No second connection."""
+    """Seal a closed window in one write. The scan is not one exclusive lock per hour."""
 
     if not keys:
         return
@@ -484,37 +484,35 @@ def _seal_done_hours(con, keys: list[str]) -> None:
         con.rollback()
     install_done_seals(con)
     missing = _missing_done_seals(con, keys)
-    for key in missing:
-        if con.in_transaction:
-            con.commit()
-        start, end = hour_bounds(key)
-        try:
-            con.execute("BEGIN IMMEDIATE")
-        except sqlite3.OperationalError:
-            if con.in_transaction:
-                con.rollback()
-            con.execute("BEGIN IMMEDIATE")
-        try:
-            if con.execute("SELECT 1 FROM queue_done_seal WHERE bucket=?", (key,)).fetchone():
-                con.commit()
+    if not missing:
+        return
+    if con.in_transaction:
+        con.commit()
+    start, _end = hour_bounds(missing[0])
+    _start, end = hour_bounds(missing[-1])
+    grouped = {
+        str(slot or ""): (_num(count), _num(total))
+        for slot, count, total in _fold_done_range(con, start, end, inclusive_end=False)
+    }
+    if con.in_transaction:
+        con.commit()
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        still = set(_missing_done_seals(con, missing))
+        for key in missing:
+            if key not in still:
                 continue
-            tasks = 0
-            chars = 0
-            for slot_key, count, total in _fold_done_range(con, start, end, inclusive_end=False):
-                if str(slot_key or "") != key:
-                    continue
-                tasks += _num(count)
-                chars += _num(total)
+            tasks, chars = grouped.get(key, (0, 0))
             con.execute("DELETE FROM queue_done_bucket WHERE bucket=?", (key,))
             con.execute(
                 "INSERT INTO queue_done_bucket(bucket, tasks, chars) VALUES(?,?,?)",
                 (key, tasks, chars),
             )
             con.execute("INSERT INTO queue_done_seal(bucket) VALUES(?)", (key,))
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
 
 
 def ensure_done_seals(con, keys: list[str]) -> None:
@@ -622,14 +620,14 @@ def _folded_done(con, span: str, start: datetime, end: datetime, grain: str, *, 
         missing = [key for key in keys if key not in present]
     else:
         missing = list(keys)
-    for key in missing:
-        start_at, end_at = hour_bounds(key)
+    if missing:
+        start_at, _end_at = hour_bounds(missing[0])
+        _start_at, end_at = hour_bounds(missing[-1])
+        wanted = set(missing)
         for slot_key, pair in _live_done_map(con, start_at, end_at, inclusive_end=False).items():
-            if slot_key != key:
-                tasks, chars = hours.get(slot_key, (0, 0))
-                hours[slot_key] = (tasks + pair[0], chars + pair[1])
+            if slot_key not in wanted:
                 continue
-            hours[key] = pair
+            hours[slot_key] = pair
     prefix = partial_prefix(start, end)
     if prefix:
         for slot_key, pair in _live_done_map(con, prefix[0], prefix[1], inclusive_end=False).items():

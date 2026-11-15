@@ -12,6 +12,7 @@ BLOCK_END = "【rogmem 规则结束】"
 
 _FORBIDDEN = {
     "Cursor": "绝对禁止把别的检索、本地笔记或压缩摘要当成这次 core。",
+    "Trae": "绝对禁止用会话压缩、本机记忆摘要或本地笔记代替这次 core。",
     "Hermes": "绝对禁止用 MEMORY.md、USER.md、预取结果或压缩摘要代替这次 core。那些都不是历史包。",
     "Codex": "绝对禁止用自动压缩摘要或本机另存的笔记代替这次 core。",
     "WorkBuddy": "绝对禁止用压缩摘要或本地笔记代替这次 core。",
@@ -84,6 +85,10 @@ def workbuddy_rule() -> str:
     return _mdc_rule("WorkBuddy")
 
 
+def trae_rule() -> str:
+    return _mdc_rule("Trae")
+
+
 def codebuddy_rule() -> str:
     return _mdc_rule("CodeBuddy")
 
@@ -104,6 +109,8 @@ def rule_path(home: Path, program: str) -> Path | None:
     home = Path(home)
     if program == "Cursor":
         return home / ".cursor" / "rules" / "rogmem.mdc"
+    if program == "Trae":
+        return home / ".trae" / "user_rules" / "rogmem.md"
     if program == "Hermes":
         return home / ".hermes" / "rogmem-rule.md"
     if program == "Codex":
@@ -139,6 +146,8 @@ def write_host_rule(home: Path, program: str) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if program == "Cursor":
         path.write_text(cursor_rule(), encoding="utf-8")
+    elif program == "Trae":
+        path.write_text(trae_rule(), encoding="utf-8")
     elif program == "WorkBuddy":
         path.write_text(workbuddy_rule(), encoding="utf-8")
     elif program == "CodeBuddy":

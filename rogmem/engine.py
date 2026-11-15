@@ -281,7 +281,6 @@ FIELD_RE = re.compile(
 RECALL_RE = re.compile(r"<relevant-memories>[\s\S]*?</relevant-memories>", re.I)
 
 _DB: sqlite3.Connection | None = None
-_DB_PATH: Path | None = None
 _LOCAL = threading.local()
 _DATA: Path | None = None
 _SCAN: Path | None = None
@@ -336,7 +335,7 @@ def _keep_instant(con: sqlite3.Connection, table: str, clock: str, dest: str) ->
 
 
 def connect(data: Path, scan: Path) -> None:
-    global _DB, _DB_PATH, _DATA, _SCAN
+    global _DB, _DATA, _SCAN
     from rogmem.runtime_files import assert_runtime_files
 
     assert_runtime_files()
@@ -678,9 +677,7 @@ def connect(data: Path, scan: Path) -> None:
 
     migrate_crystal_store(con)
     _DB = con
-    _DB_PATH = (data / "rogmem.sqlite").resolve()
     _LOCAL.con = con
-    _LOCAL.path = _DB_PATH
     jieba.initialize()
     _ensure_owner(con)
     _ensure_default_minimax()
@@ -713,13 +710,48 @@ def connect(data: Path, scan: Path) -> None:
     except Exception:
         pass
     _remember_liveness()
-    # Leave autocommit. A later request thread mints hub_id; an open write here blocks it.
+    # The writes above (instant columns, the liveness index, lease cleanup) run
+    # after the last commit. Left open, this connection holds the single writer
+    # slot for the life of the process, and every other thread is refused with
+    # "database is locked". Start up ends with a clean connection.
     con.commit()
+
+
+class _RogmemConnection(sqlite3.Connection):
+    """A connection that never leaves a half-finished write behind.
+
+    A statement that cannot take the write lock still ends inside a
+    transaction. Left there, that connection keeps a read snapshot and the
+    next writer is refused all the way down the line. SQLite's one-writer
+    rule only holds together when every failed write settles itself here,
+    however the caller chooses to recover.
+    """
+
+    def _settle(self, exc: sqlite3.OperationalError) -> sqlite3.OperationalError:
+        if getattr(exc, "sqlite_errorcode", None) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            try:
+                if self.in_transaction:
+                    self.rollback()
+            except sqlite3.Error:
+                pass
+        return exc
+
+    def execute(self, sql, parameters=()):
+        try:
+            return super().execute(sql, parameters)
+        except sqlite3.OperationalError as exc:
+            raise self._settle(exc)
+
+    def executemany(self, sql, seq_of_parameters):
+        try:
+            return super().executemany(sql, seq_of_parameters)
+        except sqlite3.OperationalError as exc:
+            raise self._settle(exc)
 
 
 def _open_connection(path: Path) -> sqlite3.Connection:
     """One connection per thread. Sharing one connection across threads is what made the admin wait and the distill raise SQLITE_MISUSE."""
-    con = sqlite3.connect(path, check_same_thread=False)
+    con = sqlite3.connect(path, check_same_thread=False, factory=_RogmemConnection)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=5000")
     con.execute("PRAGMA journal_mode=WAL")
@@ -727,49 +759,21 @@ def _open_connection(path: Path) -> sqlite3.Connection:
     return con
 
 
-def _sqlite_path() -> Path:
+def db() -> sqlite3.Connection:
     if _DATA is None:
         raise RuntimeError("database is not open")
-    return (_DATA / "rogmem.sqlite").resolve()
-
-
-def _bind_thread_connection(con: sqlite3.Connection, path: Path) -> sqlite3.Connection:
-    _LOCAL.con = con
-    _LOCAL.path = path
-    return con
-
-
-def db() -> sqlite3.Connection:
-    """The database for the current data directory.
-
-    A thread keeps its connection, but not across a switch to another data
-    directory. Otherwise a request handled on a reused thread checks the
-    previous database's password and rejects the new one.
-    """
-    path = _sqlite_path()
     current = getattr(_LOCAL, "con", None)
-    if current is not None and getattr(_LOCAL, "path", None) == path:
-        return current
     if current is not None:
-        try:
-            current.close()
-        except Exception:
-            pass
-        _LOCAL.con = None
-        _LOCAL.path = None
-    global _DB, _DB_PATH
+        return current
+    global _DB
     if threading.current_thread() is threading.main_thread():
-        if _DB is None or _DB_PATH != path:
-            if _DB is not None:
-                try:
-                    _DB.close()
-                except Exception:
-                    pass
-            _DB = _open_connection(path)
-            _DB_PATH = path
-        return _bind_thread_connection(_DB, path)
-    opened = _open_connection(path)
-    return _bind_thread_connection(opened, path)
+        if _DB is None:
+            _DB = _open_connection(_DATA / "rogmem.sqlite")
+        _LOCAL.con = _DB
+        return _DB
+    current = _open_connection(_DATA / "rogmem.sqlite")
+    _LOCAL.con = current
+    return current
 
 
 def password_ready() -> bool:
@@ -1471,20 +1475,25 @@ def create_enroll_grant() -> dict:
     """Mint a short-lived enrollment secret. The raw value is returned once.
 
     This does not take the distillation lock. One insert is already serialized by
-    the database, and the admin button must not wait out a model call.
+    the database, and the admin button must not wait out a model call. A lock
+    held by a running commit is waited out briefly, so a momentary writer does
+    not turn the mint into a server error.
     """
     secret = "rg_" + secrets.token_urlsafe(32)
     grant_id = secrets.token_hex(8)
     digest = hashlib.sha256(secret.encode()).hexdigest()
     now = datetime.now(timezone.utc)
     expires = now + _GRANT_TTL
-    con = db()
-    con.execute(
-        """INSERT INTO enroll_grants(id, secret_hash, created_at, expires_at, device_id, device_name)
-           VALUES(?,?,?,?, '', '')""",
-        (grant_id, digest, now.isoformat(), expires.isoformat()),
-    )
-    con.commit()
+
+    def _insert(con: sqlite3.Connection) -> None:
+        con.execute(
+            """INSERT INTO enroll_grants(id, secret_hash, created_at, expires_at, device_id, device_name)
+               VALUES(?,?,?,?, '', '')""",
+            (grant_id, digest, now.isoformat(), expires.isoformat()),
+        )
+
+    if not _write_with_retry(_insert):
+        raise sqlite3.OperationalError("database is locked")
     return {"ok": True, "id": grant_id, "secret": secret, "expires_at": expires.isoformat()}
 
 
@@ -1509,7 +1518,14 @@ def _remember_redemption(con: sqlite3.Connection, grant_id: str, program: str, a
 
 
 def redeem_enroll_grant(secret: str, device_id: str, device_name: str, program: str, pubkey_b64: str) -> dict:
-    """Exchange one enrollment grant for this program's own key. An enabled host is left as it is."""
+    """Exchange one enrollment grant for this program's own key.
+
+    A host that is already enabled keeps its key when the caller still presents
+    that same key, so a grant never rotates a working host. When the caller
+    presents a *different* key, this machine has lost the one it enrolled with:
+    the row keeps its identity and the old key dies, so a valid grant always
+    leaves a usable host instead of stranding a client that holds no token.
+    """
     device_id = (device_id or "").strip()
     program = (program or "").strip()
     presented = (secret or "").strip()
@@ -1566,7 +1582,9 @@ def redeem_enroll_grant(secret: str, device_id: str, device_name: str, program: 
         ).fetchall()
         current = min(rows, key=lambda row: _AGENT_RANK.get(row["status"], 9)) if rows else None
         now = utcnow()
-        if current is not None and current["status"] == "启用":
+        if current is not None and current["status"] == "启用" and current["pubkey"] == pubkey_b64:
+            # Same key as the enabled row: the caller already holds this host's
+            # token. Leave it in place; a grant must not rotate a working host.
             _remember_redemption(con, grant["id"], program, current["id"], now)
             con.commit()
             return {"ok": True, "error": "", "status": "已接入", "already": True, "wrapped": "", "id": current["id"]}
@@ -11778,18 +11796,16 @@ def _discard_connection(con) -> None:
     original failure, and this connection is not handed out again. A close that
     does not return cannot be forced to drop the driver's lock.
     """
-    global _DB, _DB_PATH
+    global _DB
     try:
         con.close()
     except Exception:
         pass
     if getattr(_LOCAL, "con", None) is con:
         _LOCAL.con = None
-        _LOCAL.path = None
     if _DB is not con:
         return
     _DB = None
-    _DB_PATH = None
     if _DATA is None:
         return
     try:
@@ -11797,10 +11813,8 @@ def _discard_connection(con) -> None:
     except Exception:
         return
     _DB = fresh
-    _DB_PATH = (_DATA / "rogmem.sqlite").resolve()
     if threading.current_thread() is threading.main_thread() and getattr(_LOCAL, "con", None) is None:
         _LOCAL.con = fresh
-        _LOCAL.path = _DB_PATH
 
 
 def _rollback_write(con) -> None:
@@ -11824,6 +11838,32 @@ def _finish_write(con, write):
     except BaseException:
         _rollback_write(con)
         raise
+
+
+def _write_with_retry(write, *, tries: int = 6, first_ms: int = 25) -> bool:
+    """Commit one small write, waiting out a momentary lock a few times.
+
+    The database allows a single writer. A write that lands while another
+    commit is in flight should wait its turn, not surface as a server error.
+    The wait stays short, so an admin action never ends up waiting out a model
+    call. Returns False when the database stayed busy the whole window.
+    """
+    con = db()
+    wait_ms = first_ms
+    for attempt in range(tries):
+        try:
+            write(con)
+            con.commit()
+            return True
+        except sqlite3.OperationalError as exc:
+            _rollback_write(con)
+            if getattr(exc, "sqlite_errorcode", None) not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                raise
+            if attempt + 1 >= tries:
+                return False
+            time.sleep(wait_ms / 1000)
+            wait_ms *= 2
+    return False
 
 
 def _requeue_source(con, source_id: str) -> dict:
@@ -12515,7 +12555,7 @@ def save_crystal_fields(cid: str, fields: dict, chapters: dict) -> dict:
     return save_crystal_article(cid, "\n".join(lines))
 
 
-HOST_PROGRAMS = ("Cursor", "Hermes", "Codex", "WorkBuddy", "CodeBuddy", "DSH")
+HOST_PROGRAMS = ("Cursor", "Trae", "Hermes", "Codex", "WorkBuddy", "CodeBuddy", "DSH")
 
 
 def report_hosts(items: list[dict]) -> dict:
@@ -14815,7 +14855,7 @@ def _fold_label_overlaps(con, recent: set[str]) -> int:
 
 
 # Neighbors below this cosine are not worth a model call on bge-small-zh.
-# Live pages put 简历主人 next to 林知远 around 0.77, and unrelated pages much lower.
+# Live pages put 简历主人 next to the owner page around 0.77, and unrelated pages much lower.
 MERGE_NEIGHBOR_FLOOR = 0.68
 # One nearest neighbor per page. A blob of poorly separated pages must not
 # spend the whole model budget before a real nearest pair is asked.

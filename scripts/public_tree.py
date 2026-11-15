@@ -109,6 +109,16 @@ TEST_DROP_MARKERS = (
     "loop-task-design/",
 )
 
+# Tests that need a tree the public repo does not carry (bench/, scripts/,
+# private skills) and build those paths from separate literals, so the marker
+# scan above cannot see them. They fail at collection and must be dropped.
+TEST_DROP_FILES = (
+    "tests/test_core_bench.py",
+    "tests/test_pre_copy.py",
+    "tests/test_release_manifest_generator.py",
+    "tests/test_rogmem_ship.py",
+)
+
 REQUIRED_PUBLIC = (
     ".gitignore",
     "LICENSE",
@@ -225,6 +235,8 @@ def _read(root: Path, path: str) -> str:
 def test_depends_on_private(path: str, text: str) -> bool:
     if not path.startswith("tests/"):
         return False
+    if path in TEST_DROP_FILES:
+        return True
     return any(marker in text for marker in TEST_DROP_MARKERS)
 
 

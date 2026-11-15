@@ -198,6 +198,21 @@ def test_token_points_hermes_memory_at_rogmem_and_live_turn_uses_the_same_seq(tm
     assert "stable_seq" in plugin.read_text(encoding="utf-8")
 
 
+def test_trae_writes_mcp_into_its_user_dir_not_the_dot_trae_dir(tmp_path):
+    from installer.rogmem_installer import _host_config, trae_mcp_path
+
+    home = tmp_path / "home"
+    (home / ".trae").mkdir(parents=True)
+    assert write_configs(home, "http://127.0.0.1:18780", "rm_test_token", ["Trae"]) == ["Trae"]
+    target = trae_mcp_path(home)
+    assert target.name == "mcp.json" and target.parent.name == "User" and "Trae" in target.parts
+    assert _host_config(home, "Trae") == target
+    server = json.loads(target.read_text(encoding="utf-8"))["mcpServers"]["rogmem"]
+    assert server["url"] == "http://127.0.0.1:18780/mcp"
+    assert server["headers"]["Authorization"] == "Bearer rm_test_token"
+    assert not (home / ".trae" / "mcp.json").exists()
+
+
 def test_hermes_memory_account_replaces_the_previous_provider(tmp_path):
     home = tmp_path / "home"
     _ledger(home)

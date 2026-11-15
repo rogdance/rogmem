@@ -889,14 +889,64 @@ def _seal_call_hour(con: sqlite3.Connection, key: str) -> None:
 
 
 def _fill_call_hours(con: sqlite3.Connection, keys: list[str]) -> None:
-    """Seal only the hours that are missing. One short transaction each."""
+    """Seal a missing window in one write. A cold chart must not lock once per hour."""
 
     if not keys:
         return
     _ensure_call_seals(con)
     missing = _missing_call_seals(con, keys)
-    for key in missing:
-        _seal_call_hour(con, key)
+    if not missing:
+        return
+    if len(missing) == 1:
+        _seal_call_hour(con, missing[0])
+        return
+    if con.in_transaction:
+        con.commit()
+    start, _end = hour_bounds(missing[0])
+    _start, end = hour_bounds(missing[-1])
+    rows = _range_groups(con, start, end, inclusive_end=False, worker="", model="")
+    wanted = set(missing)
+    if con.in_transaction:
+        con.commit()
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        still = set(_missing_call_seals(con, missing))
+        by_bucket: dict[str, list] = {}
+        for row in rows:
+            slot = str(row.get("slot") or "")
+            if slot in still:
+                by_bucket.setdefault(slot, []).append(row)
+        for key in missing:
+            if key not in still:
+                continue
+            con.execute("DELETE FROM call_bucket WHERE bucket=?", (key,))
+            con.executemany(
+                """INSERT INTO call_bucket(
+                     bucket, worker, provider_id, model, bare, input_tokens, output_tokens,
+                     cache_tokens, fresh, cache_billed, metered
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        key,
+                        str(row.get("worker") or ""),
+                        str(row.get("provider_id") or ""),
+                        str(row.get("model") or ""),
+                        int(row.get("bare") or 0),
+                        int(row.get("input_tokens") or 0),
+                        int(row.get("output_tokens") or 0),
+                        int(row.get("cache_tokens") or 0),
+                        int(row.get("fresh") or 0),
+                        int(row.get("cache_billed") or 0),
+                        int(row.get("metered") or 0),
+                    )
+                    for row in by_bucket.get(key, [])
+                ],
+            )
+            con.execute("INSERT INTO call_bucket_seal(bucket) VALUES(?)", (key,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
 
 
 def _read_call_hours(con: sqlite3.Connection, keys: list[str], worker: str, model: str) -> list[dict]:

@@ -170,7 +170,7 @@ def test_fleet_lists_every_device_and_marks_only_the_viewer(tmp_path, monkeypatc
     assert "setInterval(refreshPending, 20000)" in page
     assert "/admin/api/hosts/progress" in page
     assert "贴给本机任意一个已安装的宿主" in modal
-    assert "现在可以适配这些宿主：Cursor、Hermes、Codex、WorkBuddy、CodeBuddy、DSH。" in modal
+    assert "现在可以适配这些宿主：Cursor、Trae、Hermes、Codex、WorkBuddy、CodeBuddy、DSH。" in modal
     assert "累计调用次数" in page
     assert "核心记忆" in page
     assert "<h2>接入确认</h2>" not in page

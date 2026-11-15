@@ -323,29 +323,44 @@ def plan_channel(origin: str, hub: str | None = None) -> dict:
     return _channel_shape(chosen, resolved)
 
 
-def _cursor_app_dirs(home: Path) -> list[Path]:
+def _vscode_app_dirs(home: Path, name: str) -> list[Path]:
+    """Every place a VS Code-derived host may keep its per-user data on any system."""
     return [
-        home / "Library" / "Application Support" / "Cursor",
-        home / "AppData" / "Roaming" / "Cursor",
-        home / ".config" / "Cursor",
+        home / "Library" / "Application Support" / name,
+        home / "AppData" / "Roaming" / name,
+        home / ".config" / name,
     ]
 
 
-def _preferred_cursor_dir(home: Path) -> Path:
+def _preferred_app_dir(home: Path, name: str) -> Path:
     system = platform.system()
     if system == "Windows":
-        return home / "AppData" / "Roaming" / "Cursor"
+        return home / "AppData" / "Roaming" / name
     if system == "Linux":
-        return home / ".config" / "Cursor"
-    return home / "Library" / "Application Support" / "Cursor"
+        return home / ".config" / name
+    return home / "Library" / "Application Support" / name
 
 
-SUPPORTED = ("Cursor", "Hermes", "Codex", "WorkBuddy", "CodeBuddy", "DSH")
+def _cursor_app_dirs(home: Path) -> list[Path]:
+    return _vscode_app_dirs(home, "Cursor")
+
+
+def _preferred_cursor_dir(home: Path) -> Path:
+    return _preferred_app_dir(home, "Cursor")
+
+
+def trae_mcp_path(home: Path) -> Path:
+    """Trae keeps user-level MCP in its VS Code-style User dir, not in ~/.trae."""
+    return _preferred_app_dir(home, "Trae") / "User" / "mcp.json"
+
+
+SUPPORTED = ("Cursor", "Trae", "Hermes", "Codex", "WorkBuddy", "CodeBuddy", "DSH")
 
 
 def detect_programs(home: Path) -> list[dict]:
     known = {
         "Cursor": [*_cursor_app_dirs(home), home / ".cursor"],
+        "Trae": [home / ".trae", *_vscode_app_dirs(home, "Trae")],
         "Hermes": [home / ".hermes"],
         "Codex": [home / ".codex"],
         "WorkBuddy": [home / ".workbuddy"],
@@ -363,6 +378,7 @@ def detect_programs(home: Path) -> list[dict]:
 def _host_config(home: Path, program: str) -> Path | None:
     paths = {
         "Cursor": home / ".cursor" / "mcp.json",
+        "Trae": trae_mcp_path(home),
         "WorkBuddy": home / ".workbuddy" / "mcp.json",
         "Codex": home / ".codex" / "config.toml",
         "Hermes": home / ".hermes" / "config.yaml",
@@ -657,7 +673,7 @@ def _endpoint(home: Path, program: str) -> tuple[str, str]:
     if path is None or not path.exists():
         return "", ""
     text = path.read_text(encoding="utf-8", errors="replace")
-    if program in {"Cursor", "WorkBuddy", "CodeBuddy"}:
+    if program in {"Cursor", "Trae", "WorkBuddy", "CodeBuddy"}:
         loaded = json.loads(text or "{}")
         server = loaded.get("mcpServers", {}).get("rogmem", {}) if isinstance(loaded, dict) else {}
         if not isinstance(server, dict):
@@ -891,7 +907,7 @@ def _merge_hermes_hooks(path: Path, command: str) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _merge_claude_hooks(path: Path, command: str, events: tuple[str, ...]) -> None:
+def _merge_claude_hooks(path: Path, command: str, events: tuple[str, ...], version: int | None = None) -> None:
     """Codex and WorkBuddy share this registry: event, then a list of command groups."""
     data: dict = {}
     if path.exists():
@@ -924,6 +940,8 @@ def _merge_claude_hooks(path: Path, command: str, events: tuple[str, ...]) -> No
                 }
             )
         hooks[event] = groups
+    if version is not None:
+        data["version"] = version
     data["hooks"] = hooks
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1048,6 +1066,15 @@ def install_host_hooks(home: Path, programs: list[str] | None = None, allow_real
             script = home / ".cursor" / "hooks" / "rogmem.py"
             _install_hook_script(script)
             _merge_cursor_hooks(home / ".cursor" / "hooks.json", str(script))
+        elif program == "Trae":
+            script = home / ".trae" / "hooks" / "rogmem.py"
+            _install_hook_script(script)
+            _merge_claude_hooks(
+                home / ".trae" / "hooks.json",
+                str(script),
+                ("SessionStart", "UserPromptSubmit", "Stop"),
+                version=1,
+            )
         elif program == "Hermes":
             script = home / ".hermes" / "agent-hooks" / "rogmem.py"
             _install_hook_script(script)
@@ -1151,7 +1178,7 @@ def connect_prompt(program: str) -> str:
         + f"用户这次点名的是 {name}。调用 connect_hosts、authorize_host、claim_host、verify_host 时传入 allow_real=True，"
         "因为这是用户刚刚确认要接入的这台电脑。只处理点名的宿主；用户没有点名时才接入全部已发现且受支持的宿主。\n"
         f"connect_hosts 把 {name} 指到记忆中枢，写入它的全局规则，并安装客户端里的同一份 hook。"
-        "Cursor 登记到 .cursor/hooks.json，Hermes 登记到 config.yaml 的 hooks，Codex 登记到 .codex/hooks.json，WorkBuddy 登记到 .workbuddy/settings.json 的 hooks，CodeBuddy 登记到 .codebuddy/settings.json 的 hooks。DSH 安装 rogmem-dsh 插件，并把 MCP 写进 .dsh/cordis.patch.yml。"
+        "Cursor 登记到 .cursor/hooks.json，Trae 登记到 .trae/hooks.json，Hermes 登记到 config.yaml 的 hooks，Codex 登记到 .codex/hooks.json，WorkBuddy 登记到 .workbuddy/settings.json 的 hooks，CodeBuddy 登记到 .codebuddy/settings.json 的 hooks。DSH 安装 rogmem-dsh 插件，并把 MCP 写进 .dsh/cordis.patch.yml。"
         "hook 调用失败也不能挡住宿主继续工作。绝对禁止改写 Hermes 的 MEMORY.md 和 USER.md。"
         f"authorize_host 为 {name} 申请授权。"
         "设备名用这台电脑的主机名，不要写成「本机」。\n"
@@ -1429,30 +1456,58 @@ class _Proxy(BaseHTTPRequestHandler):
             raise last
         raise OSError("没有找到这份中枢")
 
-    def _pipe(self, body: bytes | None, headers: dict[str, str]) -> None:
-        """Copy the hub's response bytes. This machine only adds its own request headers."""
-        try:
-            upstream, host_header = self._open_upstream()
-        except Exception as exc:  # noqa: BLE001
-            self._fail(502, exc)
-            return
-        upstream.settimeout(120)
-        started = False
+    def _copy_hop(self, origin: str, target: int, cached: bool, body: bytes | None, headers: dict[str, str]) -> None:
+        """Stream one hop. A shortcut that accepts and stays silent is not a live door."""
+        upstream, host_header = self._dial(origin, target)
+        # The remembered entrance may think before its first byte. A cached
+        # shortcut has to show a byte inside the entrance budget, or it is
+        # the same as a hop that never connected.
+        upstream.settimeout(_ENTRANCE_TIMEOUT if cached else 120)
         try:
             upstream.sendall(self._request_bytes(body, headers, host_header))
+            first = upstream.recv(65536)
+        except Exception:
+            upstream.close()
+            if cached:
+                self._forget_cache(origin)
+            raise
+        if not first:
+            upstream.close()
+            if cached:
+                self._forget_cache(origin)
+            raise TimeoutError("silent hop")
+        if cached:
+            upstream.settimeout(120)
+        try:
+            self.wfile.write(first)
+            self.wfile.flush()
             while True:
                 chunk = upstream.recv(65536)
                 if not chunk:
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-                started = True
-        except Exception as exc:  # noqa: BLE001
-            if not started:
-                self._fail(502, exc)
         finally:
             upstream.close()
             self.close_connection = True
+
+    def _pipe(self, body: bytes | None, headers: dict[str, str]) -> None:
+        """Copy the hub's response bytes. This machine only adds its own request headers."""
+        last: BaseException | None = None
+        for origin, target, cached in self._places():
+            try:
+                self._copy_hop(origin, target, cached, body, headers)
+                return
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+        found = self._another_binding()
+        if found:
+            try:
+                self._copy_hop(found, 0, True, body, headers)
+                return
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+        self._fail(502, last or OSError("没有找到这份中枢"))
 
     def do_GET(self):  # noqa: N802
         self._forward()
@@ -2618,6 +2673,7 @@ def write_configs(home: Path, base_url: str, token: str = "", programs: list[str
     device_id = _device_id(home)
     targets = {
         "Cursor": lambda: _merge_mcp_json(home / ".cursor" / "mcp.json", url, supplied, device_id),
+        "Trae": lambda: _merge_mcp_json(trae_mcp_path(home), url, supplied, device_id),
         "WorkBuddy": lambda: _merge_mcp_json(home / ".workbuddy" / "mcp.json", url, supplied, device_id),
         "CodeBuddy": lambda: _merge_mcp_json(home / ".codebuddy" / "mcp.json", url, supplied, device_id),
         "DSH": lambda: _merge_dsh_mcp(home, url, supplied, device_id),
