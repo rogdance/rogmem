@@ -193,6 +193,11 @@ def test_agent_by_token_still_opens_when_last_used_is_locked(tmp_path, monkeypat
     assert after == before
 
 
+def _login_panel(page: str) -> str:
+    """登录窗本体。帮助弹窗和页首的文案不算在内。"""
+    return page.split('<main class="login-panel"', 1)[1].split("</main>", 1)[0]
+
+
 def _free_port() -> int:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -290,11 +295,11 @@ def test_first_visit_opens_without_a_password(tmp_path, monkeypatch):
         opened = hub.req("POST", "/admin/api/settings/webhook", {"url": "https://1.1.1.1/hook"})
         assert opened[0] == 200, opened[1]
         page = login_page()
-        desk = page.split('<main class="desk">', 1)[1].split("</main>", 1)[0]
-        assert "默认可直接进入" not in desk
-        assert "关掉免密" not in desk
-        assert desk.count("初始密码:") == 1
-        assert "初始密码: Rogmem@2026" in desk
+        panel = _login_panel(page)
+        assert "默认可直接进入" not in panel
+        assert "关掉免密" not in panel
+        assert panel.count("初始密码") == 1
+        assert "初始密码：Rogmem@2026" in panel
         assert "默认可直接进入" in page
         assert "关掉免密" in page
         assert "复制给 Agent" not in page
@@ -328,18 +333,23 @@ def test_login_page_explains_the_open_default(tmp_path, monkeypatch):
         login, page, login_headers = hub.req("GET", "/admin/login")
         assert login == 200
         assert "帮助" in page
-        desk = page.split('<main class="desk">', 1)[1].split("</main>", 1)[0]
-        assert "默认可直接进入" not in desk
-        assert "关掉免密" not in desk
-        assert desk.count("初始密码:") == 1
-        assert "初始密码: Rogmem@2026" in desk
-        assert "登录密码" in desk
+        panel = _login_panel(page)
+        assert "默认可直接进入" not in panel
+        assert "关掉免密" not in panel
+        assert panel.count("初始密码") == 1
+        assert "初始密码：Rogmem@2026" in panel
+        assert "ROGMEM 私人记忆中枢" in panel
+        assert "立即登录" in panel
+        assert "登录密码" in panel
+        assert 'placeholder="输入访问密码"' in panel
+        assert 'id="password-input"' in panel
         assert "color: var(--text-muted)" in page
         assert "默认可直接进入" in page
         assert "基础设置" in page
         assert "关掉免密" in page
         assert "登录密码" in page
-        assert 'class="login-field"' in page
+        assert 'class="login-panel"' in page
+        assert 'id="neural-network-canvas"' in page
         assert 'id="nebula"' not in page
         assert "cosmos-graph.min.js" not in page
         assert "spaceDimensions" not in page
@@ -357,8 +367,29 @@ def test_login_page_explains_the_open_default(tmp_path, monkeypatch):
         script, _script_body, script_headers = hub.req("GET", "/admin/static/cosmos-graph.min.js")
         assert script == 200
         assert "javascript" in script_headers.get("Content-Type", "")
+        module, module_body, module_headers = hub.req("GET", "/admin/static/three/build/three.module.js")
+        assert module == 200
+        assert "javascript" in module_headers.get("Content-Type", "")
+        assert "REVISION" in module_body
+        addon, _addon_body, addon_headers = hub.req("GET", "/admin/static/three/examples/jsm/controls/OrbitControls.js")
+        assert addon == 200
+        assert "javascript" in addon_headers.get("Content-Type", "")
+        assert hub.req("GET", "/admin/static/three/nope.js")[0] == 404
     finally:
         hub.close()
+
+
+def test_login_assets_open_without_a_session():
+    """登录页画 3D 视效要用到 three.js，但只放行 vendor/three 里的文件。"""
+    from rogmem import app as server
+
+    assert server._login_asset("/admin/static/three/build/three.module.js") is True
+    assert server._login_asset("/admin/static/three/examples/jsm/controls/OrbitControls.js") is True
+    assert server._login_asset("/admin/static/three/") is False
+    assert server._login_asset("/admin/static/three/../vendor/cosmos-graph.min.js") is False
+    assert server._login_asset("/admin/static/login/step-enter.png") is True
+    assert server._login_asset("/admin/static/login/../ui.py") is False
+    assert server._login_asset("/admin/api/settings/basic") is False
 
 
 def test_admin_writes_require_the_password_session(tmp_path, monkeypatch):

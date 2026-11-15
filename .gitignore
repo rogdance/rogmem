@@ -12,3 +12,4 @@ rogmem/BUILD_STAMP
 rogmem/host_client.tar.gz
 rogmem/host_client.whl
 build/
+!rogmem/vendor/three/build/

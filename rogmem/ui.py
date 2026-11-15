@@ -166,7 +166,12 @@ _LOGIN_STEPS = (
 
 
 def login_page() -> str:
-    """登录页。配色沿用管理台的设计 token 和品牌色。"""
+    """登录页。
+
+    3D 神经网络视效铺满屏幕，登录窗落在垂直中线与下方黄金分割线的交汇点。
+    口令交服务端校验：`POST /admin/login` 通过后才写入会话 cookie 并放行管理台。
+    配色与圆角沿用管理台的设计 token 和品牌色。
+    """
     from rogmem.engine import INITIAL_ADMIN_PASSWORD
 
     steps = "".join(
@@ -192,10 +197,12 @@ def login_page() -> str:
   --text-secondary: #d6d6d6;
   --text-muted: #adadad;
   --border: #3d3d3d;
+  --border-strong: #5e5e5e;
   --input: #4d4d4d;
   --primary: #f2f2f2;
   --primary-foreground: #212121;
   --primary-hover: #dedede;
+  --success-text: #97dbb2;
   --danger-text: #ffadb9;
   --brand: #ef6576;
   --focus-color: #f095a8;
@@ -203,49 +210,28 @@ def login_page() -> str:
   --shadow-dialog: 0 20px 64px rgba(0, 0, 0, .4);
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; width: 100%; }
 body {
+  overflow: hidden;
   font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 14px;
   line-height: 1.5;
   color: var(--text-primary);
   background: var(--surface-page);
-  min-height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
-.login-field {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-.glow {
+canvas#neural-network-canvas {
+  display: block;
   position: absolute;
-  border-radius: 50%;
-  background: radial-gradient(circle, color-mix(in srgb, var(--brand) 70%, transparent) 0%, transparent 68%);
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
 }
-.glow-a { width: 34vmin; height: 34vmin; left: -4vmin; top: 12vh; animation: login-drift 16s ease-in-out infinite alternate; }
-.glow-b {
-  width: 28vmin;
-  height: 28vmin;
-  right: -2vmin;
-  bottom: 10vh;
-  background: radial-gradient(circle, color-mix(in srgb, #FF7038 62%, transparent) 0%, transparent 70%);
-  animation: login-drift 20s ease-in-out infinite alternate-reverse;
-}
-.glow-c { width: 12vmin; height: 12vmin; right: 16vw; top: 16vh; opacity: .85; }
-@keyframes login-drift {
-  from { transform: translate3d(0, 0, 0); }
-  to { transform: translate3d(1.5%, -1.5%, 0); }
-}
-:focus-visible { outline: 2px solid var(--focus-color); outline-offset: 2px; }
+/* 左上角品牌 logo，与 /admin/crystals 的 header .brand 一致 */
 .top {
   position: fixed;
   inset: 0 0 auto 0;
-  z-index: 3;
+  z-index: 50;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -266,54 +252,95 @@ body {
   font-size: 12px;
   cursor: pointer;
 }
-.desk {
-  position: relative;
-  z-index: 2;
-  width: min(380px, calc(100% - 32px));
-  margin: 0 auto;
-  padding: 20px 22px 18px;
-  background: var(--surface-base);
+:focus-visible { outline: 2px solid var(--focus-color); outline-offset: 2px; }
+/* 登录窗：垂直中线 x=50% 与下方黄金分割线 y=61.8% 的交汇点 */
+.login-panel {
+  position: fixed;
+  left: 50%;
+  top: 61.8%;
+  transform: translate(-50%, -50%);
+  z-index: 30;
+  width: min(380px, calc(100vw - 40px));
+  padding: 28px 26px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
   border: 1px solid var(--border);
   border-radius: 12px;
+  background: linear-gradient(145deg, rgba(40, 40, 40, .4) 0%, rgba(23, 23, 23, .32) 100%);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
+  backdrop-filter: blur(14px) saturate(130%);
   box-shadow: var(--shadow-dialog);
+  transition: background .4s cubic-bezier(.25, .8, .25, 1), border-color .4s;
 }
-.desk h1 { margin: 0 0 16px; font-size: 18px; font-weight: 600; }
-.desk p { margin: 0 0 10px; color: var(--text-secondary); }
-.prompt {
-  margin: 0 0 8px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--surface-subtle);
-  color: var(--text-primary);
-  word-break: break-word;
+.login-panel:hover {
+  background: linear-gradient(145deg, rgba(48, 48, 48, .46) 0%, rgba(28, 28, 28, .38) 100%);
+  border-color: var(--border-strong);
 }
-.desk button, .desk input {
-  font: inherit;
+.login-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  line-height: 1.4;
+  text-align: center;
 }
-.copy, .desk button[type="submit"] {
-  min-height: 36px;
-  padding: 8px 14px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--primary);
-  color: var(--primary-foreground);
-  cursor: pointer;
-}
-.copy { margin: 0 0 12px; background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
-.desk label { display: block; margin: 0 0 8px; color: var(--text-secondary); }
-.desk input {
-  display: block;
+.password-input {
   width: 100%;
-  margin-top: 4px;
-  min-height: 36px;
-  padding: 8px 10px;
+  min-height: 40px;
+  padding: 10px 12px;
+  font: inherit;
+  letter-spacing: .3px;
+  color: var(--text-primary);
+  background: var(--surface-subtle);
   border: 1px solid var(--input);
   border-radius: 8px;
-  background: var(--surface-subtle);
-  color: var(--text-primary);
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+  transition: border-color .2s ease, box-shadow .2s ease;
 }
-.desk button[type="submit"] { width: 100%; }
-#err { min-height: 1.5em; margin: 8px 0 0; color: var(--danger-text); }
+.password-input::placeholder { color: var(--text-muted); }
+.password-input:focus {
+  border-color: var(--focus-color);
+  box-shadow: 0 0 0 3px rgba(240, 149, 168, .22);
+}
+.login-button {
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: .06em;
+  color: var(--primary-foreground);
+  background: var(--primary);
+  cursor: pointer;
+  transition: background .2s ease;
+}
+.login-button:hover { background: var(--primary-hover); }
+.login-button:disabled { opacity: .5; cursor: not-allowed; }
+.login-message {
+  min-height: 18px;
+  margin-top: -8px;
+  font-size: 13px;
+  letter-spacing: .3px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity .3s ease;
+}
+.login-message.show { opacity: 1; }
+.login-message.error { color: var(--danger-text); }
+.login-message.success { color: var(--success-text); }
+.login-hint {
+  margin-top: -12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+  letter-spacing: .3px;
+  text-align: center;
+}
 dialog {
   width: min(560px, calc(100% - 32px));
   max-height: min(80vh, 720px);
@@ -341,49 +368,1000 @@ dialog .close {
   font: inherit;
   cursor: pointer;
 }
-.desk p.initial-password {
-  display: block;
-  margin: 6px 0 14px;
-  color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 1.5;
-}
-@media (prefers-reduced-motion: reduce) {
-  .glow-a, .glow-b { animation: none; }
+@media (max-width: 480px) {
+  .login-panel { top: 58%; padding: 24px 20px 18px; }
+  .login-title { font-size: 18px; }
 }
 </style></head><body>
-<div class="login-field" aria-hidden="true"><i class="glow glow-a"></i><i class="glow glow-b"></i><i class="glow glow-c"></i></div>
+<canvas id="neural-network-canvas"></canvas>
 <header class="top"><a class="brand" href="/admin/login" aria-label="ROGMEM">__BRAND__</a><button type="button" class="help" id="help">帮助</button></header>
-<main class="desk">
-<h1>登录</h1>
-<form id="login">
-<label>登录密码 <input name="password" type="password" autocomplete="current-password" required></label>
-<p class="initial-password">初始密码: __INITIAL__</p>
-<button type="submit">登录</button>
-</form>
-<p id="err"></p>
+<main class="login-panel" aria-label="登录">
+<div class="login-title">ROGMEM 私人记忆中枢</div>
+<input id="password-input" class="password-input" name="password" type="password" placeholder="输入访问密码" autocomplete="current-password" spellcheck="false" aria-label="登录密码">
+<button id="login-button" class="login-button" type="button">立即登录</button>
+<p id="login-message" class="login-message" role="status" aria-live="polite"></p>
+<p class="login-hint">初始密码：__INITIAL__</p>
 </main>
 <dialog id="help-dialog" aria-labelledby="help-title">
 <form method="dialog"><button class="close" value="cancel">关闭</button></form>
 <h2 id="help-title">怎么进入管理台</h2>
 <ol>__STEPS__</ol>
 </dialog>
-<script>
-document.getElementById("help").onclick = function () {
-  document.getElementById("help-dialog").showModal();
+<script type="importmap">
+{
+  "imports": {
+    "three": "/admin/static/three/build/three.module.js",
+    "three/addons/": "/admin/static/three/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const config = {
+  paused: false,
+  activePaletteIndex: 0,
+  currentFormation: 0,
+  densityFactor: 1
 };
-document.getElementById("login").onsubmit = async function (event) {
-  event.preventDefault();
-  var password = new FormData(event.target).get("password");
-  var response = await fetch("/admin/login", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({password: password})
+
+const colorPalettes = [
+  [
+    // 取自 /admin/crystals 顶部提示条背景色 #2c2024 的玫瑰色系（暗→亮）
+    new THREE.Color(0x2c2024),
+    new THREE.Color(0x53343e),
+    new THREE.Color(0x8f5a67),
+    new THREE.Color(0xef6576),
+    new THREE.Color(0xedb4c2)
+  ],
+  [
+    new THREE.Color(0xf857a6),
+    new THREE.Color(0xff5858),
+    new THREE.Color(0xfeca57),
+    new THREE.Color(0xff6348),
+    new THREE.Color(0xff9068)
+  ],
+  [
+    new THREE.Color(0x4facfe),
+    new THREE.Color(0x00f2fe),
+    new THREE.Color(0x43e97b),
+    new THREE.Color(0x38f9d7),
+    new THREE.Color(0x4484ce)
+  ]
+];
+
+// ---------- 场景基础 ----------
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.002);
+
+const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
+// 默认镜头拉近至原距离的 1/1.5，使核心网络在默认视角下放大约 1.5 倍并铺满屏幕
+camera.position.set(0, 5.3, 18.7);
+
+const canvasElement = document.getElementById('neural-network-canvas');
+const renderer = new THREE.WebGLRenderer({
+  canvas: canvasElement,
+  antialias: true,
+  powerPreference: "high-performance"
+});
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const clock = new THREE.Clock();
+
+// ---------- 星空背景 ----------
+function createStarfield() {
+  const count = 8000;
+  const positions = [];
+  const colors = [];
+  const sizes = [];
+  for (let i = 0; i < count; i++) {
+    const r = THREE.MathUtils.randFloat(50, 150);
+    const phi = Math.acos(THREE.MathUtils.randFloatSpread(2));
+    const theta = THREE.MathUtils.randFloat(0, Math.PI * 2);
+    positions.push(
+      r * Math.sin(phi) * Math.cos(theta),
+      r * Math.sin(phi) * Math.sin(theta),
+      r * Math.cos(phi)
+    );
+    const colorChoice = Math.random();
+    if (colorChoice < 0.7) {
+      colors.push(1, 1, 1);
+    } else if (colorChoice < 0.85) {
+      colors.push(0.7, 0.8, 1);
+    } else {
+      colors.push(1, 0.9, 0.8);
+    }
+    sizes.push(THREE.MathUtils.randFloat(0.1, 0.3));
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 }
+    },
+    vertexShader: `
+      attribute float size;
+      attribute vec3 color;
+      varying vec3 vColor;
+      uniform float uTime;
+      void main() {
+          vColor = color;
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+          float twinkle = sin(uTime * 2.0 + position.x * 100.0) * 0.3 + 0.7;
+          gl_PointSize = size * twinkle * (300.0 / -mvPosition.z);
+          gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+          vec2 center = gl_PointCoord - 0.5;
+          float dist = length(center);
+          if (dist > 0.5) discard;
+          float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
+          gl_FragColor = vec4(vColor, alpha * 0.8);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
   });
-  if (response.ok) { location = "/"; return; }
-  document.getElementById("err").textContent = "密码不对";
+  return new THREE.Points(geo, mat);
+}
+
+const starField = createStarfield();
+scene.add(starField);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.rotateSpeed = 0.6;
+controls.minDistance = 8;
+controls.maxDistance = 80;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.2;
+controls.enablePan = false;
+
+// ---------- 后期泛光 ----------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  1.8,
+  0.6,
+  0.7
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+// ---------- 着色器 ----------
+const pulseUniforms = {
+  uTime: { value: 0.0 },
+  uPulsePositions: {
+    value: [
+      new THREE.Vector3(1e3, 1e3, 1e3),
+      new THREE.Vector3(1e3, 1e3, 1e3),
+      new THREE.Vector3(1e3, 1e3, 1e3)
+    ]
+  },
+  uPulseTimes: { value: [-1e3, -1e3, -1e3] },
+  uPulseColors: {
+    value: [
+      new THREE.Color(1, 1, 1),
+      new THREE.Color(1, 1, 1),
+      new THREE.Color(1, 1, 1)
+    ]
+  },
+  uPulseSpeed: { value: 18.0 },
+  uBaseNodeSize: { value: 0.6 }
 };
+
+const noiseFunctions = `
+  vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+  float snoise(vec3 v) {
+      const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+      const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+
+      vec3 i = floor(v + dot(v, C.yyy));
+      vec3 x0 = v - i + dot(i, C.xxx);
+
+      vec3 g = step(x0.yzx, x0.xyz);
+      vec3 l = 1.0 - g;
+      vec3 i1 = min(g.xyz, l.zxy);
+      vec3 i2 = max(g.xyz, l.zxy);
+
+      vec3 x1 = x0 - i1 + C.xxx;
+      vec3 x2 = x0 - i2 + C.yyy;
+      vec3 x3 = x0 - D.yyy;
+
+      i = mod289(i);
+      vec4 p = permute(permute(permute(
+          i.z + vec4(0.0, i1.z, i2.z, 1.0))
+          + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+          + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+
+      float n_ = 0.142857142857;
+      vec3 ns = n_ * D.wyz - D.xzx;
+
+      vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+      vec4 x_ = floor(j * ns.z);
+      vec4 y_ = floor(j - 7.0 * x_);
+
+      vec4 x = x_ * ns.x + ns.yyyy;
+      vec4 y = y_ * ns.x + ns.yyyy;
+      vec4 h = 1.0 - abs(x) - abs(y);
+
+      vec4 b0 = vec4(x.xy, y.xy);
+      vec4 b1 = vec4(x.zw, y.zw);
+
+      vec4 s0 = floor(b0) * 2.0 + 1.0;
+      vec4 s1 = floor(b1) * 2.0 + 1.0;
+      vec4 sh = -step(h, vec4(0.0));
+
+      vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+      vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+      vec3 p0 = vec3(a0.xy, h.x);
+      vec3 p1 = vec3(a0.zw, h.y);
+      vec3 p2 = vec3(a1.xy, h.z);
+      vec3 p3 = vec3(a1.zw, h.w);
+
+      vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+      p0 *= norm.x;
+      p1 *= norm.y;
+      p2 *= norm.z;
+      p3 *= norm.w;
+
+      vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+      m = m * m;
+      return 42.0 * dot(m * m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+  }`;
+
+const nodeShader = {
+  vertexShader: `${noiseFunctions}
+    attribute float nodeSize;
+    attribute float nodeType;
+    attribute vec3 nodeColor;
+    attribute float distanceFromRoot;
+
+    uniform float uTime;
+    uniform vec3 uPulsePositions[3];
+    uniform float uPulseTimes[3];
+    uniform float uPulseSpeed;
+    uniform float uBaseNodeSize;
+
+    varying vec3 vColor;
+    varying float vNodeType;
+    varying vec3 vPosition;
+    varying float vPulseIntensity;
+    varying float vDistanceFromRoot;
+    varying float vGlow;
+
+    float getPulseIntensity(vec3 worldPos, vec3 pulsePos, float pulseTime) {
+        if (pulseTime < 0.0) return 0.0;
+        float timeSinceClick = uTime - pulseTime;
+        if (timeSinceClick < 0.0 || timeSinceClick > 4.0) return 0.0;
+        float pulseRadius = timeSinceClick * uPulseSpeed;
+        float distToClick = distance(worldPos, pulsePos);
+        float pulseThickness = 3.0;
+        float waveProximity = abs(distToClick - pulseRadius);
+        return smoothstep(pulseThickness, 0.0, waveProximity) * smoothstep(4.0, 0.0, timeSinceClick);
+    }
+
+    void main() {
+        vNodeType = nodeType;
+        vColor = nodeColor;
+        vDistanceFromRoot = distanceFromRoot;
+        vec3 worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+        vPosition = worldPos;
+        float totalPulseIntensity = 0.0;
+        for (int i = 0; i < 3; i++) {
+            totalPulseIntensity += getPulseIntensity(worldPos, uPulsePositions[i], uPulseTimes[i]);
+        }
+        vPulseIntensity = min(totalPulseIntensity, 1.0);
+        float breathe = sin(uTime * 0.7 + distanceFromRoot * 0.15) * 0.15 + 0.85;
+        float baseSize = nodeSize * breathe;
+        float pulseSize = baseSize * (1.0 + vPulseIntensity * 2.5);
+        vGlow = 0.5 + 0.5 * sin(uTime * 0.5 + distanceFromRoot * 0.2);
+        vec3 modifiedPosition = position;
+        if (nodeType > 0.5) {
+            float noise = snoise(position * 0.08 + uTime * 0.08);
+            modifiedPosition += normal * noise * 0.15;
+        }
+        vec4 mvPosition = modelViewMatrix * vec4(modifiedPosition, 1.0);
+        gl_PointSize = pulseSize * uBaseNodeSize * (1000.0 / -mvPosition.z);
+        gl_Position = projectionMatrix * mvPosition;
+    }`,
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec3 uPulseColors[3];
+
+    varying vec3 vColor;
+    varying float vNodeType;
+    varying vec3 vPosition;
+    varying float vPulseIntensity;
+    varying float vDistanceFromRoot;
+    varying float vGlow;
+
+    void main() {
+        vec2 center = 2.0 * gl_PointCoord - 1.0;
+        float dist = length(center);
+        if (dist > 1.0) discard;
+        float glow1 = 1.0 - smoothstep(0.0, 0.5, dist);
+        float glow2 = 1.0 - smoothstep(0.0, 1.0, dist);
+        float glowStrength = pow(glow1, 1.2) + glow2 * 0.3;
+        float breatheColor = 0.9 + 0.1 * sin(uTime * 0.6 + vDistanceFromRoot * 0.25);
+        vec3 baseColor = vColor * breatheColor;
+        vec3 finalColor = baseColor;
+        if (vPulseIntensity > 0.0) {
+            vec3 pulseColor = mix(vec3(1.0), uPulseColors[0], 0.4);
+            finalColor = mix(baseColor, pulseColor, vPulseIntensity * 0.8);
+            finalColor *= (1.0 + vPulseIntensity * 1.2);
+            glowStrength *= (1.0 + vPulseIntensity);
+        }
+        float coreBrightness = smoothstep(0.4, 0.0, dist);
+        finalColor += vec3(1.0) * coreBrightness * 0.3;
+        float alpha = glowStrength * (0.95 - 0.3 * dist);
+        float camDistance = length(vPosition - cameraPosition);
+        float distanceFade = smoothstep(100.0, 15.0, camDistance);
+        if (vNodeType > 0.5) {
+            finalColor *= 1.1;
+            alpha *= 0.9;
+        }
+        finalColor *= (1.0 + vGlow * 0.1);
+        gl_FragColor = vec4(finalColor, alpha * distanceFade);
+    }`
+};
+
+const connectionShader = {
+  vertexShader: `${noiseFunctions}
+    attribute vec3 startPoint;
+    attribute vec3 endPoint;
+    attribute float connectionStrength;
+    attribute float pathIndex;
+    attribute vec3 connectionColor;
+
+    uniform float uTime;
+    uniform vec3 uPulsePositions[3];
+    uniform float uPulseTimes[3];
+    uniform float uPulseSpeed;
+
+    varying vec3 vColor;
+    varying float vConnectionStrength;
+    varying float vPulseIntensity;
+    varying float vPathPosition;
+    varying float vDistanceFromCamera;
+
+    float getPulseIntensity(vec3 worldPos, vec3 pulsePos, float pulseTime) {
+        if (pulseTime < 0.0) return 0.0;
+        float timeSinceClick = uTime - pulseTime;
+        if (timeSinceClick < 0.0 || timeSinceClick > 4.0) return 0.0;
+
+        float pulseRadius = timeSinceClick * uPulseSpeed;
+        float distToClick = distance(worldPos, pulsePos);
+        float pulseThickness = 3.0;
+        float waveProximity = abs(distToClick - pulseRadius);
+
+        return smoothstep(pulseThickness, 0.0, waveProximity) * smoothstep(4.0, 0.0, timeSinceClick);
+    }
+
+    void main() {
+        float t = position.x;
+        vPathPosition = t;
+        vec3 midPoint = mix(startPoint, endPoint, 0.5);
+        float pathOffset = sin(t * 3.14159) * 0.15;
+        vec3 perpendicular = normalize(cross(normalize(endPoint - startPoint), vec3(0.0, 1.0, 0.0)));
+        if (length(perpendicular) < 0.1) perpendicular = vec3(1.0, 0.0, 0.0);
+        midPoint += perpendicular * pathOffset;
+        vec3 p0 = mix(startPoint, midPoint, t);
+        vec3 p1 = mix(midPoint, endPoint, t);
+        vec3 finalPos = mix(p0, p1, t);
+        float noiseTime = uTime * 0.15;
+        float noise = snoise(vec3(pathIndex * 0.08, t * 0.6, noiseTime));
+        finalPos += perpendicular * noise * 0.12;
+        vec3 worldPos = (modelMatrix * vec4(finalPos, 1.0)).xyz;
+        float totalPulseIntensity = 0.0;
+        for (int i = 0; i < 3; i++) {
+            totalPulseIntensity += getPulseIntensity(worldPos, uPulsePositions[i], uPulseTimes[i]);
+        }
+        vPulseIntensity = min(totalPulseIntensity, 1.0);
+        vColor = connectionColor;
+        vConnectionStrength = connectionStrength;
+
+        vDistanceFromCamera = length(worldPos - cameraPosition);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(finalPos, 1.0);
+    }`,
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec3 uPulseColors[3];
+
+    varying vec3 vColor;
+    varying float vConnectionStrength;
+    varying float vPulseIntensity;
+    varying float vPathPosition;
+    varying float vDistanceFromCamera;
+
+    void main() {
+        float flowPattern1 = sin(vPathPosition * 25.0 - uTime * 4.0) * 0.5 + 0.5;
+        float flowPattern2 = sin(vPathPosition * 15.0 - uTime * 2.5 + 1.57) * 0.5 + 0.5;
+        float combinedFlow = (flowPattern1 + flowPattern2 * 0.5) / 1.5;
+
+        vec3 baseColor = vColor * (0.8 + 0.2 * sin(uTime * 0.6 + vPathPosition * 12.0));
+        float flowIntensity = 0.4 * combinedFlow * vConnectionStrength;
+        vec3 finalColor = baseColor;
+        if (vPulseIntensity > 0.0) {
+            vec3 pulseColor = mix(vec3(1.0), uPulseColors[0], 0.3);
+            finalColor = mix(baseColor, pulseColor * 1.2, vPulseIntensity * 0.7);
+            flowIntensity += vPulseIntensity * 0.8;
+        }
+        finalColor *= (0.7 + flowIntensity + vConnectionStrength * 0.5);
+        float baseAlpha = 0.7 * vConnectionStrength;
+        float flowAlpha = combinedFlow * 0.3;
+        float alpha = baseAlpha + flowAlpha;
+        alpha = mix(alpha, min(1.0, alpha * 2.5), vPulseIntensity);
+        float distanceFade = smoothstep(100.0, 15.0, vDistanceFromCamera);
+        gl_FragColor = vec4(finalColor, alpha * distanceFade);
+    }`
+};
+
+// ---------- 网络结构生成 ----------
+class Node {
+  constructor(position, level = 0, type = 0) {
+    this.position = position;
+    this.connections = [];
+    this.level = level;
+    this.type = type;
+    this.size = type === 0 ? THREE.MathUtils.randFloat(0.8, 1.4) : THREE.MathUtils.randFloat(0.5, 1.0);
+    this.distanceFromRoot = 0;
+  }
+
+  addConnection(node, strength = 1.0) {
+    if (!this.isConnectedTo(node)) {
+      this.connections.push({ node, strength });
+      node.connections.push({ node: this, strength });
+    }
+  }
+
+  isConnectedTo(node) {
+    return this.connections.some(conn => conn.node === node);
+  }
+}
+
+function generateNeuralNetwork(formationIndex, densityFactor = 1.0) {
+  let nodes = [];
+  let rootNode;
+
+  function generateCrystallineSphere() {
+    rootNode = new Node(new THREE.Vector3(0, 0, 0), 0, 0);
+    rootNode.size = 2.0;
+    nodes.push(rootNode);
+    const layers = 5;
+    const goldenRatio = (1 + Math.sqrt(5)) / 2;
+    for (let layer = 1; layer <= layers; layer++) {
+      const radius = layer * 4;
+      const numPoints = Math.floor(layer * 12 * densityFactor);
+      for (let i = 0; i < numPoints; i++) {
+        const phi = Math.acos(1 - 2 * (i + 0.5) / numPoints);
+        const theta = 2 * Math.PI * i / goldenRatio;
+        const pos = new THREE.Vector3(
+          radius * Math.sin(phi) * Math.cos(theta),
+          radius * Math.sin(phi) * Math.sin(theta),
+          radius * Math.cos(phi)
+        );
+        const isLeaf = layer === layers || Math.random() < 0.3;
+        const node = new Node(pos, layer, isLeaf ? 1 : 0);
+        node.distanceFromRoot = radius;
+        nodes.push(node);
+        if (layer > 1) {
+          const prevLayerNodes = nodes.filter(n => n.level === layer - 1 && n !== rootNode);
+          prevLayerNodes.sort((a, b) =>
+            pos.distanceTo(a.position) - pos.distanceTo(b.position)
+          );
+          for (let j = 0; j < Math.min(3, prevLayerNodes.length); j++) {
+            const dist = pos.distanceTo(prevLayerNodes[j].position);
+            const strength = 1.0 - (dist / (radius * 2));
+            node.addConnection(prevLayerNodes[j], Math.max(0.3, strength));
+          }
+        } else {
+          rootNode.addConnection(node, 0.9);
+        }
+      }
+      const layerNodes = nodes.filter(n => n.level === layer && n !== rootNode);
+      for (let i = 0; i < layerNodes.length; i++) {
+        const node = layerNodes[i];
+        const nearby = layerNodes.filter(n => n !== node)
+          .sort((a, b) =>
+            node.position.distanceTo(a.position) - node.position.distanceTo(b.position)
+          ).slice(0, 5);
+        for (const nearNode of nearby) {
+          const dist = node.position.distanceTo(nearNode.position);
+          if (dist < radius * 0.8 && !node.isConnectedTo(nearNode)) {
+            node.addConnection(nearNode, 0.6);
+          }
+        }
+      }
+    }
+    const outerNodes = nodes.filter(n => n.level >= 3);
+    for (let i = 0; i < Math.min(20, outerNodes.length); i++) {
+      const n1 = outerNodes[Math.floor(Math.random() * outerNodes.length)];
+      const n2 = outerNodes[Math.floor(Math.random() * outerNodes.length)];
+      if (n1 !== n2 && !n1.isConnectedTo(n2) &&
+        Math.abs(n1.level - n2.level) > 1) {
+        n1.addConnection(n2, 0.4);
+      }
+    }
+  }
+
+  function generateHelixLattice() {
+    rootNode = new Node(new THREE.Vector3(0, 0, 0), 0, 0);
+    rootNode.size = 1.8;
+    nodes.push(rootNode);
+    const numHelices = 4;
+    const height = 30;
+    const maxRadius = 12;
+    const nodesPerHelix = Math.floor(50 * densityFactor);
+    const helixArrays = [];
+    for (let h = 0; h < numHelices; h++) {
+      const helixPhase = (h / numHelices) * Math.PI * 2;
+      const helixNodes = [];
+      for (let i = 0; i < nodesPerHelix; i++) {
+        const t = i / (nodesPerHelix - 1);
+        const y = (t - 0.5) * height;
+        const radiusScale = Math.sin(t * Math.PI) * 0.7 + 0.3;
+        const radius = maxRadius * radiusScale;
+        const angle = helixPhase + t * Math.PI * 6;
+        const pos = new THREE.Vector3(
+          radius * Math.cos(angle),
+          y,
+          radius * Math.sin(angle)
+        );
+        const level = Math.ceil(t * 5);
+        const isLeaf = i > nodesPerHelix - 5 || Math.random() < 0.25;
+        const node = new Node(pos, level, isLeaf ? 1 : 0);
+        node.distanceFromRoot = Math.sqrt(radius * radius + y * y);
+        node.helixIndex = h;
+        node.helixT = t;
+        nodes.push(node);
+        helixNodes.push(node);
+      }
+      helixArrays.push(helixNodes);
+      rootNode.addConnection(helixNodes[0], 1.0);
+      for (let i = 0; i < helixNodes.length - 1; i++) {
+        helixNodes[i].addConnection(helixNodes[i + 1], 0.85);
+      }
+    }
+    for (let h = 0; h < numHelices; h++) {
+      const currentHelix = helixArrays[h];
+      const nextHelix = helixArrays[(h + 1) % numHelices];
+      for (let i = 0; i < currentHelix.length; i += 5) {
+        const t = currentHelix[i].helixT;
+        const targetIdx = Math.round(t * (nextHelix.length - 1));
+        if (targetIdx < nextHelix.length) {
+          currentHelix[i].addConnection(nextHelix[targetIdx], 0.7);
+        }
+      }
+    }
+    for (const helix of helixArrays) {
+      for (let i = 0; i < helix.length; i += 8) {
+        const node = helix[i];
+        const innerNodes = nodes.filter(n =>
+          n !== node &&
+          n !== rootNode &&
+          n.distanceFromRoot < node.distanceFromRoot * 0.5
+        );
+        if (innerNodes.length > 0) {
+          const nearest = innerNodes.sort((a, b) =>
+            node.position.distanceTo(a.position) - node.position.distanceTo(b.position)
+          )[0];
+          node.addConnection(nearest, 0.5);
+        }
+      }
+    }
+    const allHelixNodes = nodes.filter(n => n !== rootNode);
+    for (let i = 0; i < Math.floor(30 * densityFactor); i++) {
+      const n1 = allHelixNodes[Math.floor(Math.random() * allHelixNodes.length)];
+      const nearby = allHelixNodes.filter(n => {
+        const dist = n.position.distanceTo(n1.position);
+        return n !== n1 && dist < 8 && dist > 3 && !n1.isConnectedTo(n);
+      });
+      if (nearby.length > 0) {
+        const n2 = nearby[Math.floor(Math.random() * nearby.length)];
+        n1.addConnection(n2, 0.45);
+      }
+    }
+  }
+
+  function generateFractalWeb() {
+    rootNode = new Node(new THREE.Vector3(0, 0, 0), 0, 0);
+    rootNode.size = 1.6;
+    nodes.push(rootNode);
+    const branches = 6;
+    const maxDepth = 4;
+
+    function createBranch(startNode, direction, depth, strength, scale) {
+      if (depth > maxDepth) return;
+      const branchLength = 5 * scale;
+      const endPos = new THREE.Vector3()
+        .copy(startNode.position)
+        .add(direction.clone().multiplyScalar(branchLength));
+      const isLeaf = depth === maxDepth || Math.random() < 0.3;
+      const newNode = new Node(endPos, depth, isLeaf ? 1 : 0);
+      newNode.distanceFromRoot = rootNode.position.distanceTo(endPos);
+      nodes.push(newNode);
+      startNode.addConnection(newNode, strength);
+      if (depth < maxDepth) {
+        const subBranches = 3;
+        for (let i = 0; i < subBranches; i++) {
+          const angle = (i / subBranches) * Math.PI * 2;
+          const perpDir1 = new THREE.Vector3(-direction.y, direction.x, 0).normalize();
+          const perpDir2 = direction.clone().cross(perpDir1).normalize();
+          const newDir = new THREE.Vector3()
+            .copy(direction)
+            .add(perpDir1.clone().multiplyScalar(Math.cos(angle) * 0.7))
+            .add(perpDir2.clone().multiplyScalar(Math.sin(angle) * 0.7))
+            .normalize();
+          createBranch(newNode, newDir, depth + 1, strength * 0.7, scale * 0.75);
+        }
+      }
+    }
+
+    for (let i = 0; i < branches; i++) {
+      const phi = Math.acos(1 - 2 * (i + 0.5) / branches);
+      const theta = Math.PI * (1 + Math.sqrt(5)) * i;
+      const direction = new THREE.Vector3(
+        Math.sin(phi) * Math.cos(theta),
+        Math.sin(phi) * Math.sin(theta),
+        Math.cos(phi)
+      ).normalize();
+      createBranch(rootNode, direction, 1, 0.9, 1.0);
+    }
+    const leafNodes = nodes.filter(n => n.level >= 2);
+    for (let i = 0; i < leafNodes.length; i++) {
+      const node = leafNodes[i];
+      const nearby = leafNodes.filter(n => {
+        const dist = n.position.distanceTo(node.position);
+        return n !== node && dist < 10 && !node.isConnectedTo(n);
+      }).sort((a, b) =>
+        node.position.distanceTo(a.position) - node.position.distanceTo(b.position)
+      ).slice(0, 3);
+      for (const nearNode of nearby) {
+        if (Math.random() < 0.5 * densityFactor) {
+          node.addConnection(nearNode, 0.5);
+        }
+      }
+    }
+    const midLevelNodes = nodes.filter(n => n.level >= 2 && n.level <= 3);
+    for (const node of midLevelNodes) {
+      if (Math.random() < 0.3) {
+        const innerNodes = nodes.filter(n =>
+          n !== node &&
+          n.distanceFromRoot < node.distanceFromRoot * 0.6
+        );
+        if (innerNodes.length > 0) {
+          const target = innerNodes[Math.floor(Math.random() * innerNodes.length)];
+          if (!node.isConnectedTo(target)) {
+            node.addConnection(target, 0.4);
+          }
+        }
+      }
+    }
+  }
+
+  switch (formationIndex % 3) {
+    case 0: generateCrystallineSphere(); break;
+    case 1: generateHelixLattice(); break;
+    case 2: generateFractalWeb(); break;
+  }
+
+  if (densityFactor < 1.0) {
+    const targetCount = Math.ceil(nodes.length * Math.max(0.3, densityFactor));
+    const toKeep = new Set([rootNode]);
+    const sortedNodes = nodes.filter(n => n !== rootNode)
+      .sort((a, b) => {
+        const scoreA = a.connections.length * (1 / (a.distanceFromRoot + 1));
+        const scoreB = b.connections.length * (1 / (b.distanceFromRoot + 1));
+        return scoreB - scoreA;
+      });
+    for (let i = 0; i < Math.min(targetCount - 1, sortedNodes.length); i++) {
+      toKeep.add(sortedNodes[i]);
+    }
+    nodes = nodes.filter(n => toKeep.has(n));
+    nodes.forEach(node => {
+      node.connections = node.connections.filter(conn => toKeep.has(conn.node));
+    });
+  }
+
+  return { nodes, rootNode };
+}
+
+// ---------- 可视化构建 ----------
+let neuralNetwork = null;
+let nodesMesh = null;
+let connectionsMesh = null;
+
+function createNetworkVisualization(formationIndex, densityFactor = 1.0) {
+  if (nodesMesh) {
+    scene.remove(nodesMesh);
+    nodesMesh.geometry.dispose();
+    nodesMesh.material.dispose();
+  }
+  if (connectionsMesh) {
+    scene.remove(connectionsMesh);
+    connectionsMesh.geometry.dispose();
+    connectionsMesh.material.dispose();
+  }
+
+  neuralNetwork = generateNeuralNetwork(formationIndex, densityFactor);
+  if (!neuralNetwork || neuralNetwork.nodes.length === 0) {
+    console.error("Network generation failed");
+    return;
+  }
+
+  const nodesGeometry = new THREE.BufferGeometry();
+  const nodePositions = [];
+  const nodeTypes = [];
+  const nodeSizes = [];
+  const nodeColors = [];
+  const distancesFromRoot = [];
+  const palette = colorPalettes[config.activePaletteIndex];
+
+  neuralNetwork.nodes.forEach((node) => {
+    nodePositions.push(node.position.x, node.position.y, node.position.z);
+    nodeTypes.push(node.type);
+    nodeSizes.push(node.size);
+    distancesFromRoot.push(node.distanceFromRoot);
+    const colorIndex = Math.min(node.level, palette.length - 1);
+    const baseColor = palette[colorIndex % palette.length].clone();
+    baseColor.offsetHSL(
+      THREE.MathUtils.randFloatSpread(0.03),
+      THREE.MathUtils.randFloatSpread(0.08),
+      THREE.MathUtils.randFloatSpread(0.08)
+    );
+    nodeColors.push(baseColor.r, baseColor.g, baseColor.b);
+  });
+
+  nodesGeometry.setAttribute('position', new THREE.Float32BufferAttribute(nodePositions, 3));
+  nodesGeometry.setAttribute('nodeType', new THREE.Float32BufferAttribute(nodeTypes, 1));
+  nodesGeometry.setAttribute('nodeSize', new THREE.Float32BufferAttribute(nodeSizes, 1));
+  nodesGeometry.setAttribute('nodeColor', new THREE.Float32BufferAttribute(nodeColors, 3));
+  nodesGeometry.setAttribute('distanceFromRoot', new THREE.Float32BufferAttribute(distancesFromRoot, 1));
+
+  const nodesMaterial = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.clone(pulseUniforms),
+    vertexShader: nodeShader.vertexShader,
+    fragmentShader: nodeShader.fragmentShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+
+  nodesMesh = new THREE.Points(nodesGeometry, nodesMaterial);
+  scene.add(nodesMesh);
+
+  const connectionsGeometry = new THREE.BufferGeometry();
+  const connectionColors = [];
+  const connectionStrengths = [];
+  const connectionPositions = [];
+  const startPoints = [];
+  const endPoints = [];
+  const pathIndices = [];
+  const processedConnections = new Set();
+  let pathIndex = 0;
+
+  neuralNetwork.nodes.forEach((node, nodeIndex) => {
+    node.connections.forEach(connection => {
+      const connectedNode = connection.node;
+      const connectedIndex = neuralNetwork.nodes.indexOf(connectedNode);
+      if (connectedIndex === -1) return;
+      const key = [Math.min(nodeIndex, connectedIndex), Math.max(nodeIndex, connectedIndex)].join('-');
+      if (!processedConnections.has(key)) {
+        processedConnections.add(key);
+        const startPoint = node.position;
+        const endPoint = connectedNode.position;
+        const numSegments = 20;
+        for (let i = 0; i < numSegments; i++) {
+          const t = i / (numSegments - 1);
+          connectionPositions.push(t, 0, 0);
+          startPoints.push(startPoint.x, startPoint.y, startPoint.z);
+          endPoints.push(endPoint.x, endPoint.y, endPoint.z);
+          pathIndices.push(pathIndex);
+          connectionStrengths.push(connection.strength);
+          const avgLevel = Math.min(Math.floor((node.level + connectedNode.level) / 2), palette.length - 1);
+          const baseColor = palette[avgLevel % palette.length].clone();
+          baseColor.offsetHSL(
+            THREE.MathUtils.randFloatSpread(0.03),
+            THREE.MathUtils.randFloatSpread(0.08),
+            THREE.MathUtils.randFloatSpread(0.08)
+          );
+          connectionColors.push(baseColor.r, baseColor.g, baseColor.b);
+        }
+        pathIndex++;
+      }
+    });
+  });
+
+  connectionsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(connectionPositions, 3));
+  connectionsGeometry.setAttribute('startPoint', new THREE.Float32BufferAttribute(startPoints, 3));
+  connectionsGeometry.setAttribute('endPoint', new THREE.Float32BufferAttribute(endPoints, 3));
+  connectionsGeometry.setAttribute('connectionStrength', new THREE.Float32BufferAttribute(connectionStrengths, 1));
+  connectionsGeometry.setAttribute('connectionColor', new THREE.Float32BufferAttribute(connectionColors, 3));
+  connectionsGeometry.setAttribute('pathIndex', new THREE.Float32BufferAttribute(pathIndices, 1));
+
+  const connectionsMaterial = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.clone(pulseUniforms),
+    vertexShader: connectionShader.vertexShader,
+    fragmentShader: connectionShader.fragmentShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+
+  connectionsMesh = new THREE.LineSegments(connectionsGeometry, connectionsMaterial);
+  scene.add(connectionsMesh);
+
+  palette.forEach((color, i) => {
+    if (i < 3) {
+      connectionsMaterial.uniforms.uPulseColors.value[i].copy(color);
+      nodesMaterial.uniforms.uPulseColors.value[i].copy(color);
+    }
+  });
+}
+
+// ---------- 点击脉冲 ----------
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const interactionPoint = new THREE.Vector3();
+let lastPulseIndex = 0;
+
+function triggerPulse(clientX, clientY) {
+  pointer.x = (clientX / window.innerWidth) * 2 - 1;
+  pointer.y = -(clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  interactionPlane.normal.copy(camera.position).normalize();
+  interactionPlane.constant = -interactionPlane.normal.dot(camera.position) + camera.position.length() * 0.5;
+  if (raycaster.ray.intersectPlane(interactionPlane, interactionPoint)) {
+    const time = clock.getElapsedTime();
+    if (nodesMesh && connectionsMesh) {
+      lastPulseIndex = (lastPulseIndex + 1) % 3;
+      nodesMesh.material.uniforms.uPulsePositions.value[lastPulseIndex].copy(interactionPoint);
+      nodesMesh.material.uniforms.uPulseTimes.value[lastPulseIndex] = time;
+      connectionsMesh.material.uniforms.uPulsePositions.value[lastPulseIndex].copy(interactionPoint);
+      connectionsMesh.material.uniforms.uPulseTimes.value[lastPulseIndex] = time;
+      const palette = colorPalettes[config.activePaletteIndex];
+      const randomColor = palette[Math.floor(Math.random() * palette.length)];
+      nodesMesh.material.uniforms.uPulseColors.value[lastPulseIndex].copy(randomColor);
+      connectionsMesh.material.uniforms.uPulseColors.value[lastPulseIndex].copy(randomColor);
+    }
+  }
+}
+
+renderer.domElement.addEventListener('click', (e) => {
+  if (e.target.closest('.login-panel')) return;
+  if (!config.paused) triggerPulse(e.clientX, e.clientY);
+});
+
+renderer.domElement.addEventListener('touchstart', (e) => {
+  if (e.target.closest('.login-panel')) return;
+  if (e.touches.length > 0 && !config.paused) {
+    triggerPulse(e.touches[0].clientX, e.touches[0].clientY);
+  }
+}, { passive: true });
+
+// ---------- 渲染循环 ----------
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  if (!config.paused && !reduceMotion.matches) {
+    if (nodesMesh) {
+      nodesMesh.material.uniforms.uTime.value = t;
+      nodesMesh.rotation.y = Math.sin(t * 0.04) * 0.05;
+    }
+    if (connectionsMesh) {
+      connectionsMesh.material.uniforms.uTime.value = t;
+      connectionsMesh.rotation.y = Math.sin(t * 0.04) * 0.05;
+    }
+  }
+  if (!reduceMotion.matches) {
+    starField.rotation.y += 0.0002;
+  }
+  starField.material.uniforms.uTime.value = t;
+  controls.update();
+  composer.render();
+}
+
+function onWindowResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloomPass.resolution.set(window.innerWidth, window.innerHeight);
+}
+
+window.addEventListener('resize', onWindowResize);
+
+createNetworkVisualization(config.currentFormation, config.densityFactor);
+animate();
+
+// ---------- 登录 ----------
+const passwordInput = document.getElementById('password-input');
+const loginButton = document.getElementById('login-button');
+const loginMessage = document.getElementById('login-message');
+
+function showMessage(text, type) {
+  loginMessage.textContent = text;
+  loginMessage.className = 'login-message show ' + type;
+}
+
+let submitting = false;
+
+async function handleLogin() {
+  if (submitting) return;
+  const value = passwordInput.value;
+  if (!value) {
+    showMessage('请输入密码', 'error');
+    passwordInput.focus();
+    return;
+  }
+  submitting = true;
+  loginButton.disabled = true;
+  showMessage('正在校验…', '');
+  let response;
+  try {
+    response = await fetch('/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: value })
+    });
+  } catch (error) {
+    submitting = false;
+    loginButton.disabled = false;
+    showMessage('连不上中枢，请稍后重试', 'error');
+    return;
+  }
+  if (response.ok) {
+    showMessage('登录成功，正在进入…', 'success');
+    location = '/';
+    return;
+  }
+  submitting = false;
+  loginButton.disabled = false;
+  passwordInput.select();
+  if (response.status === 429) {
+    showMessage('尝试太频繁，请稍后再试', 'error');
+    return;
+  }
+  const payload = await response.json().catch(() => ({}));
+  showMessage(payload.error || '登录失败，请重试', 'error');
+}
+
+loginButton.addEventListener('click', handleLogin);
+passwordInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') handleLogin();
+});
+passwordInput.addEventListener('input', () => {
+  loginMessage.className = 'login-message';
+});
+
+document.getElementById('help').addEventListener('click', () => {
+  document.getElementById('help-dialog').showModal();
+});
 </script>
 </body></html>
 """
