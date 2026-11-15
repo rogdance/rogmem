@@ -244,3 +244,21 @@ def test_a_new_session_uses_the_configured_core_budget(tmp_path, monkeypatch):
     assert "readonly" in page
     assert store["path"] in page
     assert 'name="store_path"' not in page
+
+def test_opening_does_not_read_thick_leftover_columns(tmp_path, monkeypatch):
+    """A history packet hydrates the thin page. chapters_json and summary_json stay on disk."""
+    engine = _open(tmp_path, monkeypatch)
+    thick = "厚" * 1_500_000
+    engine.db().execute(
+        "UPDATE crystallizations SET chapters_json=?, summary_json=?, sketch_md=? WHERE id='owner'",
+        (thick, thick, "主人速写。"),
+    )
+    engine.db().commit()
+    seen: list[str] = []
+    engine.db().set_trace_callback(lambda sql: seen.append(" ".join(sql.split())))
+    packed = engine.core_memory(200, "")
+    engine.db().set_trace_callback(None)
+    joined = "\n".join(seen).lower()
+    assert "chapters_json" not in joined
+    assert "summary_json" not in joined
+    assert "主人速写" in str(packed)
