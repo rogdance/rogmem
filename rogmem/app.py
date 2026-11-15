@@ -179,15 +179,15 @@ def _mark_channel(response: Response) -> Response:
     return response
 
 
-def _graph_label_flags() -> tuple[bool, int]:
-    """记忆图谱和结晶页关联图谱共用这一对设置，不另做开关。"""
-    return engine.graph_auto_labels(), engine.graph_label_budget()
+def _graph_label_flags() -> tuple[bool, int, str]:
+    """记忆图谱和结晶页关联图谱共用这一组设置，不另做开关。"""
+    return engine.graph_auto_labels(), engine.graph_label_budget(), engine.graph_renderer()
 
 
 def _graph_document() -> str:
     """The console front door. Remote open and /admin/graph render this same page."""
-    auto_labels, label_budget = _graph_label_flags()
-    return ui.graph_page(auto_labels=auto_labels, label_budget=label_budget)
+    auto_labels, label_budget, renderer = _graph_label_flags()
+    return ui.graph_page(auto_labels=auto_labels, label_budget=label_budget, renderer=renderer)
 
 
 async def channel_home(request: Request) -> Response:
@@ -646,7 +646,7 @@ def _crystal_page(request: Request, cid: str) -> Response:
     nav = decision["nav"]
     window = decision["window"]
     revs = engine.revisions(detail["id"]) if view == "log" else []
-    auto_labels, label_budget = _graph_label_flags()
+    auto_labels, label_budget, renderer = _graph_label_flags()
     return HTMLResponse(
         ui.crystal_page(
             detail,
@@ -659,6 +659,7 @@ def _crystal_page(request: Request, cid: str) -> Response:
             editing,
             auto_labels=auto_labels,
             label_budget=label_budget,
+            renderer=renderer,
         )
     )
 

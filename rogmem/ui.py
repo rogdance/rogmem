@@ -2204,6 +2204,8 @@ button.peek:active {{ transform: none; }}
 .graph-loader p {{ margin: 0; color: #c8c8c8; }}
 .graph-error {{ padding: 16px 20px; text-align: center; color: #c8c8c8; }}
 .graph-error .quiet {{ margin-top: 10px; }}
+/* 发光层：把星图整幅画面读回一层低分辨率副本，柔性叠在星图之上。模糊与增益由档位写在 #graph 上。 */
+.graph-glow {{ position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; mix-blend-mode: screen; opacity: .92; filter: blur(var(--graph-glow-blur, 8px)) brightness(var(--graph-glow-gain, 1.6)) saturate(1.12); }}
 @keyframes graph-loader-pulse {{
   0%, 100% {{ transform: scale(.6); opacity: .35; }}
   50% {{ transform: scale(1); opacity: 1; }}
@@ -4359,6 +4361,7 @@ def crystal_page(
     editing: bool = False,
     auto_labels: bool = False,
     label_budget: int = 50,
+    renderer: str = "3d",
 ) -> str:
     types = ["", "人物", "工程", "组织", "产品", "概念"]
     statuses = [("active", "活跃"), ("已合并", "已合并"), ("已撤回", "已撤回"), ("全部", "全部")]
@@ -4523,6 +4526,7 @@ def crystal_page(
             "nodes = nodes.filter(function(n) { return keep[n.id]; });",
             auto_labels=auto_labels,
             label_budget=label_budget,
+            renderer=renderer,
         )
         side = ""
         shell = "wiki solo"
@@ -6563,12 +6567,871 @@ _GRAPH_AUTO_LABELS_JS_TEMPLATE = r"""
 </script>"""
 
 
+# 记忆图谱的发光层：把 Cosmos 画出的整幅星图读回一层低分辨率副本，柔化后以 screen 叠回去。
+# 档位由填充率预算决定：星点尺寸已被节点数归一化，所以真正的变量是发光层每帧要过的像素
+# 与星点投影面积总量；规模上去时先降副本分辨率、再关掉整层。关态不产生任何节点级开销。
+_GRAPH_GLOW_JS_TEMPLATE = """
+function rogmemBloomTier(pixels, points) {
+  var byPixels = pixels <= 4200000 ? 2 : (pixels <= 9000000 ? 1 : 0);
+  var byPoints = points <= 40000 ? 2 : (points <= 130000 ? 1 : 0);
+  var level = Math.min(byPixels, byPoints);
+  if (level >= 2) return { name: 'full', blur: 9, gain: 1.7, scale: 0.6 };
+  if (level === 1) return { name: 'soft', blur: 6, gain: 1.4, scale: 0.45 };
+  return { name: 'off', blur: 0, gain: 0, scale: 0 };
+}
+function rogmemBloom(el, source, tier, calm) {
+  if (!el || !tier || tier.scale <= 0) return null;
+  var layer = document.createElement('canvas');
+  layer.className = 'graph-glow';
+  layer.setAttribute('aria-hidden', 'true');
+  el.appendChild(layer);
+  var ctx = layer.getContext('2d');
+  if (!ctx) { layer.remove(); return null; }
+  el.style.setProperty('--graph-glow-blur', tier.blur + 'px');
+  el.style.setProperty('--graph-glow-gain', String(tier.gain));
+  var stride = calm ? 4 : 1;
+  var tick = 0;
+  var raf = 0;
+  var dead = false;
+  function frame() {
+    if (dead) return;
+    raf = requestAnimationFrame(frame);
+    tick += 1;
+    if (document.hidden || (stride > 1 && tick % stride !== 0)) return;
+    var src = source();
+    if (!src || !src.width || !src.height) return;
+    var w = Math.max(1, Math.round(src.width * tier.scale));
+    var h = Math.max(1, Math.round(src.height * tier.scale));
+    if (layer.width !== w || layer.height !== h) { layer.width = w; layer.height = h; }
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(src, 0, 0, w, h);
+  }
+  raf = requestAnimationFrame(frame);
+  var handle = {
+    tier: tier.name,
+    destroy: function () {
+      dead = true;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      if (layer.parentNode) layer.parentNode.removeChild(layer);
+    }
+  };
+  el.rogmemBloom = handle;
+  return handle;
+}
+"""
+
+
+# 图谱外壳：加载态、错误态、减动效、无 WebGL 兜底。两种渲染器共用，保证加载状态机只有一份。
+# 以普通字符串给出（非 f-string），花括号无需转义。
+_GRAPH_SHELL_JS = """
+var ROGMEM_GRAPH_FETCH_MS = 15000;
+var ROGMEM_GRAPH_RENDER_WATCHDOG_MS = 15000;
+function rogmemClearBusy(el) {
+  if (el && el.setAttribute) el.setAttribute('aria-busy', 'false');
+}
+function rogmemLoaderGone(el) {
+  if (!el) return;
+  var loader = el.querySelector('.graph-loader');
+  if (!loader) return;
+  loader.classList.add('is-gone');
+  setTimeout(function () { if (loader && loader.parentNode) loader.remove(); }, 260);
+}
+function rogmemShowError(el, text, canRetry) {
+  if (!el) return;
+  var box = document.createElement('div');
+  box.className = 'graph-error note';
+  var para = document.createElement('p');
+  para.textContent = text || '图谱没有载入。';
+  box.appendChild(para);
+  if (canRetry) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'quiet';
+    btn.textContent = '重试';
+    btn.onclick = function () { location.reload(); };
+    box.appendChild(btn);
+  }
+  el.replaceChildren(box);
+  rogmemClearBusy(el);
+}
+function rogmemOpenBrowser() {
+  var href = location.href;
+  var note = document.createElement('p');
+  note.className = 'note';
+  note.innerHTML = '这台浏览器画不出星图。<a href="' + href + '" target="_blank" rel="noopener">用系统浏览器打开同一页</a>';
+  fetch('/client/open-browser?url=' + encodeURIComponent(href)).catch(function () {});
+  return note;
+}
+"""
+
+
+# 3D 记忆图谱：布局交给 Cosmos（它只算 2D 坐标），画面交给 Three.js，沿用登录页那套视效细节。
+# 配色、发光、曲线波动、能量流动、点击脉冲、泛光全部照搬登录页的着色器；数据换成真实图谱。
+_GRAPH_3D_JS_TEMPLATE = """
+var ROGMEM_GRAPH_3D_MAX_POINTS = 200000;
+
+function rogmemCommunity(count, linkSrc, linkDst, linkCount) {
+  // 并查集。连通分量当一个社区；整图连通时退化到按节点类型分层，保证一定分出层来。
+  var parent = new Int32Array(count);
+  var i;
+  for (i = 0; i < count; i++) parent[i] = i;
+  function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+  for (i = 0; i < linkCount; i++) {
+    var a = find(linkSrc[i]);
+    var b = find(linkDst[i]);
+    if (a !== b) parent[a] = b;
+  }
+  var label = new Int32Array(count);
+  var map = Object.create(null);
+  var next = 0;
+  for (i = 0; i < count; i++) {
+    var root = find(i);
+    if (map[root] === undefined) map[root] = next++;
+    label[i] = map[root];
+  }
+  return { label: label, size: next };
+}
+
+function rogmem3dPalette() {
+  return [
+    [0x2c / 255, 0x20 / 255, 0x24 / 255],
+    [0x53 / 255, 0x34 / 255, 0x3e / 255],
+    [0x8f / 255, 0x5a / 255, 0x67 / 255],
+    [0xef / 255, 0x65 / 255, 0x76 / 255],
+    [0xed / 255, 0xb4 / 255, 0xc2 / 255]
+  ];
+}
+
+function rogmem3dSegments(edgeCount) {
+  if (edgeCount <= 1500) return 20;
+  if (edgeCount <= 8000) return 10;
+  if (edgeCount <= 30000) return 5;
+  return 2;
+}
+
+function rogmemDraw3D(el, nodes, edges, focusMode) {
+  var THREE = window.__rogmemThree;
+  if (!THREE) { el.replaceChildren(rogmemOpenBrowser()); rogmemClearBusy(el); return; }
+  if (!nodes.length) {
+    var empty = document.createElement('p');
+    empty.className = 'note';
+    empty.textContent = '还没有可以铺开的星点。';
+    el.replaceChildren(empty);
+    rogmemClearBusy(el);
+    return;
+  }
+  var count = nodes.length;
+  var ids = new Array(count);
+  var names = new Array(count);
+  var types = new Array(count);
+  var index = Object.create(null);
+  var i;
+  for (i = 0; i < count; i++) {
+    ids[i] = nodes[i].id;
+    names[i] = nodes[i].name || '';
+    types[i] = nodes[i].type || '';
+    index[nodes[i].id] = i;
+  }
+  var linkSrc = [], linkDst = [];
+  for (i = 0; i < edges.length; i++) {
+    var s = index[edges[i].src], d = index[edges[i].dst];
+    if (s === undefined || d === undefined || s === d) continue;
+    linkSrc.push(s);
+    linkDst.push(d);
+  }
+  var linkCount = linkSrc.length;
+  var srcArr = Uint32Array.from(linkSrc);
+  var dstArr = Uint32Array.from(linkDst);
+
+  // 坐标：后端已经把球面坐标算好了（半径=到根的跳数，角度=向量降维）。没带上就自己铺一层球壳兜底。
+  var degree = new Uint32Array(count);
+  for (i = 0; i < linkCount; i++) { degree[srcArr[i]] += 1; degree[dstArr[i]] += 1; }
+  var maxDeg = 1;
+  for (i = 0; i < count; i++) if (degree[i] > maxDeg) maxDeg = degree[i];
+  var placed = new Float32Array(count * 3);
+  var given = true;
+  for (i = 0; i < count; i++) {
+    var node = nodes[i];
+    if (typeof node.x !== 'number' || typeof node.y !== 'number' || typeof node.z !== 'number') { given = false; break; }
+    placed[i * 3] = node.x;
+    placed[i * 3 + 1] = node.y;
+    placed[i * 3 + 2] = node.z;
+  }
+  if (!given) {
+    for (i = 0; i < count; i++) {
+      var polar = Math.acos(Math.max(-1, Math.min(1, 1 - 2 * (i + 0.5) / count)));
+      var azimuth = 2.399963229728653 * i;
+      var radius = 60 + 130 * Math.sqrt(degree[i] / maxDeg);
+      placed[i * 3] = radius * Math.sin(polar) * Math.cos(azimuth);
+      placed[i * 3 + 1] = radius * Math.sin(polar) * Math.sin(azimuth);
+      placed[i * 3 + 2] = radius * Math.cos(polar);
+    }
+  }
+  rogmem3dBuild(el, {
+    THREE: THREE, count: count, names: names, types: types, ids: ids,
+    placed: placed, linkSrc: srcArr, linkDst: dstArr, linkCount: linkCount, focusMode: focusMode
+  });
+}
+
+function rogmem3dBuild(el, ctx) {
+  var THREE = ctx.THREE;
+  var count = ctx.count;
+  var pos = ctx.placed;
+  var linkSrc = ctx.linkSrc;
+  var linkDst = ctx.linkDst;
+  var linkCount = ctx.linkCount;
+  var focusMode = ctx.focusMode;
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var community = rogmemCommunity(count, linkSrc, linkDst, linkCount);
+  var layers = community.size;
+  var palette = rogmem3dPalette();
+  var i;
+
+  var scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x000000, 0.0016);
+  // 画布尺寸跟容器走，不跟窗口走。容器在页面里只占剩余高度：
+  // 用窗口高度会把渲染中心推到可见区下方，看着就像没绕球心转，而且球会被裁掉一截。
+  var viewport = rogmem3dViewport(el);
+  var camera = new THREE.PerspectiveCamera(62, viewport[0] / Math.max(1, viewport[1]), 0.5, 6000);
+  var renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  renderer.setSize(viewport[0], viewport[1]);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  // 纯黑底。任何非黑的灰在 composer + OutputPass 的色彩管线里都会被再编码一次，
+  // 整块背景被抬成中灰，画面就糊了。黑是编码不变的。
+  renderer.setClearColor(0x000000);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.domElement.className = 'graph-3d';
+  el.replaceChildren(renderer.domElement, rogmemGraphTip());
+
+  var controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.rotateSpeed = 0.6;
+  controls.autoRotate = !reduce;
+  controls.autoRotateSpeed = 0.25;
+  controls.enablePan = false;
+
+  // 星空
+  var starCount = 2600;
+  var starPos = new Float32Array(starCount * 3);
+  for (i = 0; i < starCount; i++) {
+    var r = 260 + Math.random() * 900;
+    var phi = Math.acos(2 * Math.random() - 1);
+    var theta = Math.random() * 6.283185307179586;
+    starPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    starPos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+    starPos[i * 3 + 2] = r * Math.cos(phi);
+  }
+  var starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  var stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: true, transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending }));
+  stars.frustumCulled = false;
+  scene.add(stars);
+
+  // 节点：按社区取调色板，柔边发光点，呼吸
+  var nodeColors = new Float32Array(count * 3);
+  var nodeSizes = new Float32Array(count);
+  var degree = new Uint32Array(count);
+  for (i = 0; i < linkCount; i++) { degree[linkSrc[i]] += 1; degree[linkDst[i]] += 1; }
+  var maxDeg = 1;
+  for (i = 0; i < count; i++) if (degree[i] > maxDeg) maxDeg = degree[i];
+  for (i = 0; i < count; i++) {
+    var t = layers > 1 ? (community.label[i] % layers) / layers : Math.sqrt(degree[i] / maxDeg);
+    var ci = Math.min(palette.length - 1, Math.floor(t * palette.length));
+    nodeColors[i * 3] = palette[ci][0];
+    nodeColors[i * 3 + 1] = palette[ci][1];
+    nodeColors[i * 3 + 2] = palette[ci][2];
+    // 与 2D 星图同一形状：heat = √(连线数 / 最大值)，连得越多越大。
+    nodeSizes[i] = 0.4 + 1.75 * Math.sqrt(degree[i] / maxDeg);
+  }
+
+  var nodeGeo = new THREE.BufferGeometry();
+  nodeGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  nodeGeo.setAttribute('nodeSize', new THREE.BufferAttribute(nodeSizes, 1));
+  nodeGeo.setAttribute('nodeColor', new THREE.BufferAttribute(nodeColors, 3));
+  var nodeUniforms = {
+    uTime: { value: 0 },
+    // 下面三个在取景完成后按 2D 星图的绝对像素口径覆写。
+    uBaseNodeSize: { value: 1.6 },
+    uMaxPointSize: { value: 26 },
+    uPointScale: { value: 1 },
+    uPulsePositions: { value: [new THREE.Vector3(1e5, 1e5, 1e5), new THREE.Vector3(1e5, 1e5, 1e5), new THREE.Vector3(1e5, 1e5, 1e5)] },
+    uPulseTimes: { value: [-1e4, -1e4, -1e4] },
+    uPulseSpeed: { value: 34 }
+  };
+  var nodeMat = new THREE.ShaderMaterial({
+    uniforms: nodeUniforms,
+    vertexShader: `
+      attribute float nodeSize;
+      attribute vec3 nodeColor;
+      uniform float uTime;
+      uniform float uBaseNodeSize;
+      uniform float uMaxPointSize;
+      uniform float uPointScale;
+      uniform vec3 uPulsePositions[3];
+      uniform float uPulseTimes[3];
+      uniform float uPulseSpeed;
+      varying vec3 vColor;
+      varying float vGlow;
+      varying float vPulse;
+      float ring(vec3 w, vec3 p, float t) {
+        if (t < 0.0) return 0.0;
+        float dt = uTime - t;
+        if (dt < 0.0 || dt > 4.0) return 0.0;
+        float d = abs(distance(w, p) - dt * uPulseSpeed);
+        return smoothstep(3.0, 0.0, d) * smoothstep(4.0, 0.0, dt);
+      }
+      void main() {
+        vColor = nodeColor;
+        vGlow = 0.5 + 0.5 * sin(uTime * 0.6 + position.x * 0.15);
+        vec3 world = (modelMatrix * vec4(position, 1.0)).xyz;
+        float total = 0.0;
+        for (int k = 0; k < 3; k++) total += ring(world, uPulsePositions[k], uPulseTimes[k]);
+        vPulse = min(total, 1.0);
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float breathe = 1.0 + sin(uTime * 0.7 + position.z * 0.15) * 0.15;
+        float size = nodeSize * breathe * uBaseNodeSize * (uPointScale / -mv.z) * (1.0 + vPulse * 2.5);
+        gl_PointSize = min(size, uMaxPointSize);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform float uTime;
+      varying vec3 vColor;
+      varying float vGlow;
+      varying float vPulse;
+      void main() {
+        vec2 c = 2.0 * gl_PointCoord - 1.0;
+        float d = length(c);
+        if (d > 1.0) discard;
+        float g1 = 1.0 - smoothstep(0.0, 0.5, d);
+        float g2 = 1.0 - smoothstep(0.0, 1.0, d);
+        float strength = pow(g1, 1.2) + g2 * 0.3;
+        vec3 color = vColor * (1.0 + vGlow * 0.15);
+        if (vPulse > 0.0) {
+          color = mix(color, mix(vec3(1.0), vec3(0.937, 0.396, 0.463), 0.4), vPulse * 0.8) * (1.0 + vPulse * 1.2);
+          strength *= (1.0 + vPulse);
+        }
+        float alpha = strength * (0.95 - 0.3 * d);
+        gl_FragColor = vec4(color, alpha);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+  var nodesMesh = new THREE.Points(nodeGeo, nodeMat);
+  nodesMesh.frustumCulled = false;
+  scene.add(nodesMesh);
+
+  // 连线：自适应细分 + 贝塞尔中点 + 噪声波动 + 能量流动
+  var seg = rogmem3dSegments(linkCount);
+  var vCount = linkCount * seg;
+  var edgePos = new Float32Array(vCount * 3);
+  var edgeStart = new Float32Array(vCount * 3);
+  var edgeEnd = new Float32Array(vCount * 3);
+  var edgeColor = new Float32Array(vCount * 3);
+  var edgePath = new Float32Array(vCount);
+  var k;
+  for (i = 0; i < linkCount; i++) {
+    var a = linkSrc[i], b = linkDst[i];
+    var t = layers > 1 ? (((community.label[a] % layers) + (community.label[b] % layers)) / 2) / layers : 0.5;
+    var col = palette[Math.min(palette.length - 1, Math.floor(t * palette.length))];
+    for (k = 0; k < seg; k++) {
+      var vi = i * seg + k;
+      var f = k / (seg - 1);
+      edgePos[vi * 3] = f;
+      edgeStart[vi * 3] = pos[a * 3]; edgeStart[vi * 3 + 1] = pos[a * 3 + 1]; edgeStart[vi * 3 + 2] = pos[a * 3 + 2];
+      edgeEnd[vi * 3] = pos[b * 3]; edgeEnd[vi * 3 + 1] = pos[b * 3 + 1]; edgeEnd[vi * 3 + 2] = pos[b * 3 + 2];
+      edgeColor[vi * 3] = col[0]; edgeColor[vi * 3 + 1] = col[1]; edgeColor[vi * 3 + 2] = col[2];
+      edgePath[vi] = i;
+    }
+  }
+  var edgeGeo = new THREE.BufferGeometry();
+  edgeGeo.setAttribute('position', new THREE.BufferAttribute(edgePos, 3));
+  edgeGeo.setAttribute('edgeStart', new THREE.BufferAttribute(edgeStart, 3));
+  edgeGeo.setAttribute('edgeEnd', new THREE.BufferAttribute(edgeEnd, 3));
+  edgeGeo.setAttribute('edgeColor', new THREE.BufferAttribute(edgeColor, 3));
+  edgeGeo.setAttribute('edgePath', new THREE.BufferAttribute(edgePath, 1));
+  var edgeUniforms = {
+    uTime: { value: 0 },
+    uEdgeAlpha: { value: 0.5 },
+    uPulsePositions: nodeUniforms.uPulsePositions,
+    uPulseTimes: nodeUniforms.uPulseTimes,
+    uPulseSpeed: nodeUniforms.uPulseSpeed
+  };
+  var edgeMat = new THREE.ShaderMaterial({
+    uniforms: edgeUniforms,
+    vertexShader: `
+      attribute vec3 edgeStart;
+      attribute vec3 edgeEnd;
+      attribute vec3 edgeColor;
+      attribute float edgePath;
+      uniform float uTime;
+      uniform vec3 uPulsePositions[3];
+      uniform float uPulseTimes[3];
+      uniform float uPulseSpeed;
+      varying vec3 vColor;
+      varying float vT;
+      varying float vEdge;
+      varying float vPulse;
+      vec3 hash3(vec3 p) {
+        p = vec3(dot(p, vec3(127.1, 311.7, 74.7)), dot(p, vec3(269.5, 183.3, 246.1)), dot(p, vec3(113.5, 271.9, 124.6)));
+        return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+      }
+      float vnoise(vec3 p) {
+        vec3 i = floor(p);
+        vec3 f = fract(p);
+        vec3 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(dot(hash3(i + vec3(0.0,0.0,0.0)), f - vec3(0.0,0.0,0.0)), dot(hash3(i + vec3(1.0,0.0,0.0)), f - vec3(1.0,0.0,0.0)), u.x),
+                       mix(dot(hash3(i + vec3(0.0,1.0,0.0)), f - vec3(0.0,1.0,0.0)), dot(hash3(i + vec3(1.0,1.0,0.0)), f - vec3(1.0,1.0,0.0)), u.x), u.y),
+                   mix(mix(dot(hash3(i + vec3(0.0,0.0,1.0)), f - vec3(0.0,0.0,1.0)), dot(hash3(i + vec3(1.0,0.0,1.0)), f - vec3(1.0,0.0,1.0)), u.x),
+                       mix(dot(hash3(i + vec3(0.0,1.0,1.0)), f - vec3(0.0,1.0,1.0)), dot(hash3(i + vec3(1.0,1.0,1.0)), f - vec3(1.0,1.0,1.0)), u.x), u.y), u.z);
+      }
+      float ring(vec3 w, vec3 p, float t) {
+        if (t < 0.0) return 0.0;
+        float dt = uTime - t;
+        if (dt < 0.0 || dt > 4.0) return 0.0;
+        float d = abs(distance(w, p) - dt * uPulseSpeed);
+        return smoothstep(3.0, 0.0, d) * smoothstep(4.0, 0.0, dt);
+      }
+      void main() {
+        float f = position.x;
+        vT = f;
+        vEdge = edgePath;
+        vec3 mid = mix(edgeStart, edgeEnd, 0.5);
+        vec3 dir = normalize(edgeEnd - edgeStart + vec3(1e-4));
+        vec3 perp = normalize(cross(dir, vec3(0.0, 1.0, 0.0)));
+        if (length(perp) < 0.1) perp = vec3(1.0, 0.0, 0.0);
+        mid += perp * (sin(f * 3.14159) * 0.15);
+        vec3 p0 = mix(edgeStart, mid, f);
+        vec3 p1 = mix(mid, edgeEnd, f);
+        vec3 world = mix(p0, p1, f);
+        world += perp * vnoise(vec3(edgePath * 0.08, f * 0.6, uTime * 0.15)) * 0.12;
+        float total = 0.0;
+        for (int j = 0; j < 3; j++) total += ring(world, uPulsePositions[j], uPulseTimes[j]);
+        vPulse = min(total, 1.0);
+        vColor = edgeColor;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
+      }`,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uEdgeAlpha;
+      varying vec3 vColor;
+      varying float vT;
+      varying float vEdge;
+      varying float vPulse;
+      void main() {
+        float flow1 = sin(vT * 25.0 - uTime * 4.0) * 0.5 + 0.5;
+        float flow2 = sin(vT * 15.0 - uTime * 2.5 + 1.57) * 0.5 + 0.5;
+        float flow = (flow1 + flow2 * 0.5) / 1.5;
+        vec3 color = vColor * (0.8 + 0.2 * sin(uTime * 0.6 + vT * 12.0));
+        float alpha = uEdgeAlpha * (0.45 + flow * 0.55);
+        if (vPulse > 0.0) {
+          color = mix(color, vec3(1.0), vPulse * 0.7);
+          alpha = mix(alpha, 1.0, vPulse);
+        }
+        gl_FragColor = vec4(color, alpha);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+  var edgesMesh = new THREE.LineSegments(edgeGeo, edgeMat);
+  edgesMesh.frustumCulled = false;
+  scene.add(edgesMesh);
+
+  var composer = new THREE.EffectComposer(renderer);
+  composer.addPass(new THREE.RenderPass(scene, camera));
+  var bloom = new THREE.UnrealBloomPass(new THREE.Vector2(viewport[0], viewport[1]), 1.5, 0.6, 0.72);
+  composer.addPass(bloom);
+  composer.addPass(new THREE.OutputPass());
+
+  // 取景：按实际球半径取，让整颗球落在画面里。
+  var extent = 1;
+  for (i = 0; i < count; i++) {
+    var dist = Math.sqrt(pos[i * 3] * pos[i * 3] + pos[i * 3 + 1] * pos[i * 3 + 1] + pos[i * 3 + 2] * pos[i * 3 + 2]);
+    if (dist > extent) extent = dist;
+  }
+  extent = Math.max(40, extent * 1.28);
+  camera.position.set(extent * 0.35, extent * 0.5, extent * 1.5);
+  controls.minDistance = extent * 0.3;
+  controls.maxDistance = extent * 6;
+  controls.target.set(0, 0, 0);
+  controls.update();
+
+  // 节点尺寸口径照搬 2D 星图：star 与 cosmos 版同公式，默认机位下正好等于 2D 的像素尺寸。
+  // gl_PointSize 是设备像素，所以要乘 pixelRatio；uPointScale = 基准距离 × pixelRatio，
+  // 于是 size = nodeSize × star × (基准距离 / 当前距离)，近大远小且与 2D 同量纲。
+  var pixelRatio = renderer.getPixelRatio();
+  var star = Math.min(18, Math.max(2.2, 160 / Math.sqrt(Math.max(1, count))));
+  var refDist = camera.position.length();
+  nodeUniforms.uBaseNodeSize.value = star;
+  nodeUniforms.uPointScale.value = refDist * pixelRatio;
+  nodeUniforms.uMaxPointSize.value = Math.ceil(2.15 * star * 2.2 * pixelRatio);
+
+  // 通用帧扩展点：按需注入的层自己挂进来。核心不认识"标签"这个词，关态下不留任何痕迹。
+  var hooks = el.rogmem3dHooks || [];
+  var view = {
+    el: el, THREE: THREE, camera: camera, pos: pos, names: ctx.names, count: count,
+    degree: degree, extent: extent, reduce: reduce
+  };
+
+  // 拾取：悬停放大 + 名称，点击聚焦邻域
+  var tip = document.getElementById('graph-tip') || rogmemGraphTip();
+  var raycaster = new THREE.Raycaster();
+  raycaster.params.Points.threshold = Math.max(6, extent / 60);
+  var pointer = new THREE.Vector2(-10, -10);
+  function neighborhood(idx) {
+    var marked = new Uint8Array(count);
+    if (idx < 0 || idx >= count) return marked;
+    marked[idx] = 1;
+    for (var n = 0; n < linkCount; n++) {
+      if (linkSrc[n] === idx) marked[linkDst[n]] = 1;
+      else if (linkDst[n] === idx) marked[linkSrc[n]] = 1;
+    }
+    return marked;
+  }
+  var baseColors = nodeColors.slice();
+  function applyFocus(idx) {
+    var marked = neighborhood(idx);
+    for (var n = 0; n < count; n++) {
+      var on = marked[n] || idx < 0;
+      var c = on ? palette[palette.length - 1] : [0.28, 0.24, 0.26];
+      nodeColors[n * 3] = baseColors[n * 3] * (on ? 1 : 0.5) + c[0] * (on ? 0.6 : 0);
+      nodeColors[n * 3 + 1] = baseColors[n * 3 + 1] * (on ? 1 : 0.5) + c[1] * (on ? 0.6 : 0);
+      nodeColors[n * 3 + 2] = baseColors[n * 3 + 2] * (on ? 1 : 0.5) + c[2] * (on ? 0.6 : 0);
+    }
+    nodeGeo.attributes.nodeColor.needsUpdate = true;
+  }
+  function pulseAt(point) {
+    var t = clock.getElapsedTime();
+    var slot = (pulseSlot = (pulseSlot + 1) % 3);
+    nodeUniforms.uPulsePositions.value[slot].copy(point);
+    nodeUniforms.uPulseTimes.value[slot] = t;
+  }
+  var pulseSlot = 0;
+  renderer.domElement.addEventListener('mousemove', function (e) {
+    var rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  });
+  renderer.domElement.addEventListener('click', function (e) {
+    if (e.target.closest && e.target.closest('.glass-panel')) return;
+    raycaster.setFromCamera(pointer, camera);
+    var hits = raycaster.intersectObject(nodesMesh, false);
+    if (!hits.length) { if (focusMode) applyFocus(-1); return; }
+    var idx = hits[0].index;
+    if (!focusMode) {
+      var openId = ctx.ids[idx];
+      if (openId) location = '/admin/crystals/' + encodeURIComponent(openId);
+      return;
+    }
+    applyFocus(idx);
+    pulseAt(hits[0].point);
+    if (typeof el.rogmemOnFocus === 'function') { try { el.rogmemOnFocus(idx); } catch (err) {} }
+  });
+
+  var clock = new THREE.Clock();
+  var framed = false;
+  function frame() {
+    requestAnimationFrame(frame);
+    var t = clock.getElapsedTime();
+    nodeUniforms.uTime.value = t;
+    edgeUniforms.uTime.value = t;
+    raycaster.setFromCamera(pointer, camera);
+    var hits = raycaster.intersectObject(nodesMesh, false);
+    if (hits.length) {
+      tip.hidden = false;
+      tip.textContent = ctx.names[hits[0].index] || '';
+    } else if (tip.textContent) {
+      tip.hidden = true;
+      tip.textContent = '';
+    }
+    stars.rotation.y += 0.0002;
+    controls.update();
+    for (var hookIndex = 0; hookIndex < hooks.length; hookIndex++) hooks[hookIndex](view, performance.now());
+    composer.render();
+    if (!framed) {
+      framed = true;
+      el.rogmemReady = true;
+      el.rogmemSimEnded = true;
+      rogmemLoaderGone(el);
+      rogmemClearBusy(el);
+    }
+  }
+  // 尺寸以容器为准：窗口 resize 与容器自身变化都要重新贴合。
+  // 加去重守卫，避免 setSize 反过来触发 ResizeObserver 造成回环。
+  var lastW = viewport[0], lastH = viewport[1], lastPr = renderer.getPixelRatio();
+  function fitViewport() {
+    var size = rogmem3dViewport(el);
+    var pr = Math.min(window.devicePixelRatio || 1, 2);
+    if (size[0] === lastW && size[1] === lastH && pr === lastPr) return;
+    lastW = size[0];
+    lastH = size[1];
+    lastPr = pr;
+    renderer.setPixelRatio(pr);
+    camera.aspect = size[0] / Math.max(1, size[1]);
+    camera.updateProjectionMatrix();
+    renderer.setSize(size[0], size[1]);
+    composer.setSize(size[0], size[1]);
+    bloom.resolution.set(size[0], size[1]);
+    nodeUniforms.uPointScale.value = refDist * pr;
+  }
+  window.addEventListener('resize', fitViewport);
+  var containerWatcher = window.ResizeObserver ? new ResizeObserver(fitViewport) : null;
+  if (containerWatcher) containerWatcher.observe(el);
+  window.addEventListener('pagehide', function () {
+    if (containerWatcher) { try { containerWatcher.disconnect(); } catch (err) {} }
+    try { controls.dispose(); renderer.dispose(); } catch (err) {}
+  });
+  frame();
+}
+
+// 渲染尺寸取容器而不是窗口：图形容器在页面里只占剩余高度。
+function rogmem3dViewport(el) {
+  var w = el.clientWidth || 0;
+  var h = el.clientHeight || 0;
+  if (w <= 0) w = window.innerWidth;
+  if (h <= 0) h = window.innerHeight;
+  return [w, h];
+}
+
+function rogmemGraphTip() {
+  var old = document.getElementById('graph-tip');
+  if (old) return old;
+  var tip = document.createElement('div');
+  tip.id = 'graph-tip';
+  tip.hidden = true;
+  document.body.appendChild(tip);
+  return tip;
+}
+"""
+
+
+# 三维的自动铺名层。只在大到一定倍数后出现，同屏数量有上限，只挑视野内的，且相互避让；
+# 相机移动时已挑中的名字贴着节点走。开关关态下样式与脚本都不注入，浏览器不做任何新工作。
+_GRAPH_3D_LABELS_CSS = (
+    "<style>"
+    ".graph-3d-labels{position:absolute;inset:0;z-index:3;pointer-events:none;overflow:hidden;}"
+    ".graph-3d-label{position:absolute;top:0;left:0;font-size:12px;line-height:1;white-space:nowrap;"
+    "color:#f4f4f4;text-shadow:0 0 4px #111,0 1px 2px #111;will-change:transform;}"
+    "</style>"
+)
+_GRAPH_3D_LABELS_JS_TEMPLATE = """
+var ROGMEM_3D_LABEL_BUDGET = __BUDGET__;
+(function () {
+  var mount = document.getElementById('graph');
+  if (!mount) return;
+  mount.rogmem3dHooks = mount.rogmem3dHooks || [];
+  var layer = null;
+  mount.rogmem3dHooks.push(function (view, now) {
+    if (!layer) {
+      layer = rogmem3dLabels(view.el, {
+        THREE: view.THREE, camera: view.camera, pos: view.pos, names: view.names,
+        count: view.count, degree: view.degree, extent: view.extent,
+        budget: ROGMEM_3D_LABEL_BUDGET, calm: view.reduce
+      });
+    }
+    layer.update(now);
+  });
+})();
+function rogmem3dLabels(el, opts) {
+  var THREE = opts.THREE;
+  var host = document.createElement('div');
+  host.className = 'graph-3d-labels';
+  host.setAttribute('aria-hidden', 'true');
+  el.appendChild(host);
+  var budget = opts.budget;
+  var names = opts.names;
+  var positions = opts.pos;
+  var count = opts.count;
+  var degree = opts.degree;
+  var camera = opts.camera;
+  var extent = opts.extent;
+  // 迟滞：近了才亮，退了才灭，免得在临界点来回闪。
+  var Z_on = 1.1;
+  var Z_off = 0.85;
+  var EVERY_MS = opts.calm ? 900 : 700;
+  var probe = new THREE.Vector3();
+  var spans = [];
+  var picked = [];
+  var shown = false;
+  var lastPick = 0;
+
+  function zoomLevel() { return extent / Math.max(1e-3, camera.position.length()); }
+
+  function box() {
+    return [
+      el.clientWidth || window.innerWidth,
+      el.clientHeight || window.innerHeight
+    ];
+  }
+
+  function project(i) {
+    var size = box();
+    probe.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]).project(camera);
+    return {
+      x: (probe.x * 0.5 + 0.5) * size[0],
+      y: (-probe.y * 0.5 + 0.5) * size[1],
+      z: probe.z
+    };
+  }
+
+  function place(span, x, y) {
+    var width = span.offsetWidth || 60;
+    span.style.transform = 'translate(' + (x - width / 2) + 'px,' + (y - 9) + 'px)';
+  }
+
+  function drop() {
+    for (var i = 0; i < spans.length; i++) if (spans[i].parentNode) spans[i].remove();
+    spans = [];
+    picked = [];
+  }
+
+  function pick() {
+    drop();
+    var size = box();
+    var width = size[0];
+    var height = size[1];
+    var candidates = [];
+    for (var i = 0; i < count; i++) {
+      var name = names[i];
+      if (!name) continue;
+      var at = project(i);
+      if (at.z > 1 || at.x < 0 || at.y < 0 || at.x > width || at.y > height) continue;
+      candidates.push({ index: i, x: at.x, y: at.y, w: Math.min(260, name.length * 13 + 8), h: 18 });
+    }
+    // 连得多的先上，保证挤掉的是边缘的名字。
+    candidates.sort(function(a, b) { return degree[b.index] - degree[a.index]; });
+    var kept = [];
+    for (var k = 0; k < candidates.length && kept.length < budget; k++) {
+      var one = candidates[k];
+      var clash = false;
+      for (var r = 0; r < kept.length; r++) {
+        var other = kept[r];
+        if (Math.abs(other.x - one.x) * 2 < (other.w + one.w) &&
+            Math.abs(other.y - one.y) * 2 < (other.h + one.h)) { clash = true; break; }
+      }
+      if (clash) continue;
+      kept.push(one);
+      var span = document.createElement('span');
+      span.className = 'graph-3d-label';
+      span.textContent = names[one.index];
+      place(span, one.x, one.y);
+      host.appendChild(span);
+      place(span, one.x, one.y);
+      spans.push(span);
+      picked.push(one.index);
+    }
+  }
+
+  function follow() {
+    var size = box();
+    var width = size[0];
+    var height = size[1];
+    for (var i = 0; i < picked.length; i++) {
+      var at = project(picked[i]);
+      if (at.z > 1 || at.x < -60 || at.y < -30 || at.x > width + 60 || at.y > height + 30) {
+        spans[i].style.display = 'none';
+      } else {
+        spans[i].style.display = '';
+        place(spans[i], at.x, at.y);
+      }
+    }
+  }
+
+  return {
+    update: function (now) {
+      var level = zoomLevel();
+      if (!shown) {
+        if (level < Z_on) return;
+        shown = true;
+        pick();
+        lastPick = now;
+        return;
+      }
+      if (level <= Z_off) { shown = false; drop(); return; }
+      if (now - lastPick >= EVERY_MS) { pick(); lastPick = now; }
+      else follow();
+    },
+    destroy: function () {
+      drop();
+      if (host.parentNode) host.parentNode.removeChild(host);
+    }
+  };
+}
+"""
+
+
+def _graph_3d_document(
+    element_id: str,
+    restrict_js: str,
+    focus_flag: str,
+    shell_block: str,
+    labels_block: str = "",
+    labels_css: str = "",
+) -> str:
+    """3D 记忆图谱。画面全部由 Three.js 出，坐标来自后端算好的球面位置（半径=跳数，角度=向量）。
+
+    labels_block / labels_css 只在"自动展示词条名"开着时非空；关态下这一层一个字节都不发。
+    """
+    return f"""{labels_css}<script>{shell_block}{_GRAPH_3D_JS_TEMPLATE}{labels_block}</script>
+<script type="importmap">{{"imports":{{"three":"/admin/static/three/build/three.module.js","three/addons/":"/admin/static/three/examples/jsm/"}}}}</script>
+<script type="module">
+import * as THREE from 'three';
+import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
+import {{ EffectComposer }} from 'three/addons/postprocessing/EffectComposer.js';
+import {{ RenderPass }} from 'three/addons/postprocessing/RenderPass.js';
+import {{ UnrealBloomPass }} from 'three/addons/postprocessing/UnrealBloomPass.js';
+import {{ OutputPass }} from 'three/addons/postprocessing/OutputPass.js';
+window.__rogmemThree = Object.assign(Object.create(null), THREE, {{
+  OrbitControls: OrbitControls, EffectComposer: EffectComposer, RenderPass: RenderPass,
+  UnrealBloomPass: UnrealBloomPass, OutputPass: OutputPass
+}});
+// 渲染看门狗：脚本没起来、或球没画出来，都有界撤 loader，让位真图，不空白。
+var rogmemGraphEl = document.getElementById('{element_id}');
+setTimeout(function renderWatchdog() {{
+  if (rogmemGraphEl && !rogmemGraphEl.rogmemReady) {{
+    rogmemLoaderGone(rogmemGraphEl);
+    rogmemClearBusy(rogmemGraphEl);
+  }}
+}}, ROGMEM_GRAPH_RENDER_WATCHDOG_MS);
+(function fetchGraph3D() {{
+  var controller = (typeof AbortController === 'function') ? new AbortController() : null;
+  var aborted = false;
+  var fetchTimer = setTimeout(function () {{
+    aborted = true;
+    if (controller) try {{ controller.abort(); }} catch (err) {{}}
+    rogmemShowError(document.getElementById('{element_id}'), '图谱没有载入。', true);
+  }}, ROGMEM_GRAPH_FETCH_MS);
+  fetch('/admin/api/graph', controller ? {{signal: controller.signal}} : undefined).then(function(r) {{
+    clearTimeout(fetchTimer);
+    return r.json();
+  }}).then(function(data) {{
+    if (aborted) return;
+    var nodes = data.nodes || [];
+    var edges = data.edges || [];
+    var tally = document.getElementById('graph-count');
+    if (tally) tally.textContent = '活跃节点：' + nodes.length;
+    {restrict_js}
+    rogmemDraw3D(document.getElementById('{element_id}'), nodes, edges, {focus_flag});
+  }}).catch(function () {{
+    if (aborted) return;
+    clearTimeout(fetchTimer);
+    rogmemShowError(document.getElementById('{element_id}'), '图谱没有载入。', true);
+  }});
+}})();
+</script>"""
+
+
 def graph_mount(
     element_id: str,
     restrict_js: str = "",
     focus: bool = False,
     auto_labels: bool = False,
     label_budget: int = 50,
+    renderer: str = "3d",
 ) -> str:
     """Draw the starfield, or offer the system browser when it cannot be drawn.
 
@@ -6591,47 +7454,21 @@ def graph_mount(
     auto_labels_block = (
         _GRAPH_AUTO_LABELS_JS_TEMPLATE.replace("__BUDGET__", str(budget)) if auto_labels else ""
     )
-    return f"""<div id="{element_id}" aria-busy="true"><div class="graph-loader" role="status" aria-live="polite"><div class="graph-loader-dots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><p>正在铺开星图</p></div></div>
-<script src="/admin/static/cosmos-graph.min.js"></script>
+    glow_block = _GRAPH_GLOW_JS_TEMPLATE
+    shell_block = _GRAPH_SHELL_JS
+    markup = f"""<div id="{element_id}" aria-busy="true"><div class="graph-loader" role="status" aria-live="polite"><div class="graph-loader-dots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><p>正在铺开星图</p></div></div>"""
+    if renderer != "cosmos":
+        labels_block = ""
+        labels_css = ""
+        if auto_labels:
+            labels_block = _GRAPH_3D_LABELS_JS_TEMPLATE.replace("__BUDGET__", str(budget))
+            labels_css = _GRAPH_3D_LABELS_CSS
+        return markup + _graph_3d_document(
+            element_id, restrict_js, focus_flag, shell_block, labels_block, labels_css
+        )
+    return markup + f"""<script src="/admin/static/cosmos-graph.min.js"></script>
 <script>
-var ROGMEM_GRAPH_FETCH_MS = 15000;
-var ROGMEM_GRAPH_RENDER_WATCHDOG_MS = 15000;
-function rogmemClearBusy(el) {{
-  if (el && el.setAttribute) el.setAttribute('aria-busy', 'false');
-}}
-function rogmemLoaderGone(el) {{
-  if (!el) return;
-  var loader = el.querySelector('.graph-loader');
-  if (!loader) return;
-  loader.classList.add('is-gone');
-  setTimeout(function () {{ if (loader && loader.parentNode) loader.remove(); }}, 260);
-}}
-function rogmemShowError(el, text, canRetry) {{
-  if (!el) return;
-  var box = document.createElement('div');
-  box.className = 'graph-error note';
-  var para = document.createElement('p');
-  para.textContent = text || '图谱没有载入。';
-  box.appendChild(para);
-  if (canRetry) {{
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'quiet';
-    btn.textContent = '重试';
-    btn.onclick = function () {{ location.reload(); }};
-    box.appendChild(btn);
-  }}
-  el.replaceChildren(box);
-  rogmemClearBusy(el);
-}}
-function rogmemOpenBrowser() {{
-  var href = location.href;
-  var note = document.createElement('p');
-  note.className = 'note';
-  note.innerHTML = '这台浏览器画不出星图。<a href="' + href + '" target="_blank" rel="noopener">用系统浏览器打开同一页</a>';
-  fetch('/client/open-browser?url=' + encodeURIComponent(href)).catch(function() {{}});
-  return note;
-}}
+{shell_block}
 function rogmemGlass(red, green, blue) {{
   // 一颗实心点。轻重只写在点的大小上。边缘收一点，避免锯齿。
   if (red == null) red = 244;
@@ -6683,6 +7520,11 @@ function rogmemMarkNeighborhood(count, linkSrc, linkDst, linkCount, pointIndex) 
 function rogmemHairline(pixelRatio) {{
   // 细过一个设备像素时，线不会更细，只会把颜色收掉。发丝取刚好铺满这一像素。
   return 1 / pixelRatio;
+}}
+{glow_block}
+function rogmemStageCanvas(el) {{
+  // 发光层自己也是一块 canvas，取星图的底布时必须把它排掉。
+  return el.querySelector('canvas:not(.graph-glow)');
 }}
 function rogmemDraw(el, nodes, edges, focusMode) {{
   if (!window.CosmosGraph || typeof CosmosGraph.Graph !== 'function') {{
@@ -6988,10 +7830,14 @@ function rogmemPaint(el, nodes, edges, focusMode) {{
     hot = -1;
     el.rogmemSimEnded = false;
     el.rogmemReady = false;
+    if (el.rogmemBloom) {{
+      try {{ el.rogmemBloom.destroy(); }} catch (err) {{}}
+      el.rogmemBloom = null;
+    }}
     if (typeof window.rogmemOnGraphGone === 'function') {{
       try {{ window.rogmemOnGraphGone(el); }} catch (err) {{}}
     }}
-    var canvas = el.querySelector('canvas');
+    var canvas = rogmemStageCanvas(el);
     var gl = canvas && (canvas.getContext('webgl2') || canvas.getContext('webgl'));
     if (dying) {{
       try {{ dying.destroy(); }} catch (err) {{}}
@@ -7012,7 +7858,7 @@ function rogmemPaint(el, nodes, edges, focusMode) {{
       rogmemClearBusy(el);
     }});
   }}
-  watch(el.querySelector('canvas'));
+  watch(rogmemStageCanvas(el));
   if (focusMode) {{
     openOnDouble = function (event) {{
       event.preventDefault();
@@ -7033,7 +7879,13 @@ function rogmemPaint(el, nodes, edges, focusMode) {{
     graph.setLinks(links);
     graph.render(1, 0);
     graph.fitView(0, 0.16, false);
-    watch(el.querySelector('canvas'));
+    watch(rogmemStageCanvas(el));
+    // 发光层：叠在星图之上，档位按填充率预算定。底布还没生出来时，它自会等到有的那一帧再画。
+    var glowTier = rogmemBloomTier(
+      Math.max(1, el.clientWidth) * Math.max(1, el.clientHeight) * ratio * ratio,
+      count * star * star
+    );
+    rogmemBloom(el, function () {{ return rogmemStageCanvas(el); }}, glowTier, reduce);
     // 为自动词条名层暴露最小接口：只在开关开态下另一个 IIFE 会读这些字段。关态下不加载那段脚本。
     el.rogmemGraph = graph;
     el.rogmemNodes = {{
@@ -7100,6 +7952,7 @@ def shared_graph(
     *,
     auto_labels: bool = False,
     label_budget: int = 50,
+    renderer: str = "3d",
 ) -> str:
     """The starfield both pages draw. restrict_js only decides which points remain."""
     return graph_mount(
@@ -7108,10 +7961,11 @@ def shared_graph(
         focus=True,
         auto_labels=auto_labels,
         label_budget=label_budget,
+        renderer=renderer,
     )
 
 
-def graph_page(auto_labels: bool = False, label_budget: int = 50) -> str:
+def graph_page(auto_labels: bool = False, label_budget: int = 50, renderer: str = "3d") -> str:
     head = (
         "<div class='page-head'>"
         "<h1>记忆图谱</h1>"
@@ -7121,7 +7975,7 @@ def graph_page(auto_labels: bool = False, label_budget: int = 50) -> str:
     return page(
         "记忆图谱",
         "graph",
-        head + shared_graph(auto_labels=auto_labels, label_budget=label_budget),
+        head + shared_graph(auto_labels=auto_labels, label_budget=label_budget, renderer=renderer),
     )
 
 
@@ -8814,11 +9668,15 @@ def _password_peek(name: str) -> str:
 
 
 def basic_page(cfg: dict) -> str:
-    from rogmem.engine import INITIAL_ADMIN_PASSWORD, TURN_WAIT_DEFAULT
+    from rogmem.engine import GRAPH_AUTO_LABELS_DEFAULT, INITIAL_ADMIN_PASSWORD, TURN_WAIT_DEFAULT
 
     path = str(cfg.get("store_path") or "").strip() or "—"
-    auto = " checked" if str(cfg.get("graph_auto_labels") or "0") == "1" else ""
+    # 设置行缺这项时，复选框要跟引擎的默认值一致，而不是掉回关。
+    auto = " checked" if str(cfg.get("graph_auto_labels") or ("1" if GRAPH_AUTO_LABELS_DEFAULT else "0")) == "1" else ""
     budget = str(cfg.get("graph_label_budget") or "50")
+    render = "cosmos" if str(cfg.get("graph_renderer") or "3d") == "cosmos" else "3d"
+    render_3d_sel = " selected" if render == "3d" else ""
+    render_cosmos_sel = " selected" if render == "cosmos" else ""
     wait = str(cfg.get("turn_wait") or TURN_WAIT_DEFAULT)
     stored = cfg.get("passwordless")
     opened = "" if str(stored if stored is not None else "1").strip() in {"0", "off", "false", "no"} else " checked"
@@ -8919,14 +9777,21 @@ def basic_page(cfg: dict) -> str:
     graph = _settings_plate(
         "记忆图谱视效",
         f"""<section class="setting-row setting-line">
-<p class="setting-name">自动展示词条名</p>
+<div><p class="setting-name">渲染方式</p><p class="note">三维是默认；星图是保底，画不动时切回。</p></div>
+<label class="job-field"><select name="graph_renderer" aria-label="图谱渲染方式">
+<option value="3d"{render_3d_sel}>三维</option>
+<option value="cosmos"{render_cosmos_sel}>星图</option>
+</select></label>
+</section>
+<section class="setting-row setting-line">
+<div><p class="setting-name">自动展示词条名</p><p class="note">只在星图渲染下生效。</p></div>
 <label class="switch"><span class="knob"><input type="checkbox" name="graph_auto_labels" role="switch"{auto} aria-label="自动展示词条名"><i></i></span></label>
 </section>
 <section class="setting-row setting-line">
 <p class="setting-name">同屏最多名称数</p>
 <label class="job-field"><input type="number" name="graph_label_budget" min="1" max="200" step="1" inputmode="numeric" aria-label="同屏最多名称数" value="{esc(budget)}"></label>
 </section>""",
-        "post('/admin/api/settings/basic', {graph_auto_labels:this.graph_auto_labels.checked ? '1' : '0', graph_label_budget:this.graph_label_budget.value})",
+        "post('/admin/api/settings/basic', {graph_renderer:this.graph_renderer.value, graph_auto_labels:this.graph_auto_labels.checked ? '1' : '0', graph_label_budget:this.graph_label_budget.value})",
     )
     mount = _settings_plate(
         "个人空间",

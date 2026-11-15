@@ -366,7 +366,7 @@ def test_starfield_cannot_blank_the_page():
     """A draw failure stays in the starfield. The GPU context is given back when the page leaves."""
     from rogmem.ui import graph_page
 
-    page = graph_page()
+    page = graph_page(renderer="cosmos")
     assert "webglcontextlost" in page
     assert "WEBGL_lose_context" in page
     assert "pagehide" in page
@@ -381,7 +381,7 @@ def test_browser_fallback_is_offered_and_refuses_local_files():
 
     assert open_system_browser("file:///etc/passwd") is False
     assert open_system_browser("") is False
-    page = graph_page()
+    page = graph_page(renderer="cosmos")
     assert "用系统浏览器打开同一页" in page
     assert "rogmemOpenBrowser" in page
     assert "graph-screen" in page
@@ -457,7 +457,7 @@ def test_graph_counts_active_nodes_and_a_click_only_recolors_neighbors():
 
     from rogmem.ui import graph_mount, graph_page
 
-    page = graph_page()
+    page = graph_page(renderer="cosmos")
     assert "<div class='page-head'><h1>记忆图谱</h1><p class='graph-count' id='graph-count'></p></div>" in page
     assert "nodes.length + ' 个活跃节点'" not in page
     assert "'活跃节点：' + nodes.length" in page
@@ -487,7 +487,7 @@ def test_graph_counts_active_nodes_and_a_click_only_recolors_neighbors():
     assert "lastClick = -1" in background
     assert "paintFocus(-1)" in background
     assert background.index("lastClick = -1") < background.index("paintFocus(-1)")
-    plain = graph_mount("graph")
+    plain = graph_mount("graph", renderer="cosmos")
     assert "edges, false)" in plain
     assert "id='graph-count'" not in plain
 

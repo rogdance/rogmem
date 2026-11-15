@@ -16,6 +16,8 @@ def _open(tmp_path, monkeypatch):
     from rogmem import engine
 
     engine.connect(tmp_path, tmp_path / "scan")
+    # 这一组契约锁的是星图（cosmos）那套跟随层；三维渲染另有自己的契约。
+    engine.save_basic({"graph_renderer": "cosmos"})
     return engine
 
 
@@ -38,7 +40,7 @@ FOLLOW_ONLY_FINGERPRINTS = (
 def test_switch_off_emits_none_of_the_follow_code():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", auto_labels=False)
+    html = graph_mount("graph", auto_labels=False, renderer="cosmos")
     for needle in FOLLOW_ONLY_FINGERPRINTS:
         assert needle not in html, f"关态泄漏 {needle!r}"
 
@@ -46,7 +48,7 @@ def test_switch_off_emits_none_of_the_follow_code():
 def test_switch_off_backcompat_default_arg():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph")  # 默认 auto_labels=False
+    html = graph_mount("graph", renderer="cosmos")  # 默认 auto_labels=False
     for needle in FOLLOW_ONLY_FINGERPRINTS:
         assert needle not in html
 
@@ -57,7 +59,7 @@ def test_switch_off_backcompat_default_arg():
 def test_switch_on_has_four_factories_and_chain_helper():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     for needle in ("createSnapshotLifecycle", "createSelector", "createCameraTracker", "chainConfig"):
         assert needle in html, f"开态缺 {needle!r}"
 
@@ -65,7 +67,7 @@ def test_switch_on_has_four_factories_and_chain_helper():
 def test_switch_on_hooks_onZoom_in_setConfig():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # 7 个回调必须都在 hooks 批 patch 里（原子 setConfig batch，避免 per-call 竞态）。
     hooks = html.split("var hooks = {", 1)[1][: html.split("var hooks = {", 1)[1].find("};") + 1]
     for name in ("onZoomStart", "onZoom", "onZoomEnd", "onResize",
@@ -93,7 +95,7 @@ def test_destroy_restores_callbacks_and_cleans_up():
     并精确拆掉自己那一层 window.rogmemOnGraphGone 不覆盖后来的第三方 wrapper。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # 第一个 restoreFns.push：batch callback restore（用 setConfigPartial）
     first_restore = html.split("restoreFns.push(function ()", 1)[1][:1000]
     assert "graph.config && graph.config[name]" in first_restore
@@ -117,7 +119,7 @@ def test_selector_over_budget_uses_full_destroy():
     不能只 tracker.destroy + layer.remove。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # 找到 over-budget 分支
     over = html.split("consecutiveOverBudget >= BUDGET_CONSECUTIVE_BREAK", 1)[1][:800]
     assert "destroy('selector-over-budget')" in over, \
@@ -131,7 +133,7 @@ def test_snapshot_refresh_has_dirty_queue():
     inflight 期间的新调用不复用 inflight（它可能过期），而是登记 dirty + 返回"下一轮" Promise。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     body = html.split("snapshot.refresh = function", 1)[1][:500]
     # 旧的 "if (inflight) return inflight" 是 R1 bug 核心
     assert "return inflight;" not in body, "inflight 期间不得直接返回 inflight（可能过期）"
@@ -148,7 +150,7 @@ def test_no_250ms_polling_main_path():
     """不靠 250ms setInterval 轮询，rogmemPaint 建完就 window.rogmemOnGraphReady(host) 单播。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     assert "window.rogmemOnGraphReady = function" in html
     # rogmemPaint 必须真正 call 它（关态下 rogmemPaint 存在，所以这个 call 存在于通用部分）
     assert "window.rogmemOnGraphReady(el)" in html, "rogmemPaint 必须单播通知"
@@ -162,7 +164,7 @@ def test_snapshot_gated_by_sim_ended():
     不得在 attach 结束时无条件 snapshot.refresh（这是 PR110 的 bug，会把移动中的坐标标 ready）。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # attach 尾部不得出现无条件 snapshot.refresh() 调用
     attach_tail = html.split("// ——— 启动 ———", 1)[1][:800]
     assert "host.rogmemSimEnded === true" in attach_tail
@@ -178,7 +180,7 @@ def test_hover_not_hidden_preemptively():
     """rogmemOnHover 不得无条件 host.rogmemHoverTip.hidden = true；只在 pool 实际展示同一 nodeIdx 时才隐。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     hover_block = html.split("host.rogmemOnHover = function (pointIndex) {", 1)[1][:600]
     assert "rogmemHoverTip.hidden = true" not in hover_block, \
         "rogmemOnHover 不得无条件隐 #graph-tip（P1 hover 回归修复）"
@@ -193,7 +195,7 @@ def test_focus_feeds_selector_and_counts_budget():
     """focus 选中必须纳入 Selector 预算且去重（否则 PR 的'含 hover/focus 总预算'只是文案）。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # Selector.select 签名含 focusNodeIdx
     sel = html.split("function select(graph, snapshot, W, H, budget, hoverNodeIdx, focusNodeIdx)", 1)
     assert len(sel) == 2, "Selector.select 必须接受 focusNodeIdx 参数"
@@ -209,7 +211,7 @@ def test_degrade_does_not_sessionStorage_persist():
     """P2 需求：低性能降级只影响本页，不 sessionStorage 跨刷新持续禁用。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     assert "sessionStorage" not in html, "不得再 sessionStorage 持久化降级状态"
     assert "rogmem-graph-auto-labels-degraded" not in html
 
@@ -218,7 +220,7 @@ def test_tick_duration_ring_bounded():
     """tickDurationsMs 不得无界 push；生产每帧写，会话长了内存无界。改有界 ring。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     assert "TICK_RING_SIZE" in html
     push = html.split("function pushTick", 1)[1][:400]
     assert "TICK_RING_SIZE" in push
@@ -229,7 +231,7 @@ def test_budget_window_not_called_p95():
     """BUDGET_TICK_WINDOW 之前被注释成 P95，但实际是'连续 N 帧'。诚实命名。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # 必须有连续超预算计数（新名 BUDGET_TICK_OVERBUDGET_RUN）
     assert "BUDGET_TICK_OVERBUDGET_RUN" in html
     # 旧的歧义 P95 用法不得保留在注释里
@@ -240,7 +242,7 @@ def test_tracker_destroyed_prevents_revival():
     """destroy 后 beginFollow 不得复活 rAF（僵尸循环）。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # beginFollow 入口必须先检查 destroyed
     bf = html.split("beginFollow: function () {", 1)[1][:200]
     assert "destroyed" in bf
@@ -251,7 +253,7 @@ def test_tracker_destroyed_prevents_revival():
 def test_switch_on_exposes_sizes_from_paint():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # rogmemPaint 必须暴露 sizes 给 label 层。
     assert "sizes: sizes" in html or "sizes:sizes" in html
 
@@ -259,7 +261,7 @@ def test_switch_on_exposes_sizes_from_paint():
 def test_switch_on_budget_is_injected_not_hardcoded():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=17)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=17, renderer="cosmos")
     assert "GRAPH_LABEL_BUDGET = 17" in html
     # 旧的硬编 50 常量赋值不得再在自动标签 IIFE 里出现。
     assert "LABEL_BUDGET = 50" not in html
@@ -271,7 +273,7 @@ def test_tracker_tick_body_forbids_full_graph_ops():
     """CameraTracker.tick 内部不得调用 findPointsInRect / getPointPositionsAsync / sort / setConfig。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     tracker = html.split("function createCameraTracker", 1)[1]
     # 切出 tick 函数体（粗略：直到下一次出现 "function " 定义）
     tick_start = tracker.find("function tick(")
@@ -286,7 +288,7 @@ def test_selector_select_can_use_findPointsInRect_and_spaceToScreen():
     """Selector 允许用 findPointsInRect + spaceToScreenPosition（事件触发期）。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     selector = html.split("function createSelector", 1)[1]
     sel_body = selector[: selector.find("function createCameraTracker")]
     assert "findPointsInRect" in sel_body
@@ -296,7 +298,7 @@ def test_selector_select_can_use_findPointsInRect_and_spaceToScreen():
 def test_snapshot_uses_async_with_generation_token():
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     snap = html.split("function createSnapshotLifecycle", 1)[1]
     snap_body = snap[: snap.find("function createSelector")]
     assert "getPointPositionsAsync" in snap_body
@@ -309,7 +311,7 @@ def test_page_seed_is_fresh_per_page_not_derived_only_from_id():
     """pageSeed 必须每页独立；不应仅依 id 生成."""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     assert "crypto.getRandomValues" in html
 
 
@@ -328,7 +330,7 @@ def test_admin_graph_route_wires_budget(tmp_path, monkeypatch):
 def test_graph_page_accepts_label_budget_kwarg():
     from rogmem.ui import graph_page
 
-    on = graph_page(auto_labels=True, label_budget=7)
+    on = graph_page(auto_labels=True, label_budget=7, renderer="cosmos")
     assert "GRAPH_LABEL_BUDGET = 7" in on
 
 
@@ -337,7 +339,7 @@ def test_hover_dedup_is_pool_hit_gated():
     zoom<=Zoff / 边缘 tryPlace 失败等任意"pool 不显示"场景必须保留原 Cosmos tip。"""
     from rogmem.ui import graph_mount
 
-    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50)
+    html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
     # 1) rogmemOnHover 本身不得无条件隐 tip
     hover_block = html.split("host.rogmemOnHover = function", 1)[1][:600]
     assert "rogmemHoverTip.hidden = true" not in hover_block
