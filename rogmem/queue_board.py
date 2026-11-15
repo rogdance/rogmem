@@ -7,14 +7,18 @@ task; hiding it would make the line look shorter than it is.
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 
+from rogmem.closed_span import closed_hour_keys, hour_bounds, hour_slot_sql, open_tail, partial_prefix
 from rogmem.cost import buckets, span_bounds
 from rogmem.progress import STAGES, flow_states
 from rogmem.queue_priority import effective_priority, normalize_lane
 
 SHANGHAI = timezone(timedelta(hours=8))
-PAGE_SIZE = 50
+PAGE_SIZE = 20
+_SEAL_LOCK = threading.Lock()
 SPANS = ("24h", "7d", "30d", "all")
 TABS = ("all", "done", "queued", "leased")
 TAB_LABELS = {"all": "全部", "done": "已完成", "queued": "排队中", "leased": "进行中"}
@@ -227,25 +231,34 @@ def _pair(con, where: str, params) -> tuple[int, int]:
     return _num(row[0]), _num(row[1])
 
 
-def _totals(con, span: str, start: datetime, end: datetime) -> dict[str, int]:
+def _live_line_totals(con) -> dict[str, int]:
+    """How many tasks are on the live line. Finished work is not counted here."""
+
     queued, queued_chars = _pair(con, "q.state = 'queued'", ())
     leased, _chars = _pair(con, "q.state = 'leased'", ())
     failed, _chars = _pair(con, "q.state = 'failed'", ())
     other, _chars = _pair(con, "q.state NOT IN ('queued', 'leased', 'failed', 'done')", ())
-    where, params = _done_window(span, start, end)
-    done, done_chars = _pair(con, where, params)
     return {
         "queued": queued,
         "queued_chars": queued_chars,
         "leased": leased,
         "failed": failed,
         "other": other,
+    }
+
+
+def _totals(con, span: str, start: datetime, end: datetime) -> dict[str, int]:
+    live = _live_line_totals(con)
+    where, params = _done_window(span, start, end)
+    done, done_chars = _pair(con, where, params)
+    return {
+        **live,
         "done": done,
         "done_chars": done_chars,
     }
 
 
-def _series(con, span: str, start: datetime, end: datetime, grain: str) -> tuple[list[dict], int, int]:
+def _series_scan(con, span: str, start: datetime, end: datetime, grain: str) -> tuple[list[dict], int, int]:
     slots = buckets(start, end, grain)
     task_counts = {slot: 0 for slot in slots}
     char_counts = {slot: 0 for slot in slots}
@@ -309,7 +322,14 @@ def _ranked_select(where: str, wait: str, finished: str) -> str:
             WHERE {where}"""
 
 
-def _page_branches(tab: str, span: str, start: datetime, end: datetime) -> list[tuple[str, list]]:
+def _page_branches(
+    tab: str,
+    span: str,
+    start: datetime,
+    end: datetime,
+    *,
+    include_done: bool = True,
+) -> list[tuple[str, list]]:
     """Each branch names one state. History is not mixed into the live line."""
 
     live = (
@@ -324,10 +344,22 @@ def _page_branches(tab: str, span: str, start: datetime, end: datetime) -> list[
         return [live[1]]
     if tab == "done":
         return [_done_window(span, start, end)]
-    return [*live, _done_window(span, start, end)]
+    if include_done:
+        return [*live, _done_window(span, start, end)]
+    return list(live)
 
 
-def _page_rows(con, tab: str, span: str, start: datetime, end: datetime, moment: datetime, offset: int) -> list[dict]:
+def _page_rows(
+    con,
+    tab: str,
+    span: str,
+    start: datetime,
+    end: datetime,
+    moment: datetime,
+    offset: int,
+    *,
+    include_done: bool = True,
+) -> list[dict]:
     # Running and stopped sit in front of the waiting line. Inside the waiting
     # line: higher priority, fewer attempts, then the longer wait. Finished
     # rows are the most recent first. qid breaks the remaining ties.
@@ -336,7 +368,7 @@ def _page_rows(con, tab: str, span: str, start: datetime, end: datetime, moment:
     now = [moment.isoformat(), moment.isoformat()]
     parts: list[str] = []
     params: list = []
-    for where, extra in _page_branches(tab, span, start, end):
+    for where, extra in _page_branches(tab, span, start, end, include_done=include_done):
         parts.append(_ranked_select(where, wait, finished))
         params.extend(now)
         params.extend(extra)
@@ -353,7 +385,333 @@ def _page_rows(con, tab: str, span: str, start: datetime, end: datetime, moment:
     return [dict(row) for row in found]
 
 
-def view(span: str = "24h", tab: str = "all", page: int = 1, now: datetime | None = None) -> dict:
+def install_done_seals(con) -> None:
+    """Seal table for finished hours. A later write into that hour drops the seal.
+
+    The hot path must not drop and recreate triggers. That lock is what stalled
+    the probe when a page and a writer met.
+    """
+
+    ready = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='queue_done_unseal_insert'"
+    ).fetchone()
+    if ready:
+        return
+    slot = hour_slot_sql("finished_at")
+    new_slot = hour_slot_sql("NEW.finished_at")
+    old_slot = hour_slot_sql("OLD.finished_at")
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS queue_done_bucket (
+             bucket TEXT PRIMARY KEY,
+             tasks INTEGER NOT NULL,
+             chars INTEGER NOT NULL
+           )"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS queue_done_seal (
+             bucket TEXT PRIMARY KEY
+           )"""
+    )
+    con.execute("DROP TRIGGER IF EXISTS queue_done_unseal_insert")
+    con.execute("DROP TRIGGER IF EXISTS queue_done_unseal_update")
+    con.execute("DROP TRIGGER IF EXISTS queue_done_unseal_chars")
+    con.execute(
+        f"""CREATE TRIGGER queue_done_unseal_insert
+            AFTER INSERT ON queue
+            WHEN NEW.state = 'done'
+            BEGIN
+              DELETE FROM queue_done_bucket WHERE bucket = {new_slot};
+              DELETE FROM queue_done_seal WHERE bucket = {new_slot};
+            END"""
+    )
+    con.execute(
+        f"""CREATE TRIGGER queue_done_unseal_update
+            AFTER UPDATE OF state, finished_at ON queue
+            BEGIN
+              DELETE FROM queue_done_bucket WHERE bucket = {old_slot} OR bucket = {new_slot};
+              DELETE FROM queue_done_seal WHERE bucket = {old_slot} OR bucket = {new_slot};
+            END"""
+    )
+    con.execute(
+        f"""CREATE TRIGGER queue_done_unseal_chars
+            AFTER UPDATE OF body_chars ON source_cards
+            BEGIN
+              DELETE FROM queue_done_bucket WHERE bucket IN (
+                SELECT {slot} FROM queue
+                WHERE source_id = NEW.id AND state = 'done' AND IFNULL(trim(finished_at), '') != ''
+              );
+              DELETE FROM queue_done_seal WHERE bucket IN (
+                SELECT {slot} FROM queue
+                WHERE source_id = NEW.id AND state = 'done' AND IFNULL(trim(finished_at), '') != ''
+              );
+            END"""
+    )
+
+
+def _missing_done_seals(con, keys: list[str]) -> list[str]:
+    if not keys:
+        return []
+    found = {
+        str(row[0])
+        for row in _fetch(
+            con,
+            "SELECT bucket FROM queue_done_seal WHERE bucket >= ? AND bucket <= ?",
+            (keys[0], keys[-1]),
+        )
+    }
+    return [key for key in keys if key not in found]
+
+
+def _fold_done_range(con, start: datetime, end: datetime, *, inclusive_end: bool) -> list[tuple]:
+    edge = "<=" if inclusive_end else "<"
+    return _fetch(
+        con,
+        f"""SELECT {_bucket_expr("q.finished_at", "hour")}, COUNT(*), SUM(COALESCE(c.body_chars, 0))
+            {_FROM}
+            WHERE q.state = 'done' AND q.finished_jd IS NOT NULL
+              AND q.finished_jd >= julianday(?) AND q.finished_jd {edge} julianday(?)
+            GROUP BY 1""",
+        [start.isoformat(), end.isoformat()],
+    )
+
+
+def _seal_done_hours(con, keys: list[str]) -> None:
+    """One closed hour per commit, on the caller's connection. No second connection."""
+
+    if not keys:
+        return
+    if con.in_transaction:
+        con.rollback()
+    install_done_seals(con)
+    missing = _missing_done_seals(con, keys)
+    for key in missing:
+        if con.in_transaction:
+            con.commit()
+        start, end = hour_bounds(key)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            if con.in_transaction:
+                con.rollback()
+            con.execute("BEGIN IMMEDIATE")
+        try:
+            if con.execute("SELECT 1 FROM queue_done_seal WHERE bucket=?", (key,)).fetchone():
+                con.commit()
+                continue
+            tasks = 0
+            chars = 0
+            for slot_key, count, total in _fold_done_range(con, start, end, inclusive_end=False):
+                if str(slot_key or "") != key:
+                    continue
+                tasks += _num(count)
+                chars += _num(total)
+            con.execute("DELETE FROM queue_done_bucket WHERE bucket=?", (key,))
+            con.execute(
+                "INSERT INTO queue_done_bucket(bucket, tasks, chars) VALUES(?,?,?)",
+                (key, tasks, chars),
+            )
+            con.execute("INSERT INTO queue_done_seal(bucket) VALUES(?)", (key,))
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+
+
+def ensure_done_seals(con, keys: list[str]) -> None:
+    if not keys:
+        return
+    with _SEAL_LOCK:
+        _seal_done_hours(con, keys)
+
+
+_SEAL_PENDING: list[str] = []
+_SEAL_PENDING_LOCK = threading.Lock()
+_SEAL_WAKE = threading.Event()
+_SEAL_THREAD: threading.Thread | None = None
+
+
+def _seal_refresher() -> None:
+    """Seal closed hours off the request path. Distill writers must not block the page."""
+
+    while True:
+        _SEAL_WAKE.wait()
+        _SEAL_WAKE.clear()
+        with _SEAL_PENDING_LOCK:
+            keys = list(_SEAL_PENDING)
+            _SEAL_PENDING.clear()
+        if not keys:
+            continue
+        from rogmem.engine import db
+
+        try:
+            ensure_done_seals(db(), keys)
+        except Exception:
+            pass
+
+
+def _schedule_done_seals(keys: list[str]) -> None:
+    """Ask the sealer to fill these hours. The caller does not wait."""
+
+    global _SEAL_THREAD
+    if not keys:
+        return
+    with _SEAL_PENDING_LOCK:
+        have = set(_SEAL_PENDING)
+        for key in keys:
+            if key not in have:
+                _SEAL_PENDING.append(key)
+                have.add(key)
+        alive = _SEAL_THREAD is not None and _SEAL_THREAD.is_alive()
+        if not alive:
+            _SEAL_THREAD = threading.Thread(
+                target=_seal_refresher,
+                name="rogmem-queue-seal",
+                daemon=True,
+            )
+            _SEAL_THREAD.start()
+    _SEAL_WAKE.set()
+
+
+def _wait_done_seals(con, keys: list[str]) -> None:
+    """Deprecated name: the admin page must not wait. Prefer _schedule_done_seals."""
+
+    _schedule_done_seals(keys)
+
+
+def _read_done_hours(con, keys: list[str]) -> dict[str, tuple[int, int]]:
+    if not keys:
+        return {}
+    found = {}
+    for bucket, tasks, chars in _fetch(
+        con,
+        """SELECT bucket, tasks, chars FROM queue_done_bucket
+           WHERE bucket >= ? AND bucket <= ?""",
+        (keys[0], keys[-1]),
+    ):
+        found[str(bucket)] = (_num(tasks), _num(chars))
+    return found
+
+
+def _live_done_map(con, start: datetime, end: datetime, *, inclusive_end: bool) -> dict[str, tuple[int, int]]:
+    found: dict[str, tuple[int, int]] = {}
+    for slot_key, count, total in _fold_done_range(con, start, end, inclusive_end=inclusive_end):
+        key = str(slot_key or "")
+        if not key:
+            continue
+        tasks, chars = found.get(key, (0, 0))
+        found[key] = (tasks + _num(count), chars + _num(total))
+    return found
+
+
+def _folded_done(con, span: str, start: datetime, end: datetime, grain: str, *, sealed: bool) -> tuple[list[dict], int, int, int, int]:
+    """Done series for the card. Closed hours come from seals; the open hour is live.
+
+    Queue depth is not in here. A missing seal is folded as that one hour, not the whole table.
+    """
+
+    slots = buckets(start, end, grain)
+    index = {_slot_key(slot, grain): slot for slot in slots}
+    hours: dict[str, tuple[int, int]] = {}
+    keys = closed_hour_keys(start, end)
+    if sealed:
+        present = _sealed_keys(con, keys)
+        stored = _read_done_hours(con, keys)
+        for key in keys:
+            if key in present:
+                hours[key] = stored.get(key, (0, 0))
+        missing = [key for key in keys if key not in present]
+    else:
+        missing = list(keys)
+    for key in missing:
+        start_at, end_at = hour_bounds(key)
+        for slot_key, pair in _live_done_map(con, start_at, end_at, inclusive_end=False).items():
+            if slot_key != key:
+                tasks, chars = hours.get(slot_key, (0, 0))
+                hours[slot_key] = (tasks + pair[0], chars + pair[1])
+                continue
+            hours[key] = pair
+    prefix = partial_prefix(start, end)
+    if prefix:
+        for slot_key, pair in _live_done_map(con, prefix[0], prefix[1], inclusive_end=False).items():
+            tasks, chars = hours.get(slot_key, (0, 0))
+            hours[slot_key] = (tasks + pair[0], chars + pair[1])
+    tail = open_tail(start, end)
+    if tail:
+        for slot_key, pair in _live_done_map(con, tail[0], tail[1], inclusive_end=True).items():
+            tasks, chars = hours.get(slot_key, (0, 0))
+            hours[slot_key] = (tasks + pair[0], chars + pair[1])
+    task_counts = {slot: 0 for slot in slots}
+    char_counts = {slot: 0 for slot in slots}
+    untimed_tasks = 0
+    untimed_chars = 0
+    if span == "all":
+        blank = _fetch(
+            con,
+            f"""SELECT COUNT(*), SUM(COALESCE(c.body_chars, 0))
+                {_FROM}
+                WHERE q.state = 'done' AND q.finished_jd IS NULL""",
+        )[0]
+        untimed_tasks += _num(blank[0])
+        untimed_chars += _num(blank[1])
+        future = _fetch(
+            con,
+            f"""SELECT COUNT(*), SUM(COALESCE(c.body_chars, 0))
+                {_FROM}
+                WHERE q.state = 'done' AND q.finished_jd IS NOT NULL AND q.finished_jd > julianday(?)""",
+            [end.isoformat()],
+        )[0]
+        untimed_tasks += _num(future[0])
+        untimed_chars += _num(future[1])
+    for key, (tasks, chars) in hours.items():
+        if grain == "hour":
+            slot = index.get(key)
+        else:
+            slot = index.get(key[:10] + " 00:00:00")
+        if slot is None:
+            untimed_tasks += tasks
+            untimed_chars += chars
+            continue
+        task_counts[slot] += tasks
+        char_counts[slot] += chars
+    series = [
+        {
+            "at": slot.isoformat(),
+            "label": slot.strftime("%m-%d %H:%M") if grain == "hour" else slot.strftime("%m-%d"),
+            "tasks": task_counts[slot],
+            "chars": char_counts[slot],
+        }
+        for slot in slots
+    ]
+    done_tasks = sum(task_counts.values()) + untimed_tasks
+    done_chars = sum(char_counts.values()) + untimed_chars
+    return series, untimed_tasks, untimed_chars, done_tasks, done_chars
+
+
+def _sealed_keys(con, keys: list[str]) -> set[str]:
+    if not keys:
+        return set()
+    return {
+        str(row[0])
+        for row in _fetch(
+            con,
+            "SELECT bucket FROM queue_done_seal WHERE bucket >= ? AND bucket <= ?",
+            (keys[0], keys[-1]),
+        )
+    }
+
+
+def _closed_keys_for(span: str, moment: datetime) -> list[str]:
+    from rogmem.engine import db
+
+    end = moment.astimezone(timezone.utc)
+    chosen = span if span in SPANS else "24h"
+    con = db()
+    earliest = _earliest(con) if chosen == "all" else None
+    start, _grain = span_bounds(chosen, moment, earliest)
+    return closed_hour_keys(start, end)
+
+
+def view(span: str = "24h", tab: str = "all", page: int = 1, now: datetime | None = None, *, sync: bool = True) -> dict:
     """One consistent snapshot: aggregates for the line, one page of cards."""
 
     from rogmem.engine import db
@@ -366,14 +724,28 @@ def view(span: str = "24h", tab: str = "all", page: int = 1, now: datetime | Non
     end = moment.astimezone(timezone.utc)
     con = db()
     own = not con.in_transaction
+    seal_keys: list[str] = []
     if own:
+        earliest = _earliest(con) if chosen_span == "all" else None
+        start, _grain = span_bounds(chosen_span, moment, earliest)
+        seal_keys = closed_hour_keys(start, end)
+        if con.in_transaction:
+            con.rollback()
+        if sync:
+            ensure_done_seals(con, seal_keys)
+            seal_keys = []
+        if con.in_transaction:
+            con.rollback()
         con.execute("BEGIN")
     try:
         earliest = _earliest(con) if chosen_span == "all" else None
         start, grain = span_bounds(chosen_span, moment, earliest)
-        totals = _totals(con, chosen_span, start, end)
-        series, untimed_tasks, untimed_chars = _series(con, chosen_span, start, end, grain)
-        done_tasks = totals["done"]
+        # Live depth only. Done totals come from seals + open tail, not a second
+        # full scan of finished history on the request path.
+        totals = _live_line_totals(con)
+        series, untimed_tasks, untimed_chars, done_tasks, done_chars = _folded_done(
+            con, chosen_span, start, end, grain, sealed=own
+        )
         queued_tasks = totals["queued"]
         total = {
             "done": done_tasks,
@@ -386,10 +758,30 @@ def view(span: str = "24h", tab: str = "all", page: int = 1, now: datetime | Non
         if current > pages:
             current = pages
         offset = (current - 1) * PAGE_SIZE
-        raw_rows = _page_rows(con, chosen_tab, chosen_span, start, end, moment, offset) if total else []
+        live_n = queued_tasks + totals["leased"] + totals["failed"] + totals["other"]
+        # Live rows sort ahead of finished ones. A page filled by the live line
+        # must not open finished history just to discard it.
+        need_done = chosen_tab == "done" or (chosen_tab == "all" and live_n < offset + PAGE_SIZE)
+        raw_rows = (
+            _page_rows(
+                con,
+                chosen_tab,
+                chosen_span,
+                start,
+                end,
+                moment,
+                offset,
+                include_done=need_done,
+            )
+            if total
+            else []
+        )
     finally:
         if own:
             con.rollback()
+    if seal_keys:
+        # Seal after the read commits so the page and the writer do not meet.
+        _schedule_done_seals(seal_keys)
     page_rows = [_public_row(row, moment) for row in raw_rows]
     return {
         "span": chosen_span,
@@ -407,11 +799,11 @@ def view(span: str = "24h", tab: str = "all", page: int = 1, now: datetime | Non
         },
         "summary": {
             "done_tasks": done_tasks,
-            "done_chars": totals["done_chars"],
+            "done_chars": done_chars,
             "queued_tasks": queued_tasks,
             "queued_chars": totals["queued_chars"],
             "per_hour_tasks": _rate(done_tasks, start, end),
-            "per_hour_chars": _rate(totals["done_chars"], start, end),
+            "per_hour_chars": _rate(done_chars, start, end),
             "running": totals["leased"],
             "stopped": totals["failed"],
             "untimed_tasks": untimed_tasks,
@@ -423,5 +815,58 @@ def view(span: str = "24h", tab: str = "all", page: int = 1, now: datetime | Non
             "end": end.isoformat(),
             "grain": grain,
             "tz": "UTC+8",
+        },
+    }
+
+
+def list_view(span: str = "24h", tab: str = "all", page: int = 1, now: datetime | None = None) -> dict:
+    """One page of the queue list. Overview cards are not read or sealed."""
+
+    from rogmem.engine import db
+
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    chosen_span = span if span in SPANS else "24h"
+    chosen_tab = tab if tab in TABS else "all"
+    end = moment.astimezone(timezone.utc)
+    con = db()
+    own = not con.in_transaction
+    if own:
+        con.execute("BEGIN")
+    try:
+        earliest = _earliest(con) if chosen_span == "all" else None
+        start, _grain = span_bounds(chosen_span, moment, earliest)
+        totals = _totals(con, chosen_span, start, end)
+        done_tasks = totals["done"]
+        queued_tasks = totals["queued"]
+        total = {
+            "done": done_tasks,
+            "queued": queued_tasks,
+            "leased": totals["leased"],
+            "all": queued_tasks + totals["leased"] + totals["failed"] + totals["other"] + done_tasks,
+        }[chosen_tab]
+        pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE) if total else 1
+        current = page if page > 0 else 1
+        if current > pages:
+            current = pages
+        offset = (current - 1) * PAGE_SIZE
+        raw_rows = _page_rows(con, chosen_tab, chosen_span, start, end, moment, offset) if total else []
+    finally:
+        if own:
+            con.rollback()
+    return {
+        "span": chosen_span,
+        "tab": chosen_tab,
+        "page": current,
+        "pages": pages,
+        "page_size": PAGE_SIZE,
+        "total": total,
+        "rows": [_public_row(row, moment) for row in raw_rows],
+        "counts": {
+            "all": queued_tasks + totals["leased"] + totals["failed"] + totals["other"] + done_tasks,
+            "done": done_tasks,
+            "queued": queued_tasks,
+            "leased": totals["leased"],
         },
     }

@@ -2976,6 +2976,7 @@ def list_pager(
     page_size: int | None = None,
     note: str | None = None,
     note_class: str = "",
+    partial: str = "",
 ) -> str:
     """One window: count on the left, page controls on the right.
 
@@ -2995,8 +2996,9 @@ def list_pager(
     klass = "note" + (f" {note_class}" if note_class else "")
     prev = _step_control("上一页", -1, _href(action, params, current - 1) if current > 1 else "")
     nxt = _step_control("下一页", 1, _href(action, params, current + 1) if current < pages else "")
+    marker = f" data-partial='{esc(partial)}'" if partial else ""
     return (
-        f"<div class='list-foot' data-total='{total}' data-page='{current}' data-page-size='{size}'>"
+        f"<div class='list-foot'{marker} data-total='{total}' data-page='{current}' data-page-size='{size}'>"
         f"<p class='{klass}' data-total='{total}'>{shown}</p>"
         f"<form class='pager' method='get' action='{esc(action)}'>"
         f"{_hidden_inputs(params)}"
@@ -3005,6 +3007,62 @@ def list_pager(
         f"{nxt}"
         "</form></div>"
     )
+
+
+_LIST_PARTIAL_SCRIPT = r"""
+<script>
+(function () {
+  function rootOf(foot) {
+    var kind = foot.getAttribute("data-partial");
+    if (kind === "calls") return document.getElementById("calls");
+    if (kind === "queue") return document.getElementById("queue-tasks");
+    return null;
+  }
+  function paint(foot, html) {
+    var root = rootOf(foot);
+    if (!root) return;
+    var doc = new DOMParser().parseFromString(html, "text/html");
+    var nextBody = doc.querySelector("tbody");
+    var nextFoot = doc.querySelector(".list-foot");
+    var body = root.querySelector("tbody");
+    var current = root.querySelector(".list-foot");
+    if (nextBody && body) body.replaceWith(nextBody);
+    if (nextFoot && current) current.replaceWith(nextFoot);
+  }
+  function refresh(foot, href) {
+    var kind = foot.getAttribute("data-partial");
+    if (!kind || !href) return;
+    var url = new URL(href, location.href);
+    url.searchParams.set("part", kind);
+    fetch(url.pathname + url.search, {credentials: "same-origin", cache: "no-store", headers: {"X-Rogmem-List": "1"}})
+      .then(function (response) {
+        var type = response.headers.get("content-type") || "";
+        if (!response.ok || type.indexOf("html") < 0) throw new Error("list");
+        return response.text();
+      })
+      .then(function (html) { paint(foot, html); })
+      .catch(function () { location.href = href; });
+  }
+  document.addEventListener("click", function (event) {
+    var link = event.target && event.target.closest ? event.target.closest(".list-foot[data-partial] a[href]") : null;
+    if (!link || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    var foot = link.closest(".list-foot");
+    if (!foot) return;
+    event.preventDefault();
+    refresh(foot, link.getAttribute("href"));
+  });
+  document.addEventListener("change", function (event) {
+    var input = event.target;
+    if (!input || input.name !== "page" || !input.form) return;
+    var foot = input.form.closest ? input.form.closest(".list-foot[data-partial]") : null;
+    if (!foot) return;
+    event.preventDefault();
+    var params = new URLSearchParams(new FormData(input.form));
+    refresh(foot, input.form.getAttribute("action") + "?" + params.toString());
+  });
+})();
+</script>
+"""
 
 
 _CLIP_LEN = 30
@@ -7255,8 +7313,12 @@ _COST_PENDING_SCRIPT = r"""
     }
     var modal = document.getElementById("price-modal");
     if (modal && !modal.hidden) { setTimeout(arm, delay); return; }
-    var probe = location.pathname + location.search;
-    probe += (probe.indexOf("?") >= 0 ? "&" : "?") + "observe=1";
+    var probeUrl = new URL(location.href);
+    probeUrl.searchParams.delete("page");
+    probeUrl.searchParams.delete("part");
+    probeUrl.searchParams.set("observe", "1");
+    var probe = probeUrl.pathname + probeUrl.search;
+    if (probe.indexOf("observe=1") < 0) probe += (probe.indexOf("?") >= 0 ? "&" : "?") + "observe=1";
     fetch(probe, {
       headers: {"__HEADER__": "1"},
       cache: "no-store",
@@ -8522,14 +8584,17 @@ def cost_page(board: dict, providers: list[dict] | None = None, prices: dict | N
     asof_attr = str(observation.get("as_of") or "")
     pending_script = _COST_PENDING_SCRIPT if view_state in {"pending", "stale"} else ""
     page_no = int(board.get("page") or 1)
+    from rogmem.cost import PAGE as _COST_PAGE
+
     foot = list_pager(
         "/admin/costs",
         _cost_params(board),
         total=int(board.get("count") or 0) if show_numbers else 0,
         page=page_no,
-        page_size=board.get("page_size"),
+        page_size=board.get("page_size") or _COST_PAGE,
         note=None if show_numbers else count_note,
         note_class="gathering" if view_state == "pending" else "",
+        partial="calls",
     )
     rate = board.get("rate")
     rate_text = "" if rate is None else _plain_price(float(rate))
@@ -8633,8 +8698,28 @@ def cost_page(board: dict, providers: list[dict] | None = None, prices: dict | N
 </div>
 {_COST_SCRIPT}
 {_CHART_SCRIPT.replace("__COST__", payload)}
-{pending_script}"""
+{pending_script}
+{_LIST_PARTIAL_SCRIPT}"""
     return page("成本明细", "costs", body)
+
+
+def cost_calls_fragment(board: dict) -> str:
+    """The call list alone. Card filters on the board are echoed, not applied here."""
+
+    from rogmem.cost import PAGE as _COST_PAGE
+
+    rows = "".join(_call_row(row) for row in (board.get("rows") or [])) or (
+        "<tr><td class='empty' colspan='10'>还没有调用</td></tr>"
+    )
+    foot = list_pager(
+        "/admin/costs",
+        _cost_params(board),
+        total=int(board.get("count") or 0),
+        page=int(board.get("page") or 1),
+        page_size=board.get("page_size") or _COST_PAGE,
+        partial="calls",
+    )
+    return f"<tbody>{rows}</tbody>{foot}"
 
 
 def _choice_html(providers: list[dict], kind: str = "") -> str:
@@ -9862,12 +9947,15 @@ def queue_page(board: dict) -> str:
         },
         ensure_ascii=False,
     ).replace("<", "\\u003c")
+    from rogmem.queue_board import PAGE_SIZE as _QUEUE_PAGE
+
     foot = list_pager(
         "/admin/settings/queue",
         {"span": board.get("span") or "24h", "tab": board.get("tab") or "all"},
         total=int(board.get("total") or 0),
         page=int(board.get("page") or 1),
-        page_size=board.get("page_size"),
+        page_size=board.get("page_size") or _QUEUE_PAGE,
+        partial="queue",
     )
     inner = f"""<div class="board">
 <section class="panel" id="queue-overview">
@@ -9908,5 +9996,40 @@ def queue_page(board: dict) -> str:
 </div>
 </section>
 </div>
-{_QUEUE_CHART.replace("__QUEUE__", payload)}"""
+{_QUEUE_CHART.replace("__QUEUE__", payload)}
+{_LIST_PARTIAL_SCRIPT}"""
     return _section_page("queue", "队列状态", inner)
+
+
+def queue_list_fragment(board: dict) -> str:
+    """The queue list alone. Overview figures are not part of this response."""
+
+    from rogmem.queue_board import PAGE_SIZE as _QUEUE_PAGE
+
+    body_rows = []
+    for row in board.get("rows") or []:
+        full = str(row.get("name") or "")
+        note = str(row.get("note") or "")
+        body_rows.append(
+            "<tr>"
+            f"<td><a class='clip' href='/admin/sources/{esc(row.get('source_id') or '')}' title='{esc(full)}'>{esc(_queue_clip(full))}</a></td>"
+            f"<td>{esc(row.get('imported_at') or '—')}</td>"
+            f"<td>{esc(row.get('enqueued_at') or '—')}</td>"
+            f"<td>{esc(row.get('stage') or '')}</td>"
+            f"<td>{esc(row.get('state_label') or '')}</td>"
+            f"<td>{esc(row.get('priority') or '')}</td>"
+            f"<td>{esc(row.get('spent') or '—')}</td>"
+            f"<td class='clip' title='{esc(note)}'>{esc(_queue_clip(note, 40) or '—')}</td>"
+            "</tr>"
+        )
+    if not body_rows:
+        body_rows.append("<tr><td class='empty' colspan='8'>这一页还没有任务</td></tr>")
+    foot = list_pager(
+        "/admin/settings/queue",
+        {"span": board.get("span") or "24h", "tab": board.get("tab") or "all"},
+        total=int(board.get("total") or 0),
+        page=int(board.get("page") or 1),
+        page_size=board.get("page_size") or _QUEUE_PAGE,
+        partial="queue",
+    )
+    return f"<tbody>{''.join(body_rows)}</tbody>{foot}"

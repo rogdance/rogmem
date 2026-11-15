@@ -100,7 +100,7 @@ def test_queue_page_lists_the_live_line_and_the_window(tmp_path, monkeypatch):
     assert "任务概览" in page
     assert "入列时间" in page
     assert "完成耗时" in page
-    assert "data-page-size='50'" in page
+    assert "data-page-size='20'" in page
     long = "字" * 40
     assert long not in page
     clipped = queue_page(view("all", "all", 1, now))

@@ -132,9 +132,9 @@ def test_the_list_pages_by_the_lamp_not_the_stored_word(tmp_path, monkeypatch):
     )
     engine.db().commit()
     drafting = engine.list_sources("session", status="草稿:run", page=1)
-    assert drafting["total"] == 51 and len(drafting["rows"]) == 50
-    rest = engine.list_sources("session", status="草稿:run", page=2)
-    assert len(rest["rows"]) == 1
+    assert drafting["total"] == 51 and drafting["page_size"] == 20 and len(drafting["rows"]) == 20
+    rest = engine.list_sources("session", status="草稿:run", page=3)
+    assert len(rest["rows"]) == 11
     assert engine.list_sources("session", status="完成")["rows"][0]["id"] == "done"
     assert engine.list_sources("file", status="速写:run")["rows"][0]["id"] == "sketch"
     assert engine.list_sources("session", status="蒸馏已结晶")["rows"][0]["id"] == "done"

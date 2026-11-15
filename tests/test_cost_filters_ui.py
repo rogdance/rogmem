@@ -51,16 +51,16 @@ def test_tabs_intercept_click():
 def test_call_pager_shares_the_count_line():
     """调用明细的条数和翻页在同一行：左边计数，右边同一套翻页控件。"""
 
-    html = cost_page(_board(page=2, pages=9, count=180), [], {})
+    html = cost_page(_board(page=2, pages=4, count=180), [], {})
     assert "class='list-foot'" in html
     foot = html.split("class='list-foot'", 1)[1].split("</form></div>", 1)[0]
     assert foot.index("共 180 条") < foot.index("<form class='pager'")
     assert "data-total='180'" in foot
-    assert "data-page-size='50'" in foot
+    assert "data-page-size='20'" in foot
     assert "aria-label='页码'" in foot
     assert "value='2'" in foot
-    assert "data-pages>4</span>" in foot
-    assert "data-pages>9</span>" not in foot
+    assert "data-pages>9</span>" in foot
+    assert "data-pages>4</span>" not in foot
     assert "href='/admin/costs?" in foot
     style = " ".join(html.split("</style>", 1)[0].split())
     assert ".list-foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 8px; }" in style

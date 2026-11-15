@@ -38,8 +38,8 @@ def test_sources_turn_fifty_at_a_time(tmp_path, monkeypatch):
     engine.db().commit()
     first = engine.list_sources("session", page=1)
     second = engine.list_sources("session", page=2)
-    assert first["total"] == 55 and first["pages"] == 2 and len(first["rows"]) == 50
-    assert len(second["rows"]) == 5
+    assert first["total"] == 55 and first["pages"] == 3 and first["page_size"] == 20 and len(first["rows"]) == 20
+    assert len(second["rows"]) == 20
     assert first["rows"][0]["id"] != second["rows"][0]["id"]
     html = sources_page(first["rows"], "session", {"q": "句子"}, {"statuses": []}, first)
     assert "下一页" in html and "上一页" in html
