@@ -1296,6 +1296,7 @@ passwordInput.addEventListener('input', () => {
         .replace("__INITIAL__", esc(INITIAL_ADMIN_PASSWORD))
     )
 
+
 def confirm_button(
     message: str,
     url: str,

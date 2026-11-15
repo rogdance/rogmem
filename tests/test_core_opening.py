@@ -244,6 +244,7 @@ def test_a_new_session_uses_the_configured_core_budget(tmp_path, monkeypatch):
     assert store["path"] in page
     assert 'name="store_path"' not in page
 
+
 def test_a_large_turn_is_not_opened_from_the_archive(tmp_path, monkeypatch):
     """Without the stored opening, core does not touch the archive. Backfill writes that opening off the request."""
     engine = _open(tmp_path, monkeypatch)
