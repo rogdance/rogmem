@@ -23,6 +23,11 @@ PACKET_MARK = "【rogmem 历史包】"
 
 _QUIET_SECONDS = 600
 _TIMEOUT = 2
+# A read answers inside the host's hook deadline. A turn upload embeds the turn
+# on the hub and takes seconds, so the one the hook makes inline is short and
+# best-effort; the resident channel has no host deadline and waits for the hub.
+_INLINE_UPLOAD_TIMEOUT = 2
+_DRAIN_UPLOAD_TIMEOUT = 30
 _FLUSH_LIMIT = 20
 
 
@@ -547,7 +552,7 @@ def _submit_ok(payload: dict) -> bool:
     return bool(isinstance(data, dict) and data.get("ok"))
 
 
-def _flush(home: Path, program: str, rows: list[dict]) -> list[dict]:
+def _flush(home: Path, program: str, rows: list[dict], timeout: float = _DRAIN_UPLOAD_TIMEOUT) -> list[dict]:
     """Hand turns through the same MCP door as core. The admin door does not take a host key."""
     url, token, device = _endpoint(home, program)
     if not url or not token.startswith("rm_"):
@@ -570,7 +575,7 @@ def _flush(home: Path, program: str, rows: list[dict]) -> list[dict]:
         if project:
             arguments["project"] = project
         try:
-            ok = _submit_ok(_mcp(url, token, device, "submit_turn", arguments))
+            ok = _submit_ok(_mcp(url, token, device, "submit_turn", arguments, timeout))
         except Exception:
             return pending
         if not ok:
@@ -580,7 +585,7 @@ def _flush(home: Path, program: str, rows: list[dict]) -> list[dict]:
     return pending
 
 
-def drain_outbox(home: Path) -> int:
+def drain_outbox(home: Path, timeout: float = _DRAIN_UPLOAD_TIMEOUT) -> int:
     """Hand the local gap to the hub. A turn stays here until the hub accepts it."""
     path = _outbox(home)
     with _OutboxLock(path):
@@ -595,7 +600,7 @@ def drain_outbox(home: Path) -> int:
         if program not in _PROGRAMS:
             continue
         try:
-            left = _flush(home, program, items)
+            left = _flush(home, program, items, timeout)
         except Exception:
             continue
         pending = {_turn_key(item) for item in left}
@@ -624,7 +629,7 @@ def _capture(home: Path, program: str, payload: dict, project: str = "", *, drai
     if not drain:
         return
     try:
-        drain_outbox(home)
+        drain_outbox(home, _INLINE_UPLOAD_TIMEOUT)
     except Exception:
         return
 

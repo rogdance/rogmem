@@ -1527,11 +1527,11 @@ def _remember_redemption(con: sqlite3.Connection, grant_id: str, program: str, a
 def redeem_enroll_grant(secret: str, device_id: str, device_name: str, program: str, pubkey_b64: str) -> dict:
     """Exchange one enrollment grant for this program's own key.
 
-    A host that is already enabled keeps its key when the caller still presents
-    that same key, so a grant never rotates a working host. When the caller
-    presents a *different* key, this machine has lost the one it enrolled with:
-    the row keeps its identity and the old key dies, so a valid grant always
-    leaves a usable host instead of stranding a client that holds no token.
+    A client only redeems when its config holds no token, so reaching here means
+    this machine needs a key now — a first enrollment, a lost reply, or a
+    reinstalled host. An already-enabled row keeps its identity and gets a fresh
+    key sealed to the public key presented now; the previous key dies. A working
+    host is never disturbed because its client never redeems again.
     """
     device_id = (device_id or "").strip()
     program = (program or "").strip()
@@ -1589,12 +1589,6 @@ def redeem_enroll_grant(secret: str, device_id: str, device_name: str, program: 
         ).fetchall()
         current = min(rows, key=lambda row: _AGENT_RANK.get(row["status"], 9)) if rows else None
         now = utcnow()
-        if current is not None and current["status"] == "启用" and current["pubkey"] == pubkey_b64:
-            # Same key as the enabled row: the caller already holds this host's
-            # token. Leave it in place; a grant must not rotate a working host.
-            _remember_redemption(con, grant["id"], program, current["id"], now)
-            con.commit()
-            return {"ok": True, "error": "", "status": "已接入", "already": True, "wrapped": "", "id": current["id"]}
         if current is not None and current["status"] == "停用":
             con.commit()
             return _grant_error("已停用")
