@@ -10516,7 +10516,7 @@ def _spoken_prefix(source_id: str, kind: str, room: int) -> str:
     """Return the prefix the packer can still show. Rows the budget never reaches are not opened."""
     need = REPLY_CLIP + _PREFIX_SLACK if kind == "agent" else max(room, 0) + _PREFIX_SLACK
     row = db().execute(
-        "SELECT substr(trim(body), 1, ?) AS body FROM sources WHERE id=?",
+        "SELECT substr(body, 1, ?) AS body FROM sources WHERE id=?",
         (need, source_id),
     ).fetchone()
     body = redact_text(((row["body"] if row else "") or "").strip())
@@ -10688,6 +10688,31 @@ def _finish_core(
     }
 
 
+# Opening a history packet hydrates the thin page. Leftover thick columns are not part of that read.
+_THIN_CRYSTAL = (
+    "id, type, name, status, revision, envelope_json, sketch_md, "
+    "facts_json, inferences_json, merged_into, maybe_with, possible_duplicate_of, "
+    "unresolved_conflicts, deferred_retries"
+)
+
+
+def _thin_crystal(where: str, params: tuple = ()) -> sqlite3.Row | None:
+    return db().execute(f"SELECT {_THIN_CRYSTAL} FROM crystallizations WHERE {where}", params).fetchone()
+
+
+def _with_body(row: sqlite3.Row | None) -> dict | None:
+    """Load the page body only when the sketch is not what this call will show."""
+    if row is None:
+        return None
+    item = dict(row)
+    if str(item.get("sketch_md") or "").strip():
+        item["body_md"] = ""
+        return item
+    body = db().execute("SELECT body_md FROM crystallizations WHERE id=?", (item["id"],)).fetchone()
+    item["body_md"] = "" if body is None else (body["body_md"] or "")
+    return item
+
+
 def core_memory(
     budget: int = CORE_BUDGET_DEFAULT,
     project: str = "",
@@ -10695,7 +10720,7 @@ def core_memory(
     before: str = "",
     now: str | datetime | None = None,
 ) -> dict:
-    row = db().execute("SELECT * FROM crystallizations WHERE id='owner'").fetchone()
+    row = _with_body(_thin_crystal("id='owner'"))
     summary = _summary_slots_from_row(row) if row else {}
     birth = _birth_text(summary)
     if birth:
