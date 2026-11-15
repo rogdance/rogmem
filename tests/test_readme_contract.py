@@ -70,5 +70,4 @@ def test_readme_leaves_out_private_operations():
     assert "remote-access" not in lowered
     assert "192.168." not in README
     assert "admin.password" not in README
-    assert "138-0000" not in README
     assert "license" not in lowered

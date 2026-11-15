@@ -50,6 +50,7 @@ ALLOW_FILES = (
     "deploy/__init__.py",
     "deploy/极空间-rogmem-compose.yml",
     "scripts/public_tree.py",
+    "scripts/pii_guard.py",
     "scripts/install_zspace.py",
     "scripts/__init__.py",
 )
@@ -131,6 +132,7 @@ REQUIRED_PUBLIC = (
     "host/dsh/package.json",
     "deploy/build_compose.py",
     "scripts/install_zspace.py",
+    "scripts/pii_guard.py",
     "scripts/public_tree.py",
     ".github/workflows/ci.yml",
 )
