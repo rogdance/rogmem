@@ -555,6 +555,10 @@ class CrystalStore:
         from rogmem.crystal_index import sync_crystal
         from rogmem.wikilink import sync_wikilinks
 
+        repo = ""
+        keys = crystal.keys if isinstance(crystal.keys, dict) else {}
+        repo = str(keys.get("仓库地址") or "")[:500]
+        self.con.execute("UPDATE crystal_openings SET repo=? WHERE id=?", (repo, crystal.id))
         sync_wikilinks(self.con, crystal.id, crystal.body_md, active=crystal.status == "active")
         sync_crystal(self.con, crystal.id, crystal.name, crystal.body_md, crystal.sketch_md, crystal.status)
         if commit:

@@ -104,14 +104,14 @@ def test_recent_pack_reads_the_budget_not_the_archive(tmp_path, monkeypatch):
         str(row[-1])
         for row in engine.db().execute(
             """EXPLAIN QUERY PLAN
-               SELECT id, kind, IFNULL(event_at,'') AS event_at, IFNULL(project_ref,'') AS project_ref
-               FROM sources
-               WHERE redacted=0 AND kind IN ('user','agent')
-               ORDER BY IFNULL(event_at,'') DESC, id DESC
+               SELECT id, kind, event_at, project_ref, excerpt
+               FROM source_openings
+               WHERE kind IN ('user','agent')
+               ORDER BY event_at DESC, id DESC
                LIMIT 32"""
         )
     )
-    assert "sources_recent_turn" in plan
+    assert "source_openings_recent" in plan
     seen: list[str] = []
     engine.db().set_trace_callback(seen.append)
     loaded, truncated, _ = engine._pack_recent(80, "", "")
@@ -119,8 +119,8 @@ def test_recent_pack_reads_the_budget_not_the_archive(tmp_path, monkeypatch):
     assert any("新的一句" in item["text"] for item in loaded)
     assert truncated is True
     joined = "\n".join(seen).lower()
-    assert "substr(body" not in joined
-    assert "select body" not in joined
+    assert "from sources" not in joined
+    assert "substr(" not in joined
 
 
 def test_continuation_returns_only_older_excerpts(tmp_path, monkeypatch):
@@ -245,19 +245,27 @@ def test_a_new_session_uses_the_configured_core_budget(tmp_path, monkeypatch):
     assert 'name="store_path"' not in page
 
 def test_a_large_turn_is_not_opened_from_the_archive(tmp_path, monkeypatch):
-    """The opening packet reads the stored prefix. A long archive body stays on disk."""
+    """Without the stored opening, core does not touch the archive. Backfill writes that opening off the request."""
     engine = _open(tmp_path, monkeypatch)
     _turn(engine, "huge", "user", "巨" * 1_500_000, "2026-02-02T00:00:00+00:00")
-    engine.db().execute("UPDATE sources SET excerpt='' WHERE id='huge'")
+    engine.db().execute("DELETE FROM source_openings WHERE id='huge'")
     engine.db().commit()
     seen: list[str] = []
     engine.db().set_trace_callback(lambda sql: seen.append(" ".join(sql.split())))
-    loaded, truncated, _ = engine._pack_recent(80, "", "")
+    loaded, _, _ = engine._pack_recent(80, "", "")
     engine.db().set_trace_callback(None)
     joined = "\n".join(seen).lower()
-    assert "substr(body" not in joined
+    assert "from sources" not in joined
+    assert "substr(" not in joined
+    assert not any("巨" in item["text"] for item in loaded)
+    assert engine.backfill_openings(limit=1) == 1
+    seen.clear()
+    engine.db().set_trace_callback(lambda sql: seen.append(" ".join(sql.split())))
+    loaded, truncated, _ = engine._pack_recent(80, "", "")
+    engine.db().set_trace_callback(None)
     assert any(item["text"].startswith("用户：巨") for item in loaded)
     assert truncated is True
+    assert "from sources" not in "\n".join(seen).lower()
 
 
 def test_opening_does_not_read_thick_leftover_columns(tmp_path, monkeypatch):
@@ -274,6 +282,8 @@ def test_opening_does_not_read_thick_leftover_columns(tmp_path, monkeypatch):
     packed = engine.core_memory(200, "")
     engine.db().set_trace_callback(None)
     joined = "\n".join(seen).lower()
+    assert "crystallizations" not in joined
     assert "chapters_json" not in joined
-    assert "summary_json" not in joined
+    assert "sketch_md" not in joined
+    assert "body_md" not in joined
     assert "主人速写" in str(packed)
