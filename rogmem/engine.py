@@ -10537,34 +10537,31 @@ def _recent_identity(before_at: str, before_id: str, limit: int, offset: int):
     return db().execute(sql, params).fetchall()
 
 
-def _spoken_prefix(source_id: str, kind: str, room: int) -> str:
-    """Return the prefix the packer can still show. The archive body stays unread.
+def _text_prefix(table: str, key: str, column: str, n_chars: int) -> str:
+    """The first characters of one cell. The rest of a long value stays on its pages."""
+    if n_chars <= 0 or not key:
+        return ""
+    row = db().execute(f"SELECT rowid FROM {table} WHERE id=?", (key,)).fetchone()
+    if row is None:
+        return ""
+    try:
+        blob = db().blobopen(table, column, row[0], readonly=True)
+    except sqlite3.OperationalError:
+        return ""
+    try:
+        raw = blob.read(n_chars * 4)
+    finally:
+        blob.close()
+    return raw.decode("utf-8", errors="ignore")[:n_chars]
 
-    The prefix was copied when the turn was written. A row from before that copy
-    can still use a known-small body, or the card preview. An unknown or large
-    archive is not opened on this read.
-    """
+
+def _spoken_prefix(source_id: str, kind: str, room: int) -> str:
+    """Return the prefix the packer can still show. The archive is not materialized."""
     need = REPLY_CLIP + _PREFIX_SLACK if kind == "agent" else max(room, 0) + _PREFIX_SLACK
     need = min(need, _OPENING_KEEP)
-    row = db().execute(
-        "SELECT substr(excerpt, 1, ?) AS body FROM sources WHERE id=?",
-        (need, source_id),
-    ).fetchone()
-    body = ((row["body"] if row else "") or "").strip()
+    body = _text_prefix("sources", source_id, "excerpt", need).strip()
     if not body:
-        card = db().execute(
-            "SELECT body_chars, body_preview FROM source_cards WHERE id=?",
-            (source_id,),
-        ).fetchone()
-        chars = int(card["body_chars"] or 0) if card is not None else 0
-        if card is not None and 0 < chars <= need:
-            row = db().execute(
-                "SELECT substr(body, 1, ?) AS body FROM sources WHERE id=?",
-                (need, source_id),
-            ).fetchone()
-            body = ((row["body"] if row else "") or "").strip()
-        elif card is not None:
-            body = (card["body_preview"] or "").strip()
+        body = _text_prefix("sources", source_id, "body", need).strip()
     if not body:
         return ""
     body = redact_text(body)
@@ -10768,7 +10765,9 @@ def core_memory(
     before: str = "",
     now: str | datetime | None = None,
 ) -> dict:
-    row = _with_body(_thin_crystal("id='owner'"))
+    row = db().execute(
+        "SELECT id, type, name, status, revision FROM crystallizations WHERE id='owner'"
+    ).fetchone()
     summary = _summary_slots_from_row(row) if row else {}
     birth = _birth_text(summary)
     if birth:
@@ -10778,7 +10777,9 @@ def core_memory(
     if org and org != "尚无来源":
         summary["所属组织及职务"] = org
     crystal = hydrate(row) if row else None
-    owner_sketch = (crystal.sketch_md or "").strip() if crystal is not None else ""
+    owner_sketch = _text_prefix("crystallizations", "owner", "sketch_md", budget).strip() if row else ""
+    if crystal is not None and not owner_sketch:
+        crystal.body_md = _text_prefix("crystallizations", "owner", "body_md", budget)
     project_row = _project_crystal(project)
     project_sketch_item = None
     if project_row is not None:
