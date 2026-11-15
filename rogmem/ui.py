@@ -6624,10 +6624,17 @@ function rogmemBloom(el, source, tier, calm) {
 
 
 # 图谱外壳：加载态、错误态、减动效、无 WebGL 兜底。两种渲染器共用，保证加载状态机只有一份。
+# 取数这一层也不分渲染器：一次慢、一次非 JSON 都不是终局，会自己重试，并把上一次拿到的星图
+# 留在本会话里，重进这一页先画出来。
 # 以普通字符串给出（非 f-string），花括号无需转义。
 _GRAPH_SHELL_JS = """
 var ROGMEM_GRAPH_FETCH_MS = 15000;
 var ROGMEM_GRAPH_RENDER_WATCHDOG_MS = 15000;
+// 一次取数的尝试次数，以及每次重试前的等待倍数。
+var ROGMEM_GRAPH_FETCH_TRIES = 3;
+var ROGMEM_GRAPH_BACKOFF_MS = 1200;
+// 本会话里留一份上次拿到的星图。中枢慢或那一跳没连上时，重进这一页不再是死路。
+var ROGMEM_GRAPH_CACHE_PREFIX = 'rogmem-graph:';
 function rogmemClearBusy(el) {
   if (el && el.setAttribute) el.setAttribute('aria-busy', 'false');
 }
@@ -6638,23 +6645,146 @@ function rogmemLoaderGone(el) {
   loader.classList.add('is-gone');
   setTimeout(function () { if (loader && loader.parentNode) loader.remove(); }, 260);
 }
-function rogmemShowError(el, text, canRetry) {
+function rogmemGraphNote(el, text) {
+  // 加载中改 loader 那句话；已经落到错误态就改错误卡片那句话。取数期间始终有话说。
+  if (!el || !el.querySelector) return;
+  var line = el.querySelector('.graph-loader p') || el.querySelector('.graph-error p');
+  if (line) line.textContent = text;
+}
+function rogmemShowError(el, text, retry) {
   if (!el) return;
   var box = document.createElement('div');
   box.className = 'graph-error note';
   var para = document.createElement('p');
   para.textContent = text || '图谱没有载入。';
   box.appendChild(para);
-  if (canRetry) {
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'quiet';
-    btn.textContent = '重试';
-    btn.onclick = function () { location.reload(); };
-    box.appendChild(btn);
-  }
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'quiet';
+  btn.textContent = '重试';
+  // 能就地重取就地重取。整页刷新只是没有取数入口时的退路。
+  btn.onclick = typeof retry === 'function' ? function () { retry(); } : function () { location.reload(); };
+  box.appendChild(btn);
   el.replaceChildren(box);
   rogmemClearBusy(el);
+}
+function rogmemGraphCacheKey(el) {
+  // 记忆图谱和每一篇结晶的关联图谱不是同一份数据，本会话里的留存也不能互相顶掉。
+  // 取本页地址当名字：同一页重进能命中，换一页不会串。
+  var here = '';
+  try { here = location.pathname + location.search; } catch (err) {}
+  return ROGMEM_GRAPH_CACHE_PREFIX + (el.id || 'graph') + '@' + here;
+}
+function rogmemGraphStore(el, data) {
+  if (!el) return;
+  try {
+    sessionStorage.setItem(rogmemGraphCacheKey(el), JSON.stringify({ nodes: data.nodes || [], edges: data.edges || [] }));
+  } catch (err) {}
+}
+function rogmemGraphStored(el) {
+  if (!el) return null;
+  try {
+    var raw = sessionStorage.getItem(rogmemGraphCacheKey(el));
+    var data = raw ? JSON.parse(raw) : null;
+    if (data && data.nodes && data.edges) return data;
+  } catch (err) {}
+  return null;
+}
+function rogmemGraphForget(el) {
+  if (!el) return;
+  try { sessionStorage.removeItem(rogmemGraphCacheKey(el)); } catch (err) {}
+}
+function rogmemGraphReason(status) {
+  // 慢过 15 秒时 status 是 0；本机通道够不到中枢时回的是一段纯文本 502。
+  // 所以先看状态码和 Content-Type，绝不把任何响应直接当 JSON 读。
+  if (!status) return '（记忆中枢没有回应）';
+  if (status >= 500) return '（记忆中枢暂时不可用，HTTP ' + status + '）';
+  return '（记忆中枢回的不是图谱数据，HTTP ' + status + '）';
+}
+function rogmemGraphRequest(el, onOk, onFail) {
+  // 一次请求只落地一次：超时、非 2xx、正文不是 JSON 都走同一条失败出口。
+  var controller = (typeof AbortController === 'function') ? new AbortController() : null;
+  var settled = false;
+  var timer = setTimeout(function () { fail(0); }, ROGMEM_GRAPH_FETCH_MS);
+  function fail(status) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (controller) try { controller.abort(); } catch (err) {}
+    onFail(status);
+  }
+  fetch('/admin/api/graph', controller ? {signal: controller.signal} : undefined).then(function (r) {
+    if (settled) return null;
+    if (r.status === 401) {
+      // 会话过期：去登录页，不要把它说成载入失败。
+      settled = true;
+      clearTimeout(timer);
+      rogmemGraphForget(el);
+      location = '/admin/login';
+      return null;
+    }
+    var type = (r.headers && r.headers.get && r.headers.get('content-type')) || '';
+    if (!r.ok || type.indexOf('json') < 0) {
+      fail(r.status);
+      return null;
+    }
+    return r.json();
+  }).then(function (data) {
+    if (settled || !data) return;
+    settled = true;
+    clearTimeout(timer);
+    onOk(data);
+  }).catch(function () {
+    fail(0);
+  });
+}
+function rogmemDrawGraph(el, data, draw, note) {
+  var nodes = data.nodes || [];
+  var edges = data.edges || [];
+  var tally = document.getElementById('graph-count');
+  if (tally) tally.textContent = '活跃节点：' + nodes.length + (note || '');
+  try {
+    draw(nodes, edges);
+  } catch (err) {
+    // 数据到手了、画面出不来，是渲染这一层的问题，不能算在取数头上。
+    // 整页重开最干净；数据已在本会话里，重开会立刻画出上一份。
+    rogmemShowError(el, '图谱画不出来，重开这一页可以再试一次。', null);
+  }
+}
+function rogmemFetchGraph(el, draw, attempt) {
+  el.rogmemGraphLoading = true;
+  if (attempt === 1) rogmemGraphNote(el, '正在铺开星图');
+  rogmemGraphRequest(el, function (data) {
+    el.rogmemGraphLoading = false;
+    rogmemGraphStore(el, data);
+    rogmemDrawGraph(el, data, draw, '');
+  }, function (status) {
+    if (attempt < ROGMEM_GRAPH_FETCH_TRIES) {
+      var wait = ROGMEM_GRAPH_BACKOFF_MS * attempt;
+      rogmemGraphNote(
+        el,
+        '记忆中枢没有回应，' + Math.round(wait / 1000) + ' 秒后重取（第 ' + attempt + '/' + (ROGMEM_GRAPH_FETCH_TRIES - 1) + ' 次重试）'
+      );
+      setTimeout(function () { rogmemFetchGraph(el, draw, attempt + 1); }, wait);
+      return;
+    }
+    el.rogmemGraphLoading = false;
+    rogmemShowError(el, '图谱没有载入。' + rogmemGraphReason(status), function () {
+      rogmemFetchGraph(el, draw, 1);
+    });
+  });
+}
+function rogmemLoadGraph(el, draw) {
+  if (!el || typeof draw !== 'function') return;
+  if (el.rogmemGraphLoading) return;
+  var cached = rogmemGraphStored(el);
+  if (cached) {
+    // 先画上一份，再悄悄换新。中枢慢的时候，重进这一页也画得出来。
+    rogmemDrawGraph(el, cached, draw, '');
+    rogmemGraphRequest(el, function (data) { rogmemGraphStore(el, data); }, function () {});
+    return;
+  }
+  rogmemFetchGraph(el, draw, 1);
 }
 function rogmemOpenBrowser() {
   var href = location.href;
@@ -7390,37 +7520,19 @@ window.__rogmemThree = Object.assign(Object.create(null), THREE, {{
   OrbitControls: OrbitControls, EffectComposer: EffectComposer, RenderPass: RenderPass,
   UnrealBloomPass: UnrealBloomPass, OutputPass: OutputPass
 }});
-// 渲染看门狗：脚本没起来、或球没画出来，都有界撤 loader，让位真图，不空白。
 var rogmemGraphEl = document.getElementById('{element_id}');
+// 渲染看门狗：脚本没起来、或球没画出来，都有界撤 loader，让位真图，不空白。
+// 正在取数时不撤：重试有话说，撤了就等于把话说给空气。
 setTimeout(function renderWatchdog() {{
-  if (rogmemGraphEl && !rogmemGraphEl.rogmemReady) {{
+  if (rogmemGraphEl && !rogmemGraphEl.rogmemReady && !rogmemGraphEl.rogmemGraphLoading) {{
     rogmemLoaderGone(rogmemGraphEl);
     rogmemClearBusy(rogmemGraphEl);
   }}
 }}, ROGMEM_GRAPH_RENDER_WATCHDOG_MS);
-(function fetchGraph3D() {{
-  var controller = (typeof AbortController === 'function') ? new AbortController() : null;
-  var aborted = false;
-  var fetchTimer = setTimeout(function () {{
-    aborted = true;
-    if (controller) try {{ controller.abort(); }} catch (err) {{}}
-    rogmemShowError(document.getElementById('{element_id}'), '图谱没有载入。', true);
-  }}, ROGMEM_GRAPH_FETCH_MS);
-  fetch('/admin/api/graph', controller ? {{signal: controller.signal}} : undefined).then(function(r) {{
-    clearTimeout(fetchTimer);
-    return r.json();
-  }}).then(function(data) {{
-    if (aborted) return;
-    var nodes = data.nodes || [];
-    var edges = data.edges || [];
-    var tally = document.getElementById('graph-count');
-    if (tally) tally.textContent = '活跃节点：' + nodes.length;
+(function loadGraph3D() {{
+  rogmemLoadGraph(document.getElementById('{element_id}'), function (nodes, edges) {{
     {restrict_js}
     rogmemDraw3D(document.getElementById('{element_id}'), nodes, edges, {focus_flag});
-  }}).catch(function () {{
-    if (aborted) return;
-    clearTimeout(fetchTimer);
-    rogmemShowError(document.getElementById('{element_id}'), '图谱没有载入。', true);
   }});
 }})();
 </script>"""
@@ -7919,29 +8031,10 @@ function rogmemPaint(el, nodes, edges, focusMode) {{
     throw err;
   }}
 }}
-(function fetchGraph() {{
-  var controller = (typeof AbortController === 'function') ? new AbortController() : null;
-  var aborted = false;
-  var fetchTimer = setTimeout(function () {{
-    aborted = true;
-    if (controller) try {{ controller.abort(); }} catch (err) {{}}
-    rogmemShowError(document.getElementById('{element_id}'), '图谱没有载入。', true);
-  }}, ROGMEM_GRAPH_FETCH_MS);
-  fetch('/admin/api/graph', controller ? {{signal: controller.signal}} : undefined).then(function(r) {{
-    clearTimeout(fetchTimer);
-    return r.json();
-  }}).then(function(data) {{
-    if (aborted) return;
-    var nodes = data.nodes || [];
-    var edges = data.edges || [];
-    var tally = document.getElementById('graph-count');
-    if (tally) tally.textContent = '活跃节点：' + nodes.length;
+(function loadGraph() {{
+  rogmemLoadGraph(document.getElementById('{element_id}'), function (nodes, edges) {{
     {restrict_js}
     rogmemDraw(document.getElementById('{element_id}'), nodes, edges, {focus_flag});
-  }}).catch(function () {{
-    if (aborted) return;
-    clearTimeout(fetchTimer);
-    rogmemShowError(document.getElementById('{element_id}'), '图谱没有载入。', true);
   }});
 }})();
 </script>

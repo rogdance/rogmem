@@ -208,12 +208,21 @@ def test_focus_feeds_selector_and_counts_budget():
 
 
 def test_degrade_does_not_sessionStorage_persist():
-    """P2 需求：低性能降级只影响本页，不 sessionStorage 跨刷新持续禁用。"""
-    from rogmem.ui import graph_mount
+    """P2 需求：低性能降级只影响本页，不 sessionStorage 跨刷新持续禁用。
+
+    取数那一层自己的会话留存（把上一次的星图先画出来）是另一件事，不在这一条里。
+    """
+    from rogmem.ui import (
+        _GRAPH_3D_LABELS_JS_TEMPLATE,
+        _GRAPH_AUTO_LABELS_JS_TEMPLATE,
+        graph_mount,
+    )
 
     html = graph_mount("graph", focus=True, auto_labels=True, label_budget=50, renderer="cosmos")
-    assert "sessionStorage" not in html, "不得再 sessionStorage 持久化降级状态"
     assert "rogmem-graph-auto-labels-degraded" not in html
+    # 铺名层自己不得把降级状态写进 sessionStorage。
+    assert "sessionStorage" not in _GRAPH_AUTO_LABELS_JS_TEMPLATE
+    assert "sessionStorage" not in _GRAPH_3D_LABELS_JS_TEMPLATE
 
 
 def test_tick_duration_ring_bounded():
