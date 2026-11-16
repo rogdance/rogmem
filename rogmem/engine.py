@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import contextvars
 import difflib
+import email.utils
 import hashlib
 import ipaddress
 import hmac
 import json
 import os
+import random
 import re
 import secrets
 import shutil
@@ -22,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import jieba
+import numpy as np
 
 from rogmem import crypto
 from rogmem.cost import charging
@@ -280,11 +283,199 @@ FIELD_RE = re.compile(
 )
 RECALL_RE = re.compile(r"<relevant-memories>[\s\S]*?</relevant-memories>", re.I)
 
+
+class _VectorStore:
+    """Chunk vectors in one float32 matrix, so a search is a dot product and not a Python loop.
+
+    ``ids`` (n) and ``rows`` (n×d) are the corpus; ``row_of`` maps a chunk id to its row.
+    A dropped row is only marked dead and the matrix is compacted once enough pile up, so a
+    drop is not an O(n) copy. A vector whose width no longer matches the matrix (a model
+    switch in flight) is parked in ``_extra`` and compared the old way, instead of forcing a
+    full rebuild. Readers take a reference to the arrays under ``_lock`` and do the multiply
+    outside it — ``rows @ q`` releases the GIL, which is the point.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ids = np.zeros(0, dtype=np.int64)
+        self._rows = np.zeros((0, 0), dtype=np.float32)
+        self._live = np.zeros(0, dtype=bool)
+        self._row_of: dict[int, int] = {}
+        self._dim = 0
+        self._used = 0
+        self._dead = 0
+        self._extra: dict[int, dict[int, list[float]]] = {}
+        self._ready = False
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    def mark_loading(self) -> None:
+        """A reload is on the way. Search keeps using whatever is already in the matrix."""
+        self._ready = False
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._row_of) + sum(len(group) for group in self._extra.values())
+
+    def add(self, chunk_id: int, vec) -> None:
+        """Append one row. The same id is replaced in place rather than duplicated."""
+        values = _float_vector(vec)
+        if not values:
+            return
+        cid = int(chunk_id)
+        width = len(values)
+        with self._lock:
+            if self._dim == 0:
+                self._dim = width
+            if width != self._dim:
+                self._extra.setdefault(width, {})[cid] = values
+                return
+            row = self._row_of.get(cid)
+            if row is not None and self._live[row]:
+                self._rows[row] = values
+                return
+            self._append(cid, values)
+
+    def _append(self, chunk_id: int, values: list[float]) -> None:
+        if self._used >= self._ids.shape[0]:
+            self._grow()
+        row = self._used
+        self._rows[row] = values
+        self._ids[row] = chunk_id
+        self._live[row] = True
+        self._row_of[chunk_id] = row
+        self._used += 1
+
+    def _grow(self) -> None:
+        cap = max(16, self._ids.shape[0] * 2)
+        ids = np.zeros(cap, dtype=np.int64)
+        rows = np.zeros((cap, max(self._dim, 1)), dtype=np.float32)
+        live = np.zeros(cap, dtype=bool)
+        if self._used:
+            ids[: self._used] = self._ids[: self._used]
+            rows[: self._used] = self._rows[: self._used]
+            live[: self._used] = self._live[: self._used]
+        self._ids, self._rows, self._live = ids, rows, live
+
+    def drop(self, chunk_ids) -> None:
+        """Mark rows dead. The array is compacted lazily, not copied per drop."""
+        ids = {int(c) for c in chunk_ids}
+        if not ids:
+            return
+        with self._lock:
+            for cid in ids:
+                row = self._row_of.pop(cid, None)
+                if row is not None and self._live[row]:
+                    self._live[row] = False
+                    self._dead += 1
+                for group in self._extra.values():
+                    group.pop(cid, None)
+            if self._dead and self._dead * 2 > self._used and self._dead >= 64:
+                self._compact()
+
+    def _compact(self) -> None:
+        keep = np.nonzero(self._live[: self._used])[0]
+        count = int(len(keep))
+        ids = np.zeros(self._ids.shape[0], dtype=np.int64)
+        rows = np.zeros_like(self._rows)
+        live = np.zeros(self._ids.shape[0], dtype=bool)
+        if count:
+            ids[:count] = self._ids[keep]
+            rows[:count] = self._rows[keep]
+            live[:count] = True
+        self._ids, self._rows, self._live = ids, rows, live
+        self._used = count
+        self._dead = 0
+        self._row_of = {int(ids[i]): i for i in range(count)}
+
+    def rebuild(self, pairs) -> None:
+        """Replace the whole corpus from ``(chunk_id, vec)`` pairs. Ready once it has run."""
+        main_ids: list[int] = []
+        main_rows: list[list[float]] = []
+        extra: dict[int, dict[int, list[float]]] = {}
+        dim = 0
+        for chunk_id, vec in pairs:
+            values = _float_vector(vec)
+            if not values:
+                continue
+            width = len(values)
+            if dim == 0:
+                dim = width
+            if width == dim:
+                main_ids.append(int(chunk_id))
+                main_rows.append(values)
+            else:
+                extra.setdefault(width, {})[int(chunk_id)] = values
+        count = len(main_ids)
+        ids = np.asarray(main_ids, dtype=np.int64) if count else np.zeros(0, dtype=np.int64)
+        rows = np.asarray(main_rows, dtype=np.float32) if count else np.zeros((0, max(dim, 1)), dtype=np.float32)
+        live = np.ones(count, dtype=bool)
+        with self._lock:
+            self._ids, self._rows, self._live = ids, rows, live
+            self._used = count
+            self._dead = 0
+            self._row_of = {cid: index for index, cid in enumerate(main_ids)}
+            self._extra = extra
+            self._dim = dim
+            self._ready = True
+
+    def search(self, query_vec, limit: int) -> list[tuple[int, float]]:
+        """Top ``limit`` ``(chunk_id, score)``, score descending, id descending on a tie."""
+        if limit <= 0:
+            return []
+        values = _float_vector(query_vec)
+        if not values:
+            return []
+        q = np.asarray(values, dtype=np.float32)
+        dim = len(values)
+        with self._lock:
+            ids = self._ids
+            rows = self._rows
+            live = self._live
+            used = self._used
+            main_dim = self._dim
+            extra = dict(self._extra.get(dim) or {})
+        if dim == main_dim and used:
+            scores = rows[:used] @ q
+            if not live[:used].all():
+                scores = np.where(live[:used], scores, -np.inf)
+            order = np.lexsort((-ids[:used], -scores))
+            hits: list[tuple[int, float]] = []
+            for pos in order:
+                score = float(scores[pos])
+                if score == -np.inf:
+                    continue
+                hits.append((int(ids[pos]), score))
+                if len(hits) >= limit:
+                    break
+            return hits
+        if extra:
+            hits = [(cid, float(sum(a * b for a, b in zip(values, vec)))) for cid, vec in extra.items()]
+            hits.sort(key=lambda item: (item[1], item[0]), reverse=True)
+            return hits[:limit]
+        return []
+
+
+def _float_vector(vec) -> list[float]:
+    """A plain list of floats, or an empty list for anything that is not a vector."""
+    if not vec:
+        return []
+    try:
+        return [float(x) for x in vec]
+    except (TypeError, ValueError):
+        return []
+
+
 _DB: sqlite3.Connection | None = None
 _LOCAL = threading.local()
 _DATA: Path | None = None
 _SCAN: Path | None = None
-_VECS: list[tuple[int, list[float]]] = []
+_VECS = _VectorStore()
+_VEC_RELOAD = threading.Lock()
+_VEC_RELOAD_PENDING = False
+_VEC_READ_BATCH = 2000
 _EMBED = "off"
 _HUB_PUBLIC = ""
 _PASSWORD_READY = False
@@ -1307,11 +1498,68 @@ def _note_embed_model(name: str) -> int:
     return rebuilt
 
 
-def _load_vecs(con: sqlite3.Connection) -> None:
-    global _VECS
-    _VECS = []
-    for row in con.execute("SELECT id, vec_json FROM chunks WHERE vec_json IS NOT NULL AND text != ''"):
-        _VECS.append((row["id"], json.loads(row["vec_json"])))
+def _load_vecs(con: sqlite3.Connection | None = None) -> None:
+    """Arrange a background reload of the chunk vector matrix.
+
+    This used to parse the whole corpus here, synchronously, from call sites that held
+    ``LOCK``: that held the lock for the length of a 12.9s ``json.loads`` and starved every
+    writer behind a 13s read. Now the parse runs on its own thread and a caller only sets a
+    flag. ``con`` is kept so existing call sites need no change, but the worker opens its own
+    connection — the caller's belongs to another thread.
+    """
+    global _VEC_RELOAD_PENDING
+    _VECS.mark_loading()
+    if not _VEC_RELOAD.acquire(blocking=False):
+        _VEC_RELOAD_PENDING = True
+        return
+    threading.Thread(target=_reload_vecs_worker, name="rogmem-vec-reload", daemon=True).start()
+
+
+def _reload_vecs_worker() -> None:
+    """Parse the corpus off the request path, then swap the matrix in. One at a time."""
+    global _VEC_RELOAD_PENDING
+    try:
+        while True:
+            _VEC_RELOAD_PENDING = False
+            try:
+                _VECS.rebuild(_read_all_chunk_vectors(db()))
+            except Exception:
+                _VECS.mark_loading()
+            if not _VEC_RELOAD_PENDING:
+                break
+    finally:
+        _VEC_RELOAD.release()
+        # A reload asked for between the last check and the release still has to run.
+        if _VEC_RELOAD_PENDING:
+            _load_vecs()
+
+
+def _read_all_chunk_vectors(con: sqlite3.Connection) -> list[tuple[int, list[float]]]:
+    """Every stored chunk vector, read in batches so no single read transaction is long.
+
+    One 13-second read starved writers under WAL. Batching by id frees the read between
+    batches. Rows written meanwhile land through ``store.add`` on the write path anyway.
+    """
+    pairs: list[tuple[int, list[float]]] = []
+    last = 0
+    while True:
+        rows = con.execute(
+            "SELECT id, vec_json FROM chunks WHERE vec_json IS NOT NULL AND text != '' "
+            "AND id > ? ORDER BY id LIMIT ?",
+            (last, _VEC_READ_BATCH),
+        ).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            try:
+                vec = json.loads(row["vec_json"])
+            except (TypeError, ValueError):
+                continue
+            values = _float_vector(vec)
+            if values:
+                pairs.append((int(row["id"]), values))
+        last = int(rows[-1]["id"])
+    return pairs
 
 
 def _tokens(text: str) -> str:
@@ -2570,6 +2818,25 @@ def _release_parsed_without_model() -> int:
         _VECTOR_CATCHUP.release()
 
 
+def waiting_vector_work(con) -> bool:
+    """Ask the two cheap questions before paying for the full pick.
+
+    The pick below walks every source and probes chunks once per row, so an idle
+    hub pays that walk on every poll. That is only worth it when something is
+    actually waiting: a source that still needs a pass, or a chunk with no vector.
+    """
+
+    if con.execute(
+        "SELECT 1 FROM sources WHERE status=? AND IFNULL(wait_until, '') NOT LIKE 'hold:%' LIMIT 1",
+        (ST_PARSED,),
+    ).fetchone() is not None:
+        return True
+    return con.execute(
+        "SELECT 1 FROM chunks WHERE role!='parent' AND vec_json IS NULL "
+        "AND TRIM(IFNULL(text, ''))!='' LIMIT 1"
+    ).fetchone() is not None
+
+
 def ensure_pending_vectors() -> int:
     """Fill a small batch of missing vectors and release them to distill.
 
@@ -2585,6 +2852,8 @@ def ensure_pending_vectors() -> int:
         with LOCK:
             con = db()
             con.commit()
+            if not waiting_vector_work(con):
+                return 0
             rows = con.execute(
                 """SELECT id, lane, body FROM sources
                    WHERE status NOT IN (?, ?)
@@ -2923,7 +3192,7 @@ def _write_planned(con: sqlite3.Connection, source_id: str, planned: list[dict])
             (str(cid), _tokens(item.get("tokens") or item["text"])),
         )
         if vec:
-            _VECS.append((cid, vec))
+            _VECS.add(cid, vec)
 
 
 def _hold_leases(qids: list[int]) -> None:
@@ -2993,17 +3262,44 @@ def _exchange_candidate(exchange: Exchange) -> QueueCandidate:
     )
 
 
-def _queued_work(con, now: str) -> list:
-    return con.execute(
-        """SELECT q.id AS qid, q.source_id, q.lane, q.attempts,
+_CANDIDATE_COLUMNS = """q.id AS qid, q.source_id, q.lane, q.attempts,
                   s.kind, s.ingested_at, IFNULL(s.session_id, '') AS session_id,
                   IFNULL(s.turn_id, '') AS turn_id, IFNULL(s.event_at, '') AS event_at,
                   s.pair_ready, IFNULL(s.wait_until, '') AS wait_until, s.rowid AS rowid,
-                  length(IFNULL(s.body, '')) AS chars
-           FROM queue q JOIN sources s ON s.id=q.source_id
-           WHERE q.state='queued' AND (q.next_at IS NULL OR q.next_at<=?)""",
-        (now,),
+                  length(IFNULL(s.body, '')) AS chars"""
+_CANDIDATE_READY = "q.state='queued' AND (q.next_at IS NULL OR q.next_at<=?)"
+
+# 一轮调度装载的行数上限。队列是工作队列，不是一份每轮都要整读的清单：一轮只可能
+# 交出一个单元，所以只看「等最久的一段」和「新到的一段」。两头都看，是因为一个刚
+# 落地的即时会话会排在整条堆积的末尾，而堆积本身只能按时间慢慢清。
+_SCHEDULE_OLDEST = 1024
+_SCHEDULE_NEWEST = 256
+# 每轮最多复位这么多到期的 failed 行。整批改写在生产上就是每轮重写三万行。
+_SCHEDULE_RECLAIM = 512
+
+
+def _queued_work(con, now: str) -> list:
+    """Ready rows, bounded at both ends. The cost does not grow with the backlog."""
+    rows = con.execute(
+        f"""SELECT * FROM (
+                SELECT {_CANDIDATE_COLUMNS}
+                  FROM queue q JOIN sources s ON s.id=q.source_id
+                 WHERE {_CANDIDATE_READY}
+                 ORDER BY q.id LIMIT ?
+            )
+            UNION ALL
+            SELECT * FROM (
+                SELECT {_CANDIDATE_COLUMNS}
+                  FROM queue q JOIN sources s ON s.id=q.source_id
+                 WHERE {_CANDIDATE_READY}
+                 ORDER BY q.id DESC LIMIT ?
+            )""",
+        (now, _SCHEDULE_OLDEST, now, _SCHEDULE_NEWEST),
     ).fetchall()
+    seen: dict[int, sqlite3.Row] = {}
+    for row in rows:
+        seen.setdefault(int(row["qid"]), row)
+    return list(seen.values())
 
 
 def _schedule(con, now: str) -> tuple[list[QueueCandidate], dict[str, Exchange | None]]:
@@ -3085,8 +3381,12 @@ def _reclaim_expired(con, now: str) -> None:
     )
     con.execute(
         """UPDATE queue SET state='queued'
-           WHERE state='failed' AND (next_at IS NULL OR next_at<=?)""",
-        (now,),
+           WHERE id IN (
+             SELECT id FROM queue
+              WHERE state='failed' AND (next_at IS NULL OR next_at<=?)
+              ORDER BY next_at, id LIMIT ?
+           )""",
+        (now, _SCHEDULE_RECLAIM),
     )
     con.execute(
         f"""UPDATE queue SET state='queued', superseded=0, attempts=0, last_error=NULL,
@@ -3116,6 +3416,9 @@ def lease_next() -> dict | None:
                )""",
             (MISSING_DISTILL_MODEL, MISSING_PROVIDER_KEY),
         ).fetchone():
+            return None
+        provider_id = _distill_provider_id()
+        if provider_id and gate_cooling(provider_id):
             return None
         _reclaim_expired(con, now)
         candidates, units = _schedule(con, now)
@@ -3199,6 +3502,61 @@ def _mirror_exchange_outcome(con, primary: str) -> None:
         )
 
 
+def _pause_units_on_provider_fault(qid: int, source_id: str, exc: BaseException) -> str:
+    """Stop the line for a fault that waiting cannot fix. One alert, the unit pinned back."""
+    message = str(exc)
+    with LOCK:
+        if _attempt_replaced(db(), qid):
+            db().commit()
+            return source_id
+        for member_qid in _member_qids(qid):
+            db().execute(
+                "UPDATE queue SET state='queued', last_error=?, next_at=? WHERE id=?",
+                (message, "9999-01-01T00:00:00+00:00", member_qid),
+            )
+        for member_id in _member_source_ids(source_id):
+            _fail_pipeline(db(), member_id)
+            db().execute(
+                "UPDATE sources SET status=?, last_error=? WHERE id=?",
+                (ST_DISTILL_FAIL, message, member_id),
+            )
+        opened = False
+        if not db().execute("SELECT 1 FROM alerts WHERE open=1 AND message=?", (message,)).fetchone():
+            db().execute("INSERT INTO alerts(created_at,message) VALUES(?,?)", (utcnow(), message))
+            opened = True
+        db().commit()
+    if opened:
+        notify_alert(message)
+    return source_id
+
+
+def _hold_units_behind_gate(qid: int, source_id: str, exc: ProviderRefused) -> str:
+    """The provider said wait. Shut the gate, put the unit back on the line, leave attempts alone."""
+    until_unix = None
+    provider_id = _distill_provider_id()
+    if provider_id:
+        reading = gate_hold(provider_id, exc.reason, retry_after=exc.retry_after, code=exc.code)
+        until_unix = reading.get("until_unix")
+    next_at = _iso_from_unix(until_unix) if until_unix else _after(_THROTTLE_GATE_SECONDS)
+    message = str(exc)[:200]
+    with LOCK:
+        if _attempt_replaced(db(), qid):
+            db().commit()
+            return source_id
+        for member_qid in _member_qids(qid):
+            db().execute(
+                "UPDATE queue SET state='queued', leased_until=NULL, last_error=?, next_at=? WHERE id=?",
+                (message, next_at, member_qid),
+            )
+        for member_id in _member_source_ids(source_id):
+            db().execute(
+                "UPDATE sources SET status=?, last_error=? WHERE id=?",
+                (ST_DISTILLING, message, member_id),
+            )
+        db().commit()
+    return source_id
+
+
 def _pump_leased(qid: int, source_id: str, source) -> str | None:
     try:
         finished = _distill(source, qid)
@@ -3244,29 +3602,11 @@ def _pump_leased(qid: int, source_id: str, source) -> str | None:
             db().commit()
         return source_id
     except AuthPause as exc:
-        with LOCK:
-            if _attempt_replaced(db(), qid):
-                db().commit()
-                return source_id
-            for member_qid in _member_qids(qid):
-                db().execute(
-                    "UPDATE queue SET state='queued', last_error=?, next_at=? WHERE id=?",
-                    (str(exc), "9999-01-01T00:00:00+00:00", member_qid),
-                )
-            for member_id in _member_source_ids(source_id):
-                _fail_pipeline(db(), member_id)
-                db().execute(
-                    "UPDATE sources SET status=?, last_error=? WHERE id=?",
-                    (ST_DISTILL_FAIL, str(exc), member_id),
-                )
-            opened = False
-            if not db().execute("SELECT 1 FROM alerts WHERE open=1 AND message=?", (str(exc),)).fetchone():
-                db().execute("INSERT INTO alerts(created_at,message) VALUES(?,?)", (utcnow(), str(exc)))
-                opened = True
-            db().commit()
-        if opened:
-            notify_alert(str(exc))
-        return source_id
+        return _pause_units_on_provider_fault(qid, source_id, exc)
+    except ProviderRefused as exc:
+        if exc.reason in {"throttle", "quota_window"}:
+            return _hold_units_behind_gate(qid, source_id, exc)
+        return _pause_units_on_provider_fault(qid, source_id, exc)
     except Exception as exc:  # noqa: BLE001
         with LOCK:
             if _attempt_replaced(db(), qid):
@@ -3315,7 +3655,17 @@ class ModelCallFailed(RuntimeError):
 
 
 class ProviderRefused(ModelCallFailed):
-    """The provider did not take the call. The material was not judged."""
+    """The provider did not take the call. The material was not judged.
+
+    The reason carries the normalized verdict from _classify_provider_failure so the
+    consumer can tell a wait-it-out fault from a stop-the-line one.
+    """
+
+    def __init__(self, message: str = "", *, reason: str = "unknown", retry_after: float | None = None, code: str = ""):
+        super().__init__(message)
+        self.reason = reason
+        self.retry_after = retry_after
+        self.code = code
 
 
 def _call_not_taken(exc: BaseException) -> bool:
@@ -3574,6 +3924,10 @@ def _failed_stage_name(con, source_id: str) -> str:
 
 def _after(seconds: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+def _iso_from_unix(unix_ts: float) -> str:
+    return datetime.fromtimestamp(float(unix_ts), timezone.utc).isoformat()
 
 
 def _material_for_distill(source: sqlite3.Row) -> str:
@@ -4312,6 +4666,86 @@ def _assemble_chat(text: str) -> tuple[str, str, dict]:
     return content, finish, raw
 
 
+# MiniMax business codes, grouped by the verdict the caller should reach. A fault
+# may ride the HTTP status or sit inside a 200 body, so both are read together.
+_GATE_QUOTA_CODES = frozenset({"2056", "2062"})
+_GATE_AUTH_CODES = frozenset({"1004", "2049"})
+_GATE_BILLING_CODES = frozenset({"1008", "2053", "2067"})
+_GATE_THROTTLE_CODES = frozenset({"1002", "1039", "1041", "2045", "2046", "2047"})
+_GATE_TRANSIENT_CODES = frozenset({"1000", "1001", "1024", "1033", "2064", "2066"})
+_GATE_CODE_ORDER = (
+    ("quota_window", _GATE_QUOTA_CODES),
+    ("auth", _GATE_AUTH_CODES),
+    ("billing", _GATE_BILLING_CODES),
+    ("throttle", _GATE_THROTTLE_CODES),
+    ("transient", _GATE_TRANSIENT_CODES),
+)
+
+
+def _provider_codes(*values) -> set[str]:
+    """Four-digit MiniMax codes named in a status field, an error field, or the prose."""
+    found: set[str] = set()
+    for value in values:
+        if isinstance(value, bool) or value is None:
+            continue
+        text = str(value)
+        if text:
+            found.update(re.findall(r"\b\d{4}\b", text))
+    return found
+
+
+def _classify_provider_failure(http_status: int, body_code=None, message: str = "") -> str:
+    """One verdict for a provider fault, shared by the live call and the probe.
+
+    A business code outranks the status: a quota window hidden in a 200 body still
+    classifies. HTTP 429 is a throttle only when no stronger code was named.
+    """
+    codes = _provider_codes(body_code, message)
+    for reason, group in _GATE_CODE_ORDER:
+        if codes & group:
+            return reason
+    if http_status in {401, 403}:
+        return "auth"
+    if http_status == 429:
+        return "throttle"
+    return "unknown"
+
+
+def _retry_after_seconds(headers) -> float | None:
+    """The wait the provider asked for, in seconds. A date header becomes the gap."""
+    if headers is None:
+        return None
+    try:
+        raw = str(headers.get("Retry-After") or "").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, when.timestamp() - time.time())
+
+
+def _provider_failure_exc(http_status: int, message: str, *, body_code=None, retry_after: float | None = None) -> BaseException:
+    """The one exception that carries this fault's verdict. Raised by the caller."""
+    reason = _classify_provider_failure(http_status, body_code, message)
+    if reason == "auth":
+        return AuthPause("外部模型鉴权失败")
+    if reason in {"throttle", "quota_window", "billing"}:
+        return ProviderRefused(message, reason=reason, retry_after=retry_after, code=str(body_code or ""))
+    return ModelCallFailed(message)
+
+
 def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = None, role: str = "") -> tuple[str, str]:
     outbound = dict(payload)
     if role and "minimax" in f"{base} {payload.get('model') or ''}".lower():
@@ -4338,9 +4772,8 @@ def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = 
             raise AuthPause("外部模型鉴权失败") from exc
         detail = exc.read().decode("utf-8", "replace")[:200]
         message = f"HTTP {exc.code} {detail}"
-        if exc.code == 429:
-            raise ProviderRefused(message) from exc
-        raise ModelCallFailed(message) from exc
+        retry_after = _retry_after_seconds(getattr(exc, "headers", None))
+        raise _provider_failure_exc(exc.code, message, retry_after=retry_after) from exc
     except (TimeoutError, urllib.error.URLError) as exc:
         reason = getattr(exc, "reason", exc)
         raise ModelCallFailed(str(reason or exc)[:200]) from exc
@@ -4352,6 +4785,10 @@ def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = 
         answer = re.sub(r"<think>[\s\S]*?</think>", "", streamed, flags=re.I).strip() or streamed
         _meter_chat(base, str(payload.get("model") or ""), messages, answer, raw, role)
         return answer, streamed_reason
+    # A 200 can still carry a MiniMax fault in base_resp.status_code / error.code.
+    code = _vendor_code(raw)
+    if code:
+        raise _provider_failure_exc(200, f"HTTP 200 · {code}", body_code=code)
     choices = raw.get("choices") or []
     if not choices:
         err = raw.get("error") or {}
@@ -9928,6 +10365,7 @@ def _maybe_forget(source: sqlite3.Row) -> None:
         targets.update(_forget_spans(text))
     if not targets:
         return
+    forgotten: set[int] = set()
     with LOCK:
         con = db()
         for token in targets:
@@ -9939,6 +10377,7 @@ def _maybe_forget(source: sqlite3.Row) -> None:
                 new = row["text"].replace(token, "已忘掉")
                 if new.strip() == "已忘掉":
                     con.execute("UPDATE chunks SET text=?, vec_json=NULL WHERE id=?", (new, row["id"]))
+                    forgotten.add(int(row["id"]))
                 else:
                     con.execute("UPDATE chunks SET text=? WHERE id=?", (new, row["id"]))
                 con.execute("DELETE FROM fts_chunk WHERE chunk_id=?", (str(row["id"]),))
@@ -9955,7 +10394,9 @@ def _maybe_forget(source: sqlite3.Row) -> None:
                 if new_text.strip() and new_text.strip() != "已忘掉":
                     con.execute("INSERT INTO fts_stmt(stmt_id,text) VALUES(?,?)", (row["id"], _tokens(new_text + " " + new_quote)))
         con.commit()
-        _load_vecs(con)
+    # A forgotten chunk no longer has a vector. Drop just those rows; never reparse the
+    # whole corpus inside LOCK, which used to hold the lock for ~13s.
+    _VECS.drop(forgotten)
 
 
 def _like_contains(token: str) -> str:
@@ -10153,16 +10594,10 @@ def search(query: str, limit: int = 5) -> dict:
                 continue
             chunks.append((str(ch["id"]), _search_chunk(ch, semantic=False, prefer_raw=prefer_raw)))
     vectors: list[tuple[str, dict]] = []
-    if _VECS and query:
+    if query and _VECS.size():
         qv = _embed_one(query)
         if qv:
-            scored = []
-            for cid, vec in _VECS:
-                if len(vec) != len(qv):
-                    continue
-                scored.append((sum(a * b for a, b in zip(qv, vec)), cid))
-            scored.sort(reverse=True)
-            for _score, cid in scored[:pool]:
+            for cid, _score in _VECS.search(qv, pool):
                 ch = db().execute("SELECT * FROM chunks WHERE id=?", (cid,)).fetchone()
                 if not ch or ch["role"] == "parent" or "已忘掉" in (ch["text"] or ""):
                     continue
@@ -11772,7 +12207,11 @@ def revise_chunk(chunk_id: int, text: str) -> dict:
             con.execute("INSERT INTO fts_chunk(chunk_id,text) VALUES(?,?)", (str(chunk_id), _tokens(new_text)))
         after = con.execute("SELECT id, state FROM queue WHERE source_id=?", (row["source_id"],)).fetchall()
         con.commit()
-        _load_vecs(con)
+    # Only this chunk changed. Add or drop its row; never reparse the corpus inside LOCK.
+    if vec:
+        _VECS.add(chunk_id, vec)
+    else:
+        _VECS.drop((chunk_id,))
     return {"ok": True, "queue": before == [(item["id"], item["state"]) for item in after]}
 
 
@@ -12008,12 +12447,11 @@ def _reread_file(source_id: str, filename: str, lane: str) -> dict:
 
 def _drop_source_chunks(con: sqlite3.Connection, source_id: str) -> None:
     """Remove slices of an earlier reading so a new reading does not sit beside them."""
-    global _VECS
     rows = con.execute("SELECT id FROM chunks WHERE source_id=?", (source_id,)).fetchall()
     gone = {int(row["id"]) for row in rows}
     if not gone:
         return
-    _VECS = [(cid, vec) for cid, vec in _VECS if cid not in gone]
+    _VECS.drop(gone)
     for cid in gone:
         con.execute("DELETE FROM fts_chunk WHERE chunk_id=?", (str(cid),))
     con.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
@@ -13688,32 +14126,66 @@ def list_connected_hosts(
     return {"rows": rows, "facets": facets, "viewer_known": viewer_known}
 
 
+_PLANE_LOCK = threading.Lock()
+_PLANE_KEY: bytes | None = None
+_PLANE_KNOWN: tuple = ()
+_PLANE_POINTS: list = []
+
+
+def _place_rows(count: int, known: tuple, points: list) -> list:
+    """Put the solved rows back where their pages sit. A page without a vector gets None."""
+    out: list = [None] * count
+    for row, index in enumerate(known):
+        out[index] = points[row]
+    return out
+
+
 def _vector_plane(vectors: list) -> list:
     """Two principal directions of the page vectors, squashed to the unit square.
 
     ``None`` where a page has no vector. The shapes are not the point here — only which pages
     land on the same side of the ball.
+
+    Two directions of an n×d matrix are the top two eigenvectors of its n×n Gram matrix. n is
+    the number of pages and d is the vector width, so the small problem is the one to solve —
+    the answer is the same. The directions are also worth keeping: the ball is redrawn on
+    every read, and the vectors only change when the library does. The key carries which rows
+    were solved, because the same rows answer a longer page list too.
     """
     known = [i for i, vec in enumerate(vectors) if vec]
     if len(known) < 3:
         return [None] * len(vectors)
     try:
+        import hashlib
+
         import numpy as np
 
         width = min(len(vectors[i]) for i in known)
         matrix = np.array([vectors[i][:width] for i in known], dtype=float)
-        matrix -= matrix.mean(axis=0)
-        _, _, vt = np.linalg.svd(matrix, full_matrices=False)
-        flat = matrix @ vt[:2].T
-        scale = np.abs(flat).max(axis=0)
-        scale[scale == 0] = 1.0
-        flat = flat / scale
+        digest = hashlib.blake2b(matrix.tobytes(), digest_size=16).digest()
     except Exception:
         return [None] * len(vectors)
-    out: list = [None] * len(vectors)
-    for row, i in enumerate(known):
-        out[i] = (float(flat[row, 0]), float(flat[row, 1]))
-    return out
+    marker = tuple(known)
+    global _PLANE_KEY, _PLANE_KNOWN, _PLANE_POINTS
+    with _PLANE_LOCK:
+        if digest == _PLANE_KEY and marker == _PLANE_KNOWN:
+            return _place_rows(len(vectors), marker, _PLANE_POINTS)
+    try:
+        centred = matrix - matrix.mean(axis=0)
+        values, axes = np.linalg.eigh(centred @ centred.T)
+        order = np.argsort(values)[::-1][:2]
+        points = axes[:, order] * np.sqrt(np.maximum(values[order], 0.0))
+        scale = np.abs(points).max(axis=0)
+        scale[scale == 0] = 1.0
+        points = points / scale
+    except Exception:
+        return [None] * len(vectors)
+    rows = [(float(points[row, 0]), float(points[row, 1])) for row in range(len(marker))]
+    with _PLANE_LOCK:
+        _PLANE_KEY = digest
+        _PLANE_KNOWN = marker
+        _PLANE_POINTS = rows
+    return _place_rows(len(vectors), marker, rows)
 
 
 def _stored_crystal_vectors() -> dict:
@@ -15260,7 +15732,7 @@ def _patrol_wikilinks(con) -> int:
         if revised == body:
             # One page, one commit. Holding edges for the whole patrol kept the
             # write lock up and made every MCP door and admin read wait.
-            sync_wikilinks(con, cid, body, active=True)
+            sync_wikilinks(con, cid, body, active=True, index=index)
             con.commit()
             continue
         before = int(row["revision"] or 0)
@@ -15297,22 +15769,23 @@ def _patrol_wikilinks(con) -> int:
 
 def patrol_wikilinks() -> int:
     """Align wiki marks on active pages. Returns how many bodies changed."""
-    with LOCK:
-        con = db()
-        changed = _patrol_wikilinks(con)
-        con.commit()
-    return changed
+    return _patrol_wikilinks(db())
 
 
 def reconcile_new_crystals() -> dict:
-    """Fold identical names, ask about vector neighbors, then align wiki links."""
+    """Fold identical names, ask about vector neighbors, then align wiki links.
+
+    三个过程都要走遍整库，所以都不在 ``engine.LOCK`` 里跑：一页一提交，锁里只留
+    最后那条记账。整库巡检抱着锁，控制台就跟着巡检一起停，实测一次抱了 136 秒。
+    """
     since = _reconcile_since()
+    con = db()
     with LOCK:
-        con = db()
         rows = list(con.execute("SELECT * FROM crystallizations WHERE status='active' AND id!='owner'"))
         recent = {row["id"] for row in rows if (_crystal_born_at(con, row["id"]) or "") >= since}
-        folded = _fold_label_overlaps(con, recent)
-        pending = _reconcile_ask_queue(con, recent)
+    folded = _fold_label_overlaps(con, recent)
+    pending = _reconcile_ask_queue(con, recent)
+    with LOCK:
         for item in pending:
             _record_possible_once(con, item)
         con.commit()
@@ -15355,9 +15828,8 @@ def reconcile_new_crystals() -> dict:
                 con.commit()
             except Exception:
                 con.rollback()
+    linked = _patrol_wikilinks(con)
     with LOCK:
-        con = db()
-        linked = _patrol_wikilinks(con)
         if folded or asked or model_merged or linked:
             note = (
                 f"收起同名 {folded} 篇，向量送评 {asked} 对，模型合并 {model_merged} 篇，"
@@ -15374,9 +15846,9 @@ def reconcile_new_crystals() -> dict:
 
 def _fold_same_names() -> int:
     """Merge pages that already use the same written name. Does not ask the model."""
+    con = db()
+    folded = _fold_label_overlaps(con, set())
     with LOCK:
-        con = db()
-        folded = _fold_label_overlaps(con, set())
         if folded:
             con.execute(
                 "INSERT INTO decisions(created_at,kind,detail) VALUES(?,?,?)",
@@ -15918,22 +16390,218 @@ def probe_interval_seconds() -> float:
         return 300.0
 
 
+# The shared provider gate. One place answers "may this provider be called right now".
+# It lives in settings so a restart keeps the step the ladder reached.
+GATE_JITTER = 0.1
+_THROTTLE_GATE_SECONDS = 60
+_QUOTA_GATE_STEPS = (300, 900, 1800, 3600, 7200, 18000)
+_GATE_OPEN = {"state": "open", "until_unix": 0.0, "level": 0, "reason": "", "code": "", "at": ""}
+
+
+def _gate_key(provider_id: str) -> str:
+    return f"provider_gate:{provider_id}"
+
+
+def _distill_provider_id() -> str:
+    """The configured provider the distill call actually targets.
+
+    Matched by base_url so the gate lines up with the one provider the probe also
+    watches. An env-driven base has no provider record to gate, so it reads empty.
+    """
+    target = llm_target("distill")
+    if not target:
+        return ""
+    base = str(target[0]).rstrip("/")
+    if not base:
+        return ""
+    for provider in _providers():
+        if str(provider.get("base_url") or "").rstrip("/") == base:
+            return str(provider.get("id") or "")
+    return ""
+
+
+def gate_reading(provider_id: str) -> dict:
+    """The gate record for one provider. A missing or broken record reads as open."""
+    reading = dict(_GATE_OPEN)
+    raw = get_setting(_gate_key(provider_id))
+    if not raw:
+        return reading
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return reading
+    if not isinstance(data, dict):
+        return reading
+    if data.get("state") in {"open", "cooling"}:
+        reading["state"] = data["state"]
+    try:
+        reading["until_unix"] = float(data.get("until_unix") or 0)
+    except (TypeError, ValueError):
+        reading["until_unix"] = 0.0
+    try:
+        reading["level"] = int(data.get("level") or 0)
+    except (TypeError, ValueError):
+        reading["level"] = 0
+    reading["reason"] = str(data.get("reason") or "")
+    reading["code"] = str(data.get("code") or "")
+    reading["at"] = str(data.get("at") or "")
+    return reading
+
+
+def gate_cooling(provider_id: str) -> bool:
+    """True while the gate is shut for this provider."""
+    reading = gate_reading(provider_id)
+    return reading["state"] == "cooling" and time.time() < reading["until_unix"]
+
+
+def gate_next_at(provider_id: str) -> float | None:
+    """When a cooling gate reopens, as a unix time. None when it is open."""
+    reading = gate_reading(provider_id)
+    if reading["state"] != "cooling" or reading["until_unix"] <= 0:
+        return None
+    return reading["until_unix"]
+
+
+def gate_status(provider_id: str) -> dict:
+    """Cooling, the step, and the next probe time, for the console to render."""
+    reading = gate_reading(provider_id)
+    cooling = gate_cooling(provider_id)
+    last = 0.0
+    for item in _providers():
+        if item.get("id") == provider_id:
+            last = float(item.get("health_unix") or 0)
+            break
+    if cooling:
+        next_probe = float(reading["until_unix"])
+    else:
+        next_probe = (last + probe_interval_seconds()) if last else 0.0
+    return {
+        "provider_id": provider_id,
+        "state": "cooling" if cooling else "open",
+        "cooling": cooling,
+        "level": int(reading["level"]),
+        "reason": reading["reason"],
+        "code": reading["code"],
+        "until_unix": float(reading["until_unix"]) if cooling else 0.0,
+        "next_probe_unix": next_probe,
+    }
+
+
+def _gate_wait(seconds: float, jitter: float | None) -> float:
+    spread = GATE_JITTER if jitter is None else jitter
+    if not spread:
+        return float(seconds)
+    return float(seconds) * (1 + random.uniform(-spread, spread))
+
+
+def _release_leased_for_gate() -> int:
+    """Hand back this provider's leased rows at once, not after the 600s lease runs out."""
+    live = _live_lease_ids()
+    skip = ""
+    if live:
+        skip = " AND id NOT IN (" + ",".join("?" * len(live)) + ")"
+    return db().execute(
+        f"UPDATE queue SET state='queued', leased_until=NULL WHERE state='leased'{skip}",
+        (*live,),
+    ).rowcount
+
+
+def gate_hold(provider_id: str, reason: str, retry_after: float | None = None, code: str = "", *, jitter: float | None = None) -> dict:
+    """Shut the gate for one provider.
+
+    Throttle is a flat wait. A quota window climbs the ladder, one step per repeat
+    while the same reason is held, and stops at the top. The step is stored so a
+    restart does not drop it back to the first rung.
+    """
+    if reason not in {"throttle", "quota_window"}:
+        return gate_reading(provider_id)
+    with LOCK:
+        previous = gate_reading(provider_id)
+        if reason == "throttle":
+            level = 0
+            base = _THROTTLE_GATE_SECONDS
+        else:
+            same = previous["state"] == "cooling" and previous["reason"] == "quota_window"
+            level = min(previous["level"] + 1, len(_QUOTA_GATE_STEPS) - 1) if same else 0
+            base = _QUOTA_GATE_STEPS[level]
+        wait = float(retry_after) if retry_after and retry_after > 0 else base
+        reading = {
+            "state": "cooling",
+            "until_unix": time.time() + _gate_wait(wait, jitter),
+            "level": level,
+            "reason": reason,
+            "code": str(code or ""),
+            "at": utcnow(),
+        }
+        set_setting(_gate_key(provider_id), json.dumps(reading, ensure_ascii=False))
+        if provider_id and provider_id == _distill_provider_id():
+            _release_leased_for_gate()
+        db().commit()
+    return reading
+
+
+def gate_clear(provider_id: str) -> dict:
+    """A provider that answered clears its gate at once, with no step-down."""
+    reading = {**_GATE_OPEN, "at": utcnow()}
+    with LOCK:
+        set_setting(_gate_key(provider_id), json.dumps(reading, ensure_ascii=False))
+        db().commit()
+    return reading
+
+
+def _gate_extend(provider_id: str, seconds: float) -> None:
+    """Push a cooling gate's next probe to the normal interval, keeping its step.
+
+    A red answer does not spend a rung, but leaving the deadline in the past would
+    re-probe every scheduler tick — the very spin this gate exists to stop.
+    """
+    with LOCK:
+        reading = gate_reading(provider_id)
+        if reading["state"] != "cooling":
+            return
+        reading["until_unix"] = time.time() + float(seconds)
+        set_setting(_gate_key(provider_id), json.dumps(reading, ensure_ascii=False))
+        db().commit()
+
+
 def probe_providers_if_due() -> int:
     interval = probe_interval_seconds()
     now = time.time()
     due = []
     for item in _providers():
-        last = float(item.get("health_unix") or 0)
-        if now - last >= interval:
-            due.append(dict(item))
+        provider_id = str(item.get("id"))
+        reading = gate_reading(provider_id)
+        if reading["state"] == "cooling":
+            # A cooling provider is probed on the gate's own schedule, never sooner.
+            if now < reading["until_unix"]:
+                continue
+        else:
+            last = float(item.get("health_unix") or 0)
+            if now - last < interval:
+                continue
+        due.append(dict(item))
     checked = 0
     for item in due:
         if not str(item.get("api_key") or "").strip():
             continue
+        provider_id = str(item.get("id"))
         result = _probe_provider(item)
-        _stamp_health(str(item.get("id")), result)
-        if result.get("health") == "ok":
+        _stamp_health(provider_id, result)
+        health = result.get("health")
+        # A gate reopens exactly when its clock runs out, so a probed provider is
+        # still on the step it reached. An answer clears it or pushes it up one.
+        cooling = gate_reading(provider_id)["state"] == "cooling"
+        if health == "ok":
             recover_auth_alerts()
+            if cooling:
+                gate_clear(provider_id)
+        elif health == "warn" and cooling:
+            reading = gate_reading(provider_id)
+            gate_hold(provider_id, reading["reason"] or "throttle")
+        elif health == "down" and cooling:
+            # Red keeps the ladder step; only the clock moves, so the next probe
+            # waits the normal interval instead of the next tick.
+            _gate_extend(provider_id, interval)
         checked += 1
     return checked
 

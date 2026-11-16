@@ -1792,7 +1792,10 @@ class AdminGate:
         if scope.get("type") == "http":
             path = scope.get("path", "")
             if path != "/admin/login" and not _login_asset(path) and (path == "/admin" or path.startswith("/admin/")):
-                if not _admin_ok(Request(scope)):
+                # 门口这一问要读口令代次、读 cookie 钥匙，`_secret()` 还要碰文件系统。
+                # 直接在这里调就是把整条事件循环按在磁盘上：一次读卡住，连不经过这道门
+                # 的 `/healthz` 和读另一本账的 `/admin/costs` 都得跟着等。放到线程里问。
+                if not await asyncio.to_thread(_admin_ok, Request(scope)):
                     if path.startswith("/admin/api/"):
                         response = JSONResponse({"error": "未登录"}, status_code=401)
                     else:
@@ -1812,10 +1815,17 @@ def _poll_seconds() -> float:
 
 
 def _distill_loop(stop: threading.Event | None = None) -> None:
+    """One unit per round, and always hand the interpreter back between rounds.
+
+    A lease succeeds whenever the queue is deep, so "more work -> go straight
+    round again" turned this into a spin: the worker held the GIL and kept
+    re-taking engine.LOCK, and every request thread queued up behind it until
+    the whole console looked hung. One unit is one model call, so pausing like
+    the probe and reconcile loops do costs nothing worth having.
+    """
+
     while stop is None or not stop.is_set():
-        done = engine.pump_one()
-        if done:
-            continue
+        engine.pump_one()
         if stop is None:
             time.sleep(_poll_seconds())
         elif stop.wait(_poll_seconds()):
@@ -1844,6 +1854,19 @@ _PROBE_THREAD: threading.Thread | None = None
 _PROBE_LOCK = threading.Lock()
 _RECONCILE_THREAD: threading.Thread | None = None
 _RECONCILE_LOCK = threading.Lock()
+
+
+# 维护时钟每 0.2 秒转一圈，但每一步都要走一张表并取 engine.LOCK。一步一圈的结果
+# 是锁被占掉近一半时间，管理台的每次读都要在锁后面排队（实测每一圈 11-13 次、
+# 每次约 0.35 秒）。每一步有自己的最小间隔：作业照样收，锁不再被一圈一圈占住。
+_MAINTENANCE_EVERY = {
+    "scan": 5.0,
+    "release": 20.0,
+    "sweep": 20.0,
+    "host_import": 15.0,
+    "maintain": 30.0,
+}
+_MAINTENANCE_LAST: dict[str, float] = {}
 
 
 def _maintenance_steps():
@@ -1889,7 +1912,11 @@ def run_probe_tick(quiet_until: dict[str, float] | None = None) -> None:
 
 def run_maintenance_tick(quiet_until: dict[str, float] | None = None) -> None:
     window = quiet_until if quiet_until is not None else {}
+    now = time.monotonic()
     for name, fn in _maintenance_steps():
+        if now - _MAINTENANCE_LAST.get(name, 0.0) < _MAINTENANCE_EVERY.get(name, 15.0):
+            continue
+        _MAINTENANCE_LAST[name] = now
         _run_guarded(name, fn, window)
 
 

@@ -9,7 +9,15 @@ Zero hits return {} so the engine takes Match=0 identity=new.
 
 from __future__ import annotations
 
-from rogmem.names import name_key, names_correspond
+from rogmem.names import (
+    _one_substitution,
+    _one_transposition,
+    name_key,
+    names_correspond,
+    pinyin_key,
+    spoken_text,
+    syllable,
+)
 
 
 def match_integrate_parts(text: str, library: list | None = None) -> dict:
@@ -99,13 +107,14 @@ def _labels_overlap(left: list[str], right: list[str]) -> bool:
 
 
 def _name_alias_hits(text: str, library: list) -> list[dict]:
+    scan = _BodyScan(text) if text else None
     hits = []
     for item in library:
         if not isinstance(item, dict):
             continue
         if not str(item.get("id") or "").strip():
             continue
-        if any(_label_in_text(label, text) for label in _item_labels(item)):
+        if any(_label_in_text(label, text, scan) for label in _item_labels(item)):
             hits.append(item)
     return hits
 
@@ -137,7 +146,32 @@ def page_identity(query: str, name: str, aliases: list[str] | None = None) -> tu
     return min(matched, key=lambda item: (item[0], -item[1]))
 
 
-def _label_in_text(label: str, text: str) -> bool:
+class _BodyScan:
+    """One body, prepared once, so every label reads it without re-transliterating it.
+
+    The old walk asked ``names_correspond`` about every window of the body once per label.
+    Both sides of that question transliterate through pypinyin, so the cost was
+    ``body length × labels × 2`` pinyin calls and one real body took seconds. Character keys
+    and character syllables are the same answer, asked once for the whole body.
+    """
+
+    __slots__ = ("text", "keys", "syllables", "stream", "_whole")
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.keys = [name_key(char) for char in text]
+        self.syllables = [syllable(char) for char in text]
+        self.stream = "".join(self.syllables)
+        self._whole = None
+
+    def whole_spoken(self) -> str:
+        """Phrase-level pinyin, asked at most once, and only when the syllables do not settle it."""
+        if self._whole is None:
+            self._whole = spoken_text(self.text)
+        return self._whole
+
+
+def _label_in_text(label: str, text: str, scan: "_BodyScan | None" = None) -> bool:
     raw = (label or "").strip()
     if len(raw) < 2 or not text:
         return False
@@ -147,8 +181,23 @@ def _label_in_text(label: str, text: str) -> bool:
     if len(key) >= 2 and key in name_key(text):
         return True
     width = len(raw)
-    last = len(text) - width + 1
-    for index in range(max(0, last)):
-        if names_correspond(raw, text[index : index + width]):
+    if width > len(text):
+        return False
+    scan = scan if scan is not None else _BodyScan(text)
+    spoken = pinyin_key(raw)
+    if spoken and len(spoken) >= 4:
+        if spoken in scan.stream:
+            return True
+        if spoken in scan.whole_spoken():
+            # Phrase-level pinyin can part company with character-level. Confirm on the windows.
+            for index in range(len(text) - width + 1):
+                if names_correspond(raw, text[index : index + width]):
+                    return True
+    keys = scan.keys
+    for index in range(len(text) - width + 1):
+        window = "".join(keys[index : index + width])
+        if len(window) != len(key):
+            continue
+        if _one_substitution(key, window) or _one_transposition(key, window):
             return True
     return False
