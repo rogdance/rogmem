@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 
 from rogmem import engine
 
@@ -107,6 +108,13 @@ def test_search_raw_puts_late_strong_chunk_first(tmp_path, monkeypatch):
     assert texts[0] == STRONG
 
 
+def _wait_vec_ready(engine, timeout=5.0):
+    """The corpus loads on a background thread now; wait for that first fill to settle."""
+    deadline = time.time() + timeout
+    while not engine._VECS.ready and time.time() < deadline:
+        time.sleep(0.01)
+
+
 def test_vector_hit_is_not_dropped_when_keywords_fill_the_page(tmp_path, monkeypatch):
     engine = _open_engine(tmp_path, monkeypatch)
     con = engine.db()
@@ -129,7 +137,8 @@ def test_vector_hit_is_not_dropped_when_keywords_fill_the_page(tmp_path, monkeyp
     semantic_id = cur.lastrowid
     con.execute("INSERT INTO fts_chunk(chunk_id,text) VALUES(?,?)", (str(semantic_id), engine._tokens(semantic)))
     con.commit()
-    engine._VECS = [(semantic_id, [1.0, 0.0])]
+    _wait_vec_ready(engine)
+    engine._VECS.rebuild([(semantic_id, [1.0, 0.0])])
     monkeypatch.setattr(engine, "_embed_one", lambda _text: [1.0, 0.0])
     found = engine.search(QUERY, limit=5)
     texts = [item.get("text", "") for item in found.get("raw", [])]

@@ -104,6 +104,11 @@ CREATE TABLE IF NOT EXISTS chunks (
   embed_text TEXT
 );
 
+CREATE INDEX IF NOT EXISTS chunks_source ON chunks(source_id);
+-- 还差向量的切片。热轮询每轮都要问一次「谁还缺向量」，没有它就得全表扫。
+CREATE INDEX IF NOT EXISTS chunks_missing_vec ON chunks(source_id)
+WHERE role != 'parent' AND vec_json IS NULL;
+
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunk USING fts5(chunk_id UNINDEXED, text, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_stmt USING fts5(stmt_id UNINDEXED, text, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_crystal USING fts5(crystal_id UNINDEXED, text, tokenize='unicode61');
@@ -277,6 +282,11 @@ CREATE TABLE IF NOT EXISTS host_jobs (
 );
 CREATE INDEX IF NOT EXISTS host_jobs_by_agent_status ON host_jobs(agent_id, status);
 CREATE INDEX IF NOT EXISTS host_jobs_by_device ON host_jobs(device_id, created_at DESC);
+-- 维护时钟每一圈都要「到期的 pending」「过期的租约」「到次数的 pending」各扫一遍。
+-- 没有这两条，每一圈都是整表扫，而这一圈每 0.2 秒就转一次。
+CREATE INDEX IF NOT EXISTS host_jobs_due ON host_jobs(status, expires_at);
+CREATE INDEX IF NOT EXISTS host_jobs_lease ON host_jobs(status, lease_until);
+CREATE INDEX IF NOT EXISTS host_jobs_attempts ON host_jobs(status, max_attempts);
 -- R4-4 / R5 A2：跨进程保险。同 (agent_id, program) 只许一条 pending/claimed/running/partial。
 -- 此索引的创建放在 engine.connect() 的迁移路径中执行（先规范化老库旧 active 重复，
 -- 再 CREATE UNIQUE INDEX IF NOT EXISTS），避免 schema.sql executescript 阶段
@@ -336,3 +346,10 @@ CREATE INDEX IF NOT EXISTS edges_mention ON edges(src, dst) WHERE ended=0 AND ki
 CREATE INDEX IF NOT EXISTS edges_mention_dst ON edges(dst, src) WHERE ended=0 AND kind='提及';
 CREATE INDEX IF NOT EXISTS edges_live_other ON edges(statement_id, src, dst, kind) WHERE ended=0 AND kind!='提及';
 CREATE INDEX IF NOT EXISTS queue_other_state ON queue(id) WHERE state NOT IN ('queued', 'leased', 'failed', 'done');
+-- 调度每一轮只看队列的两头：等最久的一段和新到的一段。少了它，等待中的整条堆积
+-- （生产上三万六千行）每一轮都要连正文一起装进内存，页缓存一冷就是几分钟。
+CREATE INDEX IF NOT EXISTS queue_waiting ON queue(state, id);
+-- 租约回收只碰少数几行。走索引之后它不再每一轮全表扫 queue。
+CREATE INDEX IF NOT EXISTS queue_leased ON queue(state, superseded, leased_until);
+-- 到期的 failed 行按 next_at 复位，每轮只取一段，不整批改写。
+CREATE INDEX IF NOT EXISTS queue_due ON queue(state, next_at, id);

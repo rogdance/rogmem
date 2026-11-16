@@ -4,23 +4,72 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 
 _SEPARATORS = re.compile(r"[\s_\-·.．,，、/]+")
 
+# A name, a label and one window of a body are all short. A whole body is not, and
+# caching those would hold megabytes for a value that is read once. Long text skips
+# the cache and pays the parse, which is what it did before there was one.
+_CACHE_CHARS = 64
+
+
+def _fold(text: str) -> str:
+    return _SEPARATORS.sub("", unicodedata.normalize("NFKC", text).casefold())
+
+
+@lru_cache(maxsize=65536)
+def _cached_key(text: str) -> str:
+    return _fold(text)
+
 
 def name_key(name: str) -> str:
-    text = unicodedata.normalize("NFKC", name or "").casefold()
-    return _SEPARATORS.sub("", text)
+    text = name or ""
+    if len(text) <= _CACHE_CHARS:
+        return _cached_key(text)
+    return _fold(text)
 
 
-def pinyin_key(name: str) -> str:
-    key = name_key(name)
+@lru_cache(maxsize=65536)
+def syllable(char: str) -> str:
+    """The spoken form of one character, or "" when it has none.
+
+    A body is checked against every label it might carry, so the same character is
+    transliterated again and again. One character is a small alphabet: cache it and the
+    per-label cost stops depending on how long the body is.
+    """
+    from pypinyin import Style, lazy_pinyin
+
+    if not char:
+        return ""
+    parts = lazy_pinyin(char, style=Style.NORMAL, errors="ignore")
+    return _fold("".join(parts))
+
+
+@lru_cache(maxsize=65536)
+def _cached_pinyin(text: str) -> str:
+    key = _cached_key(text)
     if len(key) < 2:
         return ""
     from pypinyin import Style, lazy_pinyin
 
-    parts = lazy_pinyin(key, style=Style.NORMAL, errors="ignore")
-    return name_key("".join(parts))
+    return _fold("".join(lazy_pinyin(key, style=Style.NORMAL, errors="ignore")))
+
+
+def spoken_text(text: str) -> str:
+    """The spoken form of a string, cached when it is short."""
+    if len(text) <= _CACHE_CHARS:
+        return _cached_pinyin(text)
+    from pypinyin import Style, lazy_pinyin
+
+    key = name_key(text)
+    if len(key) < 2:
+        return ""
+    return _fold("".join(lazy_pinyin(key, style=Style.NORMAL, errors="ignore")))
+
+
+def pinyin_key(name: str) -> str:
+    return spoken_text(name or "")
 
 
 def _one_substitution(left: str, right: str) -> bool:

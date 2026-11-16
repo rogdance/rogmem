@@ -68,8 +68,8 @@ def title_index(con: sqlite3.Connection) -> dict[str, str | None]:
     return index
 
 
-def target_ids(con: sqlite3.Connection, body: str, self_id: str) -> list[str]:
-    index = title_index(con)
+def target_ids(con: sqlite3.Connection, body: str, self_id: str, index: dict[str, str | None] | None = None) -> list[str]:
+    index = title_index(con) if index is None else index
     found: list[str] = []
     for title in marked_titles(body):
         dest = index.get(title)
@@ -198,9 +198,20 @@ def align_wikilinks(body: str, index: dict[str, str | None], self_id: str) -> st
     return "".join(out)
 
 
-def sync_wikilinks(con: sqlite3.Connection, crystal_id: str, body: str, *, active: bool = True) -> None:
-    """Replace this page's outgoing wiki links so they match ``[[ ]]`` in the body."""
-    wanted = target_ids(con, body, crystal_id) if active else []
+def sync_wikilinks(
+    con: sqlite3.Connection,
+    crystal_id: str,
+    body: str,
+    *,
+    active: bool = True,
+    index: dict[str, str | None] | None = None,
+) -> None:
+    """Replace this page's outgoing wiki links so they match ``[[ ]]`` in the body.
+
+    一次巡检要走过每一页。调用方把已经算好的 ``index`` 传进来，这里就不再一页重读
+    整张 crystallizations 去拼同一份索引。
+    """
+    wanted = target_ids(con, body, crystal_id, index) if active else []
     keep = set(wanted)
     rows = con.execute(
         "SELECT id, dst FROM edges WHERE src=? AND kind=? AND ended=0",
