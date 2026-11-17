@@ -682,3 +682,45 @@ def test_an_undecodable_child_pipe_does_not_drop_the_turn(tmp_path, monkeypatch)
     )
     stored = (tmp_path / ".rogmem" / "outbox.jsonl").read_text(encoding="utf-8")
     assert "青石记下这句原话" in stored
+
+
+def test_a_later_user_turn_repeats_the_standing_order(tmp_path, monkeypatch):
+    """The packet is a one-time bootstrap. Later turns carry one short read-when-needed line."""
+    import rogmem.host_hook as hook
+
+    monkeypatch.setattr(hook, "_core_text", lambda home, program, project="": "历史包")
+    monkeypatch.setattr(hook, "_endpoint", lambda home, program: ("http://127.0.0.1:18780/mcp", "rm_test", "dev"))
+    monkeypatch.setattr(hook, "_flush", lambda home, program, rows, timeout=30: [])
+
+    opened = handle(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "合成句：第一问。"},
+        home=tmp_path,
+        program="Trae",
+    )
+    assert opened["hookSpecificOutput"]["additionalContext"].startswith("【rogmem 历史包】")
+
+    later = handle(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "合成句：第二问。"},
+        home=tmp_path,
+        program="Trae",
+    )
+    reminder = later["hookSpecificOutput"]["additionalContext"]
+    assert "search" in reminder and "宁查勿猜" in reminder
+    assert "历史包" not in reminder
+
+
+def test_an_unenrolled_host_repeats_nothing(tmp_path, monkeypatch):
+    import rogmem.host_hook as hook
+
+    monkeypatch.setattr(hook, "_core_text", lambda home, program, project="": "历史包")
+    monkeypatch.setattr(hook, "_flush", lambda home, program, rows, timeout=30: [])
+    markers = tmp_path / ".rogmem" / "hook-core"
+    markers.mkdir(parents=True)
+    (markers / "Trae-s.ok").write_text("ok\n", encoding="utf-8")
+    assert hook._enrolled(tmp_path, "Trae") is False
+    later = handle(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "合成句：第二问。"},
+        home=tmp_path,
+        program="Trae",
+    )
+    assert later == {}

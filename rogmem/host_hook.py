@@ -30,6 +30,16 @@ _INLINE_UPLOAD_TIMEOUT = 2
 _DRAIN_UPLOAD_TIMEOUT = 30
 _FLUSH_LIMIT = 20
 
+# The packet is a once-per-session bootstrap. A later user turn carries no packet,
+# so the standing order is repeated in front of the agent as one short line.
+# The policy is owned by rogmem.host_rules.rule_body; this short copy exists only because
+# the installed hook cannot import the repo. Keep it trigger-only and stable.
+_USER_TURN_EVENTS = {"beforeSubmitPrompt", "UserPromptSubmit", "pre_llm_call"}
+_REMINDER = (
+    "【rogmem 提示】涉及本人的约定/偏好，或本项目的现状、历史决策时："
+    "速写没写、写在状态截点之后、或你只是大概记得，就先 search 核对再答，宁查勿猜。"
+)
+
 
 def stable_seq(session_id: str, role: str, text: str) -> int:
     digest = hashlib.sha256(f"{session_id}\n{role}\n{text}".encode()).digest()
@@ -260,6 +270,12 @@ def _endpoint(home: Path, program: str) -> tuple[str, str, str]:
     if match:
         device = match.group(1).strip().strip('"')
     return url, token, device or _device_id(home)
+
+
+def _enrolled(home: Path, program: str) -> bool:
+    """True when this host is pointed at a hub and holds its key. An unenrolled host says nothing."""
+    url, token, _device = _endpoint(home, program)
+    return bool(url and token.startswith("rm_"))
 
 
 def _yaml_block(text: str, name: str) -> str:
@@ -667,7 +683,12 @@ def handle(payload: dict, *, home: Path, program: str) -> dict:
             else:
                 packet = f"{PACKET_MARK}\n{text}"
                 _remember(ok_mark, "ok\n")
-    result = _context_response(event, packet) if packet else {}
+    context = packet
+    if not context and event in _USER_TURN_EVENTS and _enrolled(home, program):
+        # The opening packet is a one-time bootstrap. A later user turn gets no packet,
+        # so the standing order is repeated here as one short line.
+        context = _REMINDER
+    result = _context_response(event, context) if context else {}
     try:
         # The opening response has to leave before the host's deadline.
         # Uploading saved turns is later work; doing it here can kill the process

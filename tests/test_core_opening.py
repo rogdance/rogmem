@@ -81,7 +81,7 @@ def test_recent_excerpts_follow_sketches_and_leave_other_material_out(tmp_path, 
     joined = "\n".join(texts)
     assert "sk-abc123DEF456" not in joined
     assert "文件正文不该出现" not in joined
-    assert packed["rules_rev"] == 1
+    assert packed["rules_rev"] == 2
     assert packed["rules_block"] is None
     assert "历史包" in packed["convention"]
     assert packed["llm"] is False
@@ -170,6 +170,8 @@ def test_global_rules_cover_every_installed_host(tmp_path, monkeypatch):
     assert "压缩摘要或本地笔记" in work
     assert codex.startswith("保留我的说明")
     assert "rogmem-rule:start" in codex and "必须立刻调用 core" in codex
+    assert "rogmem 规则版本：2" in cursor
+    assert "不在上下文里" in cursor and "先 search 核对" in cursor and "宁查勿猜" in hermes
     install_global_rules(home)
     again = (home / ".codex" / "AGENTS.md").read_text(encoding="utf-8")
     assert again.count("rogmem-rule:start") == 1
