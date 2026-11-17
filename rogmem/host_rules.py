@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 RULES_REV = 2
+# Bump when anything the host installs changes: rule_body below, or rogmem/host_hook.py.
+# The management page offers a one-shot prompt to refresh installed hosts when it moves.
+HOST_BUNDLE_REV = 2
 MARKER_START = "<!-- rogmem-rule:start -->"
 MARKER_END = "<!-- rogmem-rule:end -->"
 BLOCK_START = f"【rogmem 规则版本：{RULES_REV}】"

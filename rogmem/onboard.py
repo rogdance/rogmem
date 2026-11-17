@@ -59,3 +59,22 @@ def onboard_prompt(secret: str) -> str:
         "Hermes 领到钥匙后，记忆提供方是 rogmem。新的一轮对话由这个提供方用同一条回合身份送进去。已经在跑的 Hermes 要重新打开才换上。\n\n"
         "不要删除 NAS 上的 rogmem 数据。"
     )
+
+
+def host_update_prompt() -> str:
+    """One prompt for any installed host. It refreshes the client and re-installs the host-side plugin.
+
+    This is not a new admission: no key is minted, no existing key or config changes, no
+    memory data moves. The management page hands it over so old hosts pick up newer rules
+    and a newer hook without going through 添加宿主 again.
+    """
+    return (
+        "请把本机的宿主端插件更新到最新：先刷新本机客户端，再给本机所有已支持的宿主重写全局规则和 hook。\n"
+        "这不是重新接入。不要新领钥匙，不要改已有钥匙或配置，不要动记忆数据，不要改端口或卷。\n\n"
+        + host_client_instruction()
+        + "然后运行 python -m rogmem hosts update --confirm，把本机所有已发现且受支持的宿主的全局规则和 hook 更新到最新。\n"
+        "看不到要更新的宿主时，先运行 python -m rogmem hosts scan --dry-run 列一遍再更新。\n"
+        "规则写在宿主的全局位置，不写进某一个仓库；hook 覆盖同名旧文件；DSH 更新插件。已停用或已拒绝的宿主保持不动，告诉用户去宿主列表处理。\n"
+        "更新完成后回报每个宿主的结果，不要把任何钥匙或原文贴进对话。\n"
+        "不要删除 NAS 上的 rogmem 数据。"
+    )

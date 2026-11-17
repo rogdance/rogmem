@@ -724,3 +724,33 @@ def test_an_unenrolled_host_repeats_nothing(tmp_path, monkeypatch):
         program="Trae",
     )
     assert later == {}
+
+
+def test_refresh_host_bundle_rewrites_rules_and_hook(tmp_path):
+    from installer.rogmem_installer import refresh_host_bundle
+    from rogmem.host_rules import HOST_BUNDLE_REV
+
+    home = _home(tmp_path)
+    result = refresh_host_bundle(home)
+    assert result["ok"] is True
+    assert result["rev"] == HOST_BUNDLE_REV
+    assert set(result["programs"]) == {"Cursor", "Hermes", "Codex"}
+    assert (home / ".cursor" / "rules" / "rogmem.mdc").is_file()
+    assert (home / ".cursor" / "hooks" / "rogmem.py").is_file()
+    assert (home / ".hermes" / "rogmem-rule.md").is_file()
+    assert (home / ".codex" / "hooks" / "rogmem.py").is_file()
+    marker = json.loads((home / ".rogmem" / "host-bundle.json").read_text(encoding="utf-8"))
+    assert marker["rev"] == HOST_BUNDLE_REV
+    assert set(marker["programs"]) == {"Cursor", "Hermes", "Codex"}
+    assert refresh_host_bundle(Path.home())["ok"] is False
+
+
+def test_hosts_update_command_rewrites_then_reports(tmp_path):
+    import rogmem.cli as cli
+
+    home = _home(tmp_path)
+    assert cli.main(["hosts", "update", "--home", str(home)]) == 0
+    assert not (home / ".cursor" / "rules" / "rogmem.mdc").exists()
+    assert cli.main(["hosts", "update", "--confirm", "--home", str(home)]) == 0
+    assert (home / ".cursor" / "rules" / "rogmem.mdc").is_file()
+    assert (home / ".hermes" / "rogmem-rule.md").is_file()

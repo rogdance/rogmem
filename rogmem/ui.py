@@ -5243,6 +5243,45 @@ _HOST_FLEET_SCRIPT = r"""
       };
     }
   }
+  var bundleRev = __HOST_BUNDLE_REV__;
+  var updateTemplate = __UPDATE_TEMPLATE__;
+  var updateOriginMark = "___ROGMEM_ORIGIN___";
+  var updateNote = document.getElementById("update-hosts-note");
+  var updateButton = document.getElementById("update-hosts");
+  var updateModal = document.getElementById("update-hosts-modal");
+  function bundleSeen() {
+    try { return localStorage.getItem("rogmem-host-bundle-seen") || ""; } catch (err) { return ""; }
+  }
+  function markBundleSeen() {
+    try { localStorage.setItem("rogmem-host-bundle-seen", String(bundleRev)); } catch (err) {}
+    if (updateNote) updateNote.hidden = true;
+  }
+  if (updateNote && bundleSeen() !== String(bundleRev)) updateNote.hidden = false;
+  if (updateButton && updateModal) {
+    document.getElementById("update-hosts-close").onclick = function () { updateModal.hidden = true; };
+    var updatePrompt = document.getElementById("update-hosts-prompt");
+    var updateCopy = document.getElementById("update-hosts-copy");
+    var updateStatusEl = document.getElementById("update-hosts-status");
+    function fillUpdate() { return updateTemplate.split(updateOriginMark).join(location.origin); }
+    updateButton.onclick = function () {
+      if (updatePrompt) updatePrompt.value = fillUpdate();
+      updateModal.hidden = false;
+      if (updateCopy) updateCopy.textContent = "复制提示";
+      if (updateStatusEl) updateStatusEl.textContent = "贴给本机任意一个已安装的宿主。它会把本机所有已支持的宿主一起更新。";
+      markBundleSeen();
+    };
+    if (updateCopy && updatePrompt) {
+      updateCopy.onclick = function () {
+        var text = updatePrompt.value || fillUpdate();
+        var done = function () { updateCopy.textContent = "已复制"; markBundleSeen(); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done).catch(function () { fallbackCopy(text, done); });
+        } else {
+          fallbackCopy(text, done);
+        }
+      };
+    }
+  }
   var fleet = document.getElementById("host-fleet");
   function paintProgress(hosts) {
     if (!fleet) return;
@@ -5766,9 +5805,12 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
         fleet_rows.append(f"<tr><td class='empty' colspan='{len(_HOST_COLUMNS)}'>还没有接入的宿主。</td></tr>")
     viewer = "known" if fleet.get("viewer_known") else "unknown"
     from rogmem.engine import HOST_PROGRAMS, hub_id
-    from rogmem.onboard import GRANT_MARK, HUB_MARK, onboard_prompt
+    from rogmem.host_rules import HOST_BUNDLE_REV
+    from rogmem.onboard import GRANT_MARK, HUB_MARK, host_update_prompt, onboard_prompt
 
-    prompt_json = json.dumps(onboard_prompt(GRANT_MARK).replace(HUB_MARK, hub_id()), ensure_ascii=False)
+    hub = hub_id()
+    prompt_json = json.dumps(onboard_prompt(GRANT_MARK).replace(HUB_MARK, hub), ensure_ascii=False)
+    update_json = json.dumps(host_update_prompt().replace(HUB_MARK, hub), ensure_ascii=False)
     supported = "、".join(HOST_PROGRAMS)
     hook_hosts = "、".join(name for name in HOST_PROGRAMS if name != "DSH")
     device_filter = _tip("设备名", _HOST_TIPS["设备名"])
@@ -5777,8 +5819,10 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
 <label>{device_filter}<select name='device'>{device_options}</select></label>
 <label>智能体<select name='agent'>{agent_options}</select></label>
 <button class='quiet' type='submit'>筛选</button>
+<button type="button" id="update-hosts" class="quiet">更新宿主插件</button>
 <button type="button" id="add-host" class="row-end">添加宿主</button>
 </form>
+<div class="note" id="update-hosts-note" hidden>宿主端插件有新版本（V{HOST_BUNDLE_REV}）。点「更新宿主插件」，复制一段提示词贴给本机任意一个已安装的宿主，就能把本机所有已支持的宿主一起更新。</div>
 <div class="host-fleet-wrap" style="overflow-x:auto;width:100%;max-width:calc(100vw - 2rem);box-sizing:border-box;-webkit-overflow-scrolling:touch;"><table id="host-fleet" data-viewer="{viewer}" style="min-width:860px;"><tr>{_host_head()}</tr>{''.join(fleet_rows)}</table></div>
 <div id="add-host-modal" class="modal" hidden>
 <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="add-host-title">
@@ -5790,7 +5834,16 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
 <p><button type="button" id="add-host-copy">复制提示</button> <button type="button" class="quiet" id="add-host-close">关闭</button></p>
 <p id="add-host-status" class="note"></p>
 </div></div>
-{_HOST_FLEET_SCRIPT.replace("__ORIGIN__", _LOCAL_INSTALLER).replace("__PROMPT_TEMPLATE__", prompt_json)}"""
+<div id="update-hosts-modal" class="modal" hidden>
+<div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="update-hosts-title">
+<h2 id="update-hosts-title">更新宿主插件</h2>
+<p class="note">把下面这段贴给本机任意一个已安装的宿主。它会刷新本机客户端，并把本机所有已支持的宿主（{supported}）的全局规则和 hook 更新到最新。</p>
+<p class="note">不重新发钥匙，不改已有配置，也不动记忆数据。宿主端插件有新版本时执行一次即可。</p>
+<textarea id="update-hosts-prompt" readonly rows="12"></textarea>
+<p><button type="button" id="update-hosts-copy">复制提示</button> <button type="button" class="quiet" id="update-hosts-close">关闭</button></p>
+<p id="update-hosts-status" class="note"></p>
+</div></div>
+{_HOST_FLEET_SCRIPT.replace("__ORIGIN__", _LOCAL_INSTALLER).replace("__PROMPT_TEMPLATE__", prompt_json).replace("__HOST_BUNDLE_REV__", str(HOST_BUNDLE_REV)).replace("__UPDATE_TEMPLATE__", update_json)}"""
     return page("宿主管理", "hosts", fleet_html)
 
 
