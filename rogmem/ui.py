@@ -6742,7 +6742,7 @@ function rogmemDrawGraph(el, data, draw, note) {
   var nodes = data.nodes || [];
   var edges = data.edges || [];
   var tally = document.getElementById('graph-count');
-  if (tally) tally.textContent = '活跃节点：' + nodes.length + (note || '');
+  if (tally) tally.textContent = '活跃结晶：' + nodes.length + (note || '');
   try {
     draw(nodes, edges);
   } catch (err) {
@@ -6908,6 +6908,7 @@ function rogmemDraw3D(el, nodes, edges, focusMode) {
 function rogmem3dBuild(el, ctx) {
   var THREE = ctx.THREE;
   var count = ctx.count;
+  var ids = ctx.ids;
   var pos = ctx.placed;
   var linkSrc = ctx.linkSrc;
   var linkDst = ctx.linkDst;
@@ -6968,6 +6969,7 @@ function rogmem3dBuild(el, ctx) {
   for (i = 0; i < linkCount; i++) { degree[linkSrc[i]] += 1; degree[linkDst[i]] += 1; }
   var maxDeg = 1;
   for (i = 0; i < count; i++) if (degree[i] > maxDeg) maxDeg = degree[i];
+  var maxNodeSize = 0;
   for (i = 0; i < count; i++) {
     var t = layers > 1 ? (community.label[i] % layers) / layers : Math.sqrt(degree[i] / maxDeg);
     var ci = Math.min(palette.length - 1, Math.floor(t * palette.length));
@@ -6975,7 +6977,11 @@ function rogmem3dBuild(el, ctx) {
     nodeColors[i * 3 + 1] = palette[ci][1];
     nodeColors[i * 3 + 2] = palette[ci][2];
     // 与 2D 星图同一形状：heat = √(连线数 / 最大值)，连得越多越大。
-    nodeSizes[i] = 0.4 + 1.75 * Math.sqrt(degree[i] / maxDeg);
+    var size = 0.4 + 1.75 * Math.sqrt(degree[i] / maxDeg);
+    // 主人节点在基础尺寸上再放大，保证连接数相同时仍显著大于其他节点。
+    if (ids[i] === 'owner') size *= 2.5;
+    nodeSizes[i] = size;
+    if (size > maxNodeSize) maxNodeSize = size;
   }
 
   var nodeGeo = new THREE.BufferGeometry();
@@ -7199,7 +7205,7 @@ function rogmem3dBuild(el, ctx) {
   var refDist = camera.position.length();
   nodeUniforms.uBaseNodeSize.value = star;
   nodeUniforms.uPointScale.value = refDist * pixelRatio;
-  nodeUniforms.uMaxPointSize.value = Math.ceil(2.15 * star * 2.2 * pixelRatio);
+  nodeUniforms.uMaxPointSize.value = Math.ceil(maxNodeSize * star * 2.2 * pixelRatio);
 
   // 通用帧扩展点：按需注入的层自己挂进来。核心不认识"标签"这个词，关态下不留任何痕迹。
   var hooks = el.rogmem3dHooks || [];
