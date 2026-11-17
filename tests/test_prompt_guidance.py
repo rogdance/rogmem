@@ -395,18 +395,18 @@ def test_partial_sheet_is_completed_from_what_the_model_wrote(tmp_path, monkeypa
     from rogmem import engine
 
     engine.connect(tmp_path, tmp_path / "scan")
-    body = "我叫林知远"
+    body = "我叫韩跑跑"
     data = engine._normalize_extract(
         {
             "items": [
-                {"op": "field", "field": "真名", "value": "林知远", "quote": body, "crystal": "记忆主人"},
+                {"op": "field", "field": "真名", "value": "韩跑跑", "quote": body, "crystal": "记忆主人"},
             ],
             "sheet": [
                 {
                     "crystal": "记忆主人",
                     "type": "人物",
                     "entries": [
-                        {"kind": "field", "key": "真名", "verdict": "写入", "value": "林知远", "quote": body},
+                        {"kind": "field", "key": "真名", "verdict": "写入", "value": "韩跑跑", "quote": body},
                     ],
                 }
             ],

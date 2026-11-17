@@ -75,11 +75,11 @@ def _identity() -> dict[str, Any]:
 
 _IDENTITY = _identity()
 
-OWNER_REAL_NAME = _IDENTITY.get("real_name", "林知远")
-OWNER_ALIASES = _IDENTITY.get("aliases", "Zhiyuan Lin, zhiyuanlin, 知远哥")
-OWNER_ORG = _IDENTITY.get("org", "星河工坊")
-OWNER_ORG_EN = _IDENTITY.get("org_en", "Xinghe Studio")
-EN_FILENAME = _IDENTITY.get("en_filename", "Zhiyuan Lin (1).docx")
+OWNER_REAL_NAME = _IDENTITY.get("real_name", "韩跑跑")
+OWNER_ALIASES = _IDENTITY.get("aliases", "韩立, Han Li, 韩天尊")
+OWNER_ORG = _IDENTITY.get("org", "黄枫谷")
+OWNER_ORG_EN = _IDENTITY.get("org_en", "Huangfeng Valley")
+EN_FILENAME = _IDENTITY.get("en_filename", "Han Paopao (1).docx")
 CN_FILENAME = _IDENTITY.get("cn_filename", "中文简历2026.pdf")
 
 LIVE_RESIM_TIMEOUT_SEC = 180

@@ -81,8 +81,8 @@ def test_markdown_body_is_shown_whole_and_sketch_is_the_summary(tmp_path, monkey
     pages = parse_pages(
         "# 云岚甲\n类型：人物\n\n## 身份速写\n\n他在 [[南港书院]] 做事。\n\n## 当前关注与计划\n\n接着写编辑器。\n"
     )
-    typed = parse_pages("# 星河工坊\n# 类型：项目\n\n## 项目定位\n\n从零做。\n")
-    assert typed[0]["name"] == "星河工坊"
+    typed = parse_pages("# 黄枫谷\n# 类型：项目\n\n## 项目定位\n\n从零做。\n")
+    assert typed[0]["name"] == "黄枫谷"
     assert typed[0]["type"] == "工程"
     assert "项目定位" in typed[0]["body"]
     assert pages == [
