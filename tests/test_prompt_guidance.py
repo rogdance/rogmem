@@ -101,7 +101,7 @@ def test_worker_prompts_do_not_dump_a_form():
     base = (
         "写作标准只约束这次新写进页面的句子；已有正文里没有被 gist 或 basis 点名的字保持原句和原次序，"
         "点到名的角标或结晶链接可以离开这句，没点名的仍留在原句上，新事实另起一段插到它该在的地方；"
-        "对不上原句的引用不另挂到页尾，裁决成更新的才把当前态换成更晚的说法并把旧说法留在经历里。"
+        "对不上原句的引用不另挂到页尾，裁决成更新的才把当前态换成更晚的说法，被换下的旧说法不再写进这一页。"
     )
     assert INTEGRATE_PAGE_SYSTEM.count(base) == 1
     assert "通读全页" not in INTEGRATE_PAGE_SYSTEM

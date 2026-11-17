@@ -252,8 +252,8 @@ def test_opening_the_gate_returns_leased_rows(tmp_path, monkeypatch):
     assert all(row["state"] == "queued" and row["leased_until"] is None for row in rows)
 
 
-# 9 — a cooling provider probes only on the gate's clock, never sooner.
-def test_a_cooling_provider_probes_on_the_gate_clock(tmp_path, monkeypatch):
+# 9 — a cooling provider is still checked every probe interval, not once per rung.
+def test_a_cooling_provider_is_checked_every_probe_interval(tmp_path, monkeypatch):
     engine_mod = _open(tmp_path, monkeypatch)
     provider = _gate_provider(engine_mod)
     monkeypatch.setattr(engine_mod, "probe_interval_seconds", lambda: 300.0)
@@ -261,20 +261,98 @@ def test_a_cooling_provider_probes_on_the_gate_clock(tmp_path, monkeypatch):
     monkeypatch.setattr(
         engine_mod,
         "_probe_provider",
-        lambda item: calls.append(item["id"]) or {"health": "ok", "health_detail": "正常", "remark": ""},
+        lambda item: calls.append(item["id"]) or {"health": "warn", "health_detail": "HTTP 429", "remark": "HTTP 429"},
     )
     engine_mod.gate_hold(provider, "quota_window", jitter=0)
+    # 这一轮退避是 5 分钟：刚上锁时还没到探活时刻。
+    assert engine_mod.gate_next_probe(provider) - time.time() == pytest.approx(300, abs=5)
     assert engine_mod.probe_providers_if_due() == 0
     assert calls == []
 
+    # 探活时刻一到就该探，哪怕退避还没结束。
     reading = engine_mod.gate_reading(provider)
+    assert reading["until_unix"] > time.time()
     engine_mod.db().execute(
         "UPDATE settings SET v=? WHERE k=?",
-        (json.dumps({**reading, "until_unix": time.time() - 1}), f"provider_gate:{provider}"),
+        (json.dumps({**reading, "probe_unix": time.time() - 1}), f"provider_gate:{provider}"),
     )
     engine_mod.db().commit()
     assert engine_mod.probe_providers_if_due() == 1
     assert calls == [provider]
+
+
+# 9b — the ladder holds dispatch back; it must not hold the next check back.
+def test_the_ladder_does_not_delay_the_next_check(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    provider = _gate_provider(engine_mod)
+    monkeypatch.setattr(engine_mod, "probe_interval_seconds", lambda: 300.0)
+    for _ in range(6):
+        reading = engine_mod.gate_hold(provider, "quota_window", jitter=0)
+    assert reading["level"] == 5
+    assert reading["until_unix"] - time.time() == pytest.approx(18000, abs=10)
+    # 退避是 5 小时，下一次探活仍然只有 5 分钟。
+    assert engine_mod.gate_next_probe(provider) - time.time() == pytest.approx(300, abs=5)
+    assert engine_mod.gate_cooling(provider) is True
+
+
+# 9c — a record written before the probe clock existed still reads.
+def test_a_record_without_the_probe_clock_falls_back_to_the_deadline(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    provider = _gate_provider(engine_mod)
+    legacy = {"state": "cooling", "until_unix": time.time() + 18000, "level": 5, "reason": "quota_window", "code": "", "at": ""}
+    engine_mod.set_setting(f"provider_gate:{provider}", json.dumps(legacy))
+    engine_mod.db().commit()
+    monkeypatch.setattr(engine_mod, "probe_interval_seconds", lambda: 300.0)
+    calls = []
+    monkeypatch.setattr(
+        engine_mod,
+        "_probe_provider",
+        lambda item: calls.append(item["id"]) or {"health": "ok", "health_detail": "正常", "remark": ""},
+    )
+    assert engine_mod.gate_next_probe(provider) == pytest.approx(legacy["until_unix"], abs=1)
+    assert engine_mod.probe_providers_if_due() == 0
+    assert calls == []
+
+
+# 9d — the quota comes back mid-rung: the next check opens the gate at once.
+def test_a_recovered_quota_is_noticed_within_the_probe_interval(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    provider = _gate_provider(engine_mod)
+    monkeypatch.setattr(engine_mod, "probe_interval_seconds", lambda: 300.0)
+    assert engine_mod.gate_hold(provider, "quota_window", jitter=0)
+    for _ in range(5):
+        engine_mod.db().execute(
+            "UPDATE settings SET v=? WHERE k=?",
+            (
+                json.dumps({**engine_mod.gate_reading(provider), "probe_unix": time.time() - 1}),
+                f"provider_gate:{provider}",
+            ),
+        )
+        engine_mod.db().commit()
+        monkeypatch.setattr(
+            engine_mod,
+            "_probe_provider",
+            lambda item: {"health": "warn", "health_detail": "HTTP 429", "remark": "HTTP 429"},
+        )
+        engine_mod.probe_providers_if_due()
+    held = engine_mod.gate_reading(provider)
+    assert held["level"] == 5
+    assert held["until_unix"] - time.time() == pytest.approx(18000, rel=0.12)
+
+    # 配额恢复了：下一次探活（一个间隔之后）就该开闸，而不是等 5 小时。
+    engine_mod.db().execute(
+        "UPDATE settings SET v=? WHERE k=?",
+        (json.dumps({**held, "probe_unix": time.time() - 1}), f"provider_gate:{provider}"),
+    )
+    engine_mod.db().commit()
+    monkeypatch.setattr(
+        engine_mod, "_probe_provider", lambda item: {"health": "ok", "health_detail": "正常", "remark": ""}
+    )
+    assert engine_mod.probe_providers_if_due() == 1
+    cleared = engine_mod.gate_reading(provider)
+    assert cleared["state"] == "open"
+    assert cleared["level"] == 0
+    assert engine_mod.gate_cooling(provider) is False
 
 
 # 10 — a good probe clears the gate outright.
@@ -285,7 +363,7 @@ def test_a_good_probe_clears_the_gate(tmp_path, monkeypatch):
     reading = engine_mod.gate_reading(provider)
     engine_mod.db().execute(
         "UPDATE settings SET v=? WHERE k=?",
-        (json.dumps({**reading, "until_unix": time.time() - 1}), f"provider_gate:{provider}"),
+        (json.dumps({**reading, "probe_unix": time.time() - 1}), f"provider_gate:{provider}"),
     )
     engine_mod.db().commit()
     monkeypatch.setattr(
@@ -306,7 +384,7 @@ def test_a_warn_probe_steps_the_ladder_up(tmp_path, monkeypatch):
     reading = engine_mod.gate_reading(provider)
     engine_mod.db().execute(
         "UPDATE settings SET v=? WHERE k=?",
-        (json.dumps({**reading, "until_unix": time.time() - 1}), f"provider_gate:{provider}"),
+        (json.dumps({**reading, "probe_unix": time.time() - 1}), f"provider_gate:{provider}"),
     )
     engine_mod.db().commit()
     monkeypatch.setattr(
@@ -316,6 +394,9 @@ def test_a_warn_probe_steps_the_ladder_up(tmp_path, monkeypatch):
     stepped = engine_mod.gate_reading(provider)
     assert stepped["level"] == 1
     assert stepped["reason"] == "quota_window"
+    # 爬梯子只推后派单，下一次探活照旧是一个间隔。
+    assert stepped["until_unix"] - time.time() == pytest.approx(900, rel=0.12)
+    assert engine_mod.gate_next_probe(provider) - time.time() == pytest.approx(300, abs=10)
 
 
 # 10 — a down probe keeps the step, only the clock moves (so no tight re-poll).
@@ -327,7 +408,7 @@ def test_a_down_probe_keeps_the_step(tmp_path, monkeypatch):
     reading = engine_mod.gate_reading(provider)
     engine_mod.db().execute(
         "UPDATE settings SET v=? WHERE k=?",
-        (json.dumps({**reading, "until_unix": time.time() - 1}), f"provider_gate:{provider}"),
+        (json.dumps({**reading, "probe_unix": time.time() - 1}), f"provider_gate:{provider}"),
     )
     engine_mod.db().commit()
     calls = []
