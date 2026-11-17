@@ -103,6 +103,60 @@ def test_a_short_key_is_cached_and_a_long_one_is_not_held():
     assert names.pinyin_key("云岚甲") == names._cached_pinyin("云岚甲")
 
 
+def test_the_library_answers_what_one_label_at_a_time_would():
+    """The batched one-typo walk must not change one answer.
+
+    A typo in the body, a transposition, and a plain miss all go through the batched
+    path in ``_name_alias_hits``; the same labels asked one at a time go through
+    ``_label_in_text``. The two must agree.
+    """
+    body = "值班的是云岚乇，名单上写的是乙甲，周生生 的门店在楼下，Alice 也来过。"
+    library = [
+        {"id": "c0", "name": "云岚甲"},
+        {"id": "c1", "name": "甲乙"},
+        {"id": "c2", "name": "周生生"},
+        {"id": "c3", "name": "Alice", "aliases": ["艾丽丝"]},
+        {"id": "c4", "name": "珍珠"},
+        {"id": "c5", "name": "云岚纸"},
+    ]
+    one_at_a_time = [
+        item["id"] for item in library if distill_match._label_in_text(item["name"], body)
+    ]
+    batched = [item["id"] for item in distill_match._name_alias_hits(body, library)]
+    assert batched == one_at_a_time
+    assert {"c0", "c1", "c2", "c3"} <= set(batched)
+    assert "c4" not in batched
+
+
+def test_the_typo_walk_costs_one_body_per_width_not_one_body_per_label(monkeypatch):
+    """The body is walked once per width in play, so the typo rules are asked far less.
+
+    Before the batch, every label compared its key against every window: the two rules
+    were called ``labels × windows`` times. Counting the calls pins that the batch is
+    not quietly doing the same work.
+    """
+    calls = {"n": 0}
+    real_sub = distill_match._one_substitution
+    real_trans = distill_match._one_transposition
+
+    def counted_sub(*args, **kwargs):
+        calls["n"] += 1
+        return real_sub(*args, **kwargs)
+
+    def counted_trans(*args, **kwargs):
+        calls["n"] += 1
+        return real_trans(*args, **kwargs)
+
+    monkeypatch.setattr(distill_match, "_one_substitution", counted_sub)
+    monkeypatch.setattr(distill_match, "_one_transposition", counted_trans)
+    body = "银河一百在丙区三号库，库里放着一枚旧罗盘。" * 80
+    library = [{"id": f"c{index}", "name": f"节点{index}"} for index in range(40)]
+    distill_match._name_alias_hits(body, library)
+    walk_the_old_way = len(body) * len(library)
+    assert walk_the_old_way > 60000
+    assert calls["n"] < walk_the_old_way // 20
+
+
 def test_a_syllable_is_the_spoken_form_of_one_character():
     assert names.syllable("云") == "yun"
     assert names.syllable("a") == ""
