@@ -4762,6 +4762,30 @@ def _provider_failure_exc(http_status: int, message: str, *, body_code=None, ret
     return ModelCallFailed(message)
 
 
+def _read_completion(resp, limit: int = 64 << 20) -> str:
+    """Read a completion as it arrives, not all at once.
+
+    A buffered answer keeps the socket quiet for the whole generation, so the read
+    timeout had to cover the entire generation. A streamed answer keeps bytes moving,
+    so the same number turns back into what it looks like: how long a socket may stay
+    silent. ``read1`` hands over whatever has arrived and answers b"" at the end; a
+    provider that ignored ``stream`` still sends one buffered body, which this reads
+    the same way. An object with no ``read1`` can only be read whole, and is.
+    """
+    reader = getattr(resp, "read1", None)
+    if reader is None:
+        return resp.read().decode("utf-8", "replace")
+    parts: list[bytes] = []
+    total = 0
+    while total < limit:
+        piece = reader(min(65536, limit - total))
+        if not piece:
+            break
+        parts.append(piece)
+        total += len(piece)
+    return b"".join(parts).decode("utf-8", "replace")
+
+
 def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = None, role: str = "") -> tuple[str, str]:
     outbound = dict(payload)
     if role and "minimax" in f"{base} {payload.get('model') or ''}".lower():
@@ -4774,6 +4798,10 @@ def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = 
             copied["content"] = redact_text(content)
         messages.append(copied)
     outbound["messages"] = messages
+    # Ask for the answer as it is being written. ``include_usage`` makes the last event
+    # carry the token counts, so the cost ledger keeps working on a streamed reply.
+    outbound["stream"] = True
+    outbound["stream_options"] = {"include_usage": True}
     silence = _chat_silence_seconds(outbound) if timeout is None else timeout
     req = urllib.request.Request(
         base + "/chat/completions",
@@ -4782,7 +4810,7 @@ def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = 
     )
     try:
         with urllib.request.urlopen(req, timeout=silence) as resp:
-            body = resp.read().decode("utf-8", "replace")
+            body = _read_completion(resp)
     except urllib.error.HTTPError as exc:
         if exc.code in {401, 403}:
             raise AuthPause("外部模型鉴权失败") from exc
