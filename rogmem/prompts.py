@@ -115,6 +115,8 @@ def distill_header(
     ingested_at: str = "",
     event_basis: str = "",
     owner_appellation: str = "",
+    agent_name: str = "",
+    session_id: str = "",
 ) -> str:
     """Facts the model cannot know: who the owner is, where this material lives, and when."""
     name, aliases, extra = owner_address(owner_name, owner_aliases, owner_appellation)
@@ -126,6 +128,12 @@ def distill_header(
     ]
     if extra:
         lines.append(f"主人称呼：{extra}")
+    origin = _one_line(agent_name)
+    if origin:
+        lines.append(f"来自哪个智能体：{origin}")
+    session = _one_line(session_id)
+    if session:
+        lines.append(f"会话：{session}")
     if (source_id or "").strip():
         lines.append(f"来源链接：/admin/sources/{source_id.strip()}")
     if (filename or "").strip():
@@ -148,6 +156,8 @@ def merge_user(
     page_name: str = "",
     page_type: str = "",
     owner_appellation: str = "",
+    agent_name: str = "",
+    session_id: str = "",
 ) -> str:
     """One merge. The clocks sit on the material they belong to."""
     clocks = "\n".join(clock_lines(event_at=event_at, ingested_at=ingested_at, event_basis=event_basis))
@@ -161,12 +171,18 @@ def merge_user(
     head = ("\n".join(identity) + "\n") if identity else ""
     appellation = (owner_appellation or "").strip()
     named = f"主人称呼：{appellation}\n\n" if appellation else ""
+    origin = []
+    if _one_line(agent_name):
+        origin.append(f"来自哪个智能体：{_one_line(agent_name)}")
+    if _one_line(session_id):
+        origin.append(f"会话：{_one_line(session_id)}")
+    where = ("\n".join(origin) + "\n") if origin else ""
     return (
         named
         + "这三份是同一次并页的材料。已有这一页和新写成的一页被放在一起，只因为名字或别名接近。是不是同一个主体，由你判断。\n\n"
         f"已有这一页：\n{head}{page_event_line(page_event_at)}\n{old}\n\n"
         f"新写成的一页：\n{new}\n\n"
-        f"这份材料：\n{clocks}\n{material or ''}"
+        f"这份材料：\n{where}{clocks}\n{material or ''}"
     )
 
 
@@ -229,6 +245,8 @@ DISTILL_SYSTEM = """\
 - 记忆主人、主人别名、主人称呼：文中出现这些称呼，都是在说记忆主人。主人称呼是用户记下的原文，不是这一页名字的上限，材料里另有的叫法照样留下。写着「尚未认定」，就是还没有真名。
 - 来源链接：这一份材料在系统里的位置。
 - 文件名：有的话，也是材料。名字、时间、地点、业务写在文件名里，跟正文一样收下。文件名也是材料。
+- 来自哪个智能体：有的话，写的是这份材料由哪个宿主程序送来的。那不是材料里的一个人，不要为它开页，也不要写成主人认识的对象。
+- 会话：有的话，写的是这些话说在哪个会话里。它只是这些话的来处，不是材料里说的事。
 - 本材料关联工程：有的话，这一次就是在说这个仓库。工程只认这个地址。
 - 事件时间：这句话发生的时间。写着「未记下」，就是没有发言时间。写着「文件最后写入时间」，就不是每一句各自的时刻，也不能单独把当前态说定。
 - 提交时间：这条材料进入记忆库的时间，不能用来判断它新不新。

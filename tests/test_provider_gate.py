@@ -28,6 +28,9 @@ def _open(tmp_path, monkeypatch):
 
     mod.connect(tmp_path, tmp_path / "scan")
     mod.set_embed_mode("off")
+    # The probation watch is process state, not a row: a provider id reused by another
+    # test must not inherit the previous test's window.
+    mod._PROBATION.clear()
     return mod
 
 
@@ -379,6 +382,7 @@ def test_a_good_probe_clears_the_gate(tmp_path, monkeypatch):
 def test_a_warn_probe_steps_the_ladder_up(tmp_path, monkeypatch):
     engine_mod = _open(tmp_path, monkeypatch)
     provider = _gate_provider(engine_mod)
+    monkeypatch.setattr(engine_mod, "probe_interval_seconds", lambda: 300.0)
     engine_mod.gate_hold(provider, "quota_window", jitter=0)
     assert engine_mod.gate_reading(provider)["level"] == 0
     reading = engine_mod.gate_reading(provider)
@@ -440,10 +444,207 @@ def test_auth_billing_and_unknown_never_open_a_gate(tmp_path, monkeypatch):
 def test_gate_status_reports_the_step_and_next_probe(tmp_path, monkeypatch):
     engine_mod = _open(tmp_path, monkeypatch)
     provider = _gate_provider(engine_mod)
+    monkeypatch.setattr(engine_mod, "probe_interval_seconds", lambda: 300.0)
     engine_mod.gate_hold(provider, "quota_window", jitter=0)
     status = engine_mod.gate_status(provider)
     assert status["state"] == "cooling"
     assert status["cooling"] is True
     assert status["level"] == 0
     assert status["reason"] == "quota_window"
-    assert status["next_probe_unix"] == engine_mod.gate_next_at(provider)
+    # 下一次探活是一个探活间隔，不是这一档退避。
+    assert status["next_probe_unix"] - time.time() == pytest.approx(300, abs=10)
+    assert status["probation_until_unix"] == 0.0
+
+
+def _queued_file(engine_mod, tmp_path, name: str, text: str = "甲在南港工作多年。") -> str:
+    path = tmp_path / "scan" / name
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    opened = engine_mod.ingest_file(path)
+    engine_mod.db().execute(
+        "UPDATE queue SET state='queued', next_at=NULL, leased_until=NULL WHERE source_id=?",
+        (opened["id"],),
+    )
+    engine_mod.db().commit()
+    return opened["id"]
+
+
+# F — the ladder is a setting, not a constant in the code.
+def test_the_ladder_comes_from_settings(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    engine_mod.set_setting("gate_quota_steps", "10,20")
+    engine_mod.db().commit()
+    assert engine_mod.quota_gate_steps() == (10, 20)
+
+    before = time.time()
+    first = engine_mod.gate_hold("lp", "quota_window", jitter=0)
+    assert first["until_unix"] - before == pytest.approx(10, abs=1)
+    second = engine_mod.gate_hold("lp", "quota_window", jitter=0)
+    assert second["until_unix"] - before == pytest.approx(20, abs=1)
+    third = engine_mod.gate_hold("lp", "quota_window", jitter=0)
+    assert third["level"] == 1
+    assert third["until_unix"] - before == pytest.approx(20, abs=1)
+
+    # 把阶梯改短后，旧的长档位必须夹回来，不是 IndexError。
+    engine_mod.set_setting("gate_quota_steps", "30")
+    engine_mod.db().commit()
+    clamped = engine_mod.gate_hold("lp", "quota_window", jitter=0)
+    assert clamped["level"] == 0
+    assert clamped["until_unix"] - time.time() == pytest.approx(30, abs=1)
+
+
+# F — the flat throttle wait is a setting too.
+def test_the_throttle_wait_comes_from_settings(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    engine_mod.set_setting("gate_throttle_seconds", "5")
+    engine_mod.db().commit()
+    before = time.time()
+    reading = engine_mod.gate_hold("th", "throttle", jitter=0)
+    assert reading["until_unix"] - before == pytest.approx(5, abs=1)
+    assert engine_mod.throttle_gate_seconds() == 5
+
+
+# G — a reopened quota window is watched; a plain throttle is not.
+def test_a_reopened_quota_window_is_watched(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    provider = _gate_provider(engine_mod)
+    engine_mod.set_setting("gate_probation_units", "1")
+    engine_mod.set_setting("gate_probation_seconds", "600")
+    engine_mod.db().commit()
+
+    engine_mod.gate_hold(provider, "throttle", jitter=0)
+    engine_mod.gate_clear(provider)
+    assert engine_mod.probation_until(provider) == 0.0
+
+    unit = _queued_file(engine_mod, tmp_path, "看着.md")
+    engine_mod.gate_hold(provider, "quota_window", jitter=0)
+    engine_mod.gate_clear(provider)
+    assert engine_mod.probation_until(provider) > time.time()
+    assert engine_mod.gate_status(provider)["probation_until_unix"] > 0
+
+    assert engine_mod.lease_next()["source_id"] == unit
+    assert engine_mod.lease_next() is None  # 已经在跑一条，第二条等
+    engine_mod.db().execute(
+        "UPDATE queue SET state='queued', leased_until=NULL WHERE source_id=?", (unit,)
+    )
+    engine_mod.db().commit()
+    assert engine_mod.lease_next() is not None  # 前一条跑完了才接上
+
+    engine_mod._PROBATION[provider] = (time.time() - 1, 1)
+    assert engine_mod._probation_blocks(engine_mod.db(), provider) is False
+    assert engine_mod.probation_until(provider) == 0.0
+
+
+# G — zero turns the watch off, so the behaviour is exactly the old one.
+def test_probation_zero_turns_the_watch_off(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    provider = _gate_provider(engine_mod)
+    engine_mod.set_setting("gate_probation_units", "0")
+    engine_mod.db().commit()
+    engine_mod.gate_hold(provider, "quota_window", jitter=0)
+    engine_mod.gate_clear(provider)
+    assert engine_mod.probation_until(provider) == 0.0
+
+
+# H — the distill header says which host and which conversation the words came from.
+def test_the_header_carries_the_host_and_the_session(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    from rogmem.prompts import distill_header, speaker_for
+
+    row = {
+        "id": "src-1",
+        "kind": "user",
+        "agent_name": "WANGS-MacBook-Pro-408 · Cursor",
+        "session_id": "8e6549b8-328c-485f-a2dd-298695e32cac",
+        "event_at": "2026-11-17T02:00:00+00:00",
+        "event_basis": "utterance",
+    }
+    inject = engine_mod._prompt_injection(row)
+    assert inject["agent_name"] == "WANGS-MacBook-Pro-408 · Cursor"
+    assert inject["session_id"] == "8e6549b8-328c-485f-a2dd-298695e32cac"
+
+    header = distill_header(
+        material_kind="会话",
+        speaker=speaker_for("user"),
+        owner_name="",
+        owner_aliases="",
+        source_id="src-1",
+        filename="",
+        agent_name=inject["agent_name"],
+        session_id=inject["session_id"],
+    )
+    assert "来自哪个智能体：WANGS-MacBook-Pro-408 · Cursor" in header
+    assert "会话：8e6549b8-328c-485f-a2dd-298695e32cac" in header
+
+    # 没有这两个值时不留空行。
+    bare = distill_header(
+        material_kind="会话", speaker=speaker_for("user"), owner_name="", owner_aliases="",
+        source_id="src-1", filename="",
+    )
+    assert "来自哪个智能体" not in bare
+    assert "会话：" not in bare
+
+
+# H — the merge prompt says the same thing about where the material came from.
+def test_the_merge_prompt_carries_the_host_and_the_session():
+    from rogmem.prompts import merge_user
+
+    text = merge_user(
+        "旧页", "新页", "原文",
+        page_name="记忆主人", page_type="人物",
+        agent_name="WANGS-MacBook-Pro-408 · Cursor",
+        session_id="8e6549b8-328c-485f-a2dd-298695e32cac",
+    )
+    assert "来自哪个智能体：WANGS-MacBook-Pro-408 · Cursor" in text
+    assert "会话：8e6549b8-328c-485f-a2dd-298695e32cac" in text
+    plain = merge_user("旧页", "新页", "原文", page_name="记忆主人", page_type="人物")
+    assert "来自哪个智能体" not in plain
+    assert "会话：" not in plain
+
+
+# I — the gate panel's fields save, echo back, and refuse bad input without changing anything.
+def test_pipeline_settings_carry_the_gate_and_concurrency(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    base = {"scan_interval": "60", "probe_interval": "60", "reconcile_hours": "3", "sweep_at": "03:00"}
+    saved = engine_mod.save_pipeline(
+        {
+            **base,
+            "gate_quota_steps": "30,60",
+            "gate_throttle_seconds": "5",
+            "gate_probation_units": "1",
+            "gate_probation_seconds": "120",
+            "distill_concurrency": "2",
+        }
+    )
+    assert saved["ok"] is True
+    assert saved["config"]["gate_quota_steps"] == "30,60"
+    assert saved["config"]["gate_throttle_seconds"] == "5"
+    assert saved["config"]["gate_probation_units"] == "1"
+    assert saved["config"]["gate_probation_seconds"] == "120"
+    assert saved["config"]["distill_concurrency"] == "2"
+    assert engine_mod.quota_gate_steps() == (30, 60)
+    assert engine_mod.throttle_gate_seconds() == 5
+    assert engine_mod.probation_units() == 1
+    assert engine_mod.probation_seconds() == 120
+    assert engine_mod.distill_concurrency() == 2
+
+    # 老调用方只给那四个键，照样过，而且不动闸门设置。
+    old = engine_mod.save_pipeline(base)
+    assert old["ok"] is True
+    assert engine_mod.quota_gate_steps() == (30, 60)
+
+    assert engine_mod.save_pipeline({**base, "gate_quota_steps": "abc"})["ok"] is False
+    assert engine_mod.save_pipeline({**base, "distill_concurrency": "99"})["ok"] is False
+    assert engine_mod.quota_gate_steps() == (30, 60)
+
+    # 这些键别的用例会当默认值读，别把这条用例的输入留成全局状态。
+    for key in (
+        "gate_quota_steps",
+        "gate_throttle_seconds",
+        "gate_probation_units",
+        "gate_probation_seconds",
+        "distill_concurrency",
+    ):
+        engine_mod.db().execute("DELETE FROM settings WHERE k=?", (key,))
+    engine_mod.db().commit()
+    assert engine_mod.distill_concurrency() == 3
