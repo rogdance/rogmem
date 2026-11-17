@@ -704,8 +704,8 @@ def _seed_owner_real_name(engine, real_name: str) -> None:
 
 def test_file_does_not_treat_a_possessive_name_as_the_owner(tmp_path, monkeypatch):
     engine = _engine(tmp_path, monkeypatch)
-    _seed_owner_real_name(engine, "林知远")
-    body = "林知远的同事喜欢在夜里骑行。"
+    _seed_owner_real_name(engine, "韩跑跑")
+    body = "韩跑跑的同事喜欢在夜里骑行。"
     source = _source(engine, "file", body, "file-colleague")
     data = engine._normalize_extract(
         {
@@ -725,8 +725,8 @@ def test_file_does_not_treat_a_possessive_name_as_the_owner(tmp_path, monkeypatc
 
 def test_file_names_the_owner_when_the_true_name_is_in_the_quote(tmp_path, monkeypatch):
     engine = _engine(tmp_path, monkeypatch)
-    _seed_owner_real_name(engine, "林知远")
-    body = "林知远喜欢在夜里骑行。"
+    _seed_owner_real_name(engine, "韩跑跑")
+    body = "韩跑跑喜欢在夜里骑行。"
     source = _source(engine, "file", body, "file-owner-name")
     data = engine._normalize_extract(
         {

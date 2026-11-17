@@ -11,6 +11,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
+from rogmem import activity
 from rogmem.closed_span import closed_hour_keys, hour_bounds, hour_slot_sql, open_tail, partial_prefix
 from rogmem.cost import buckets, span_bounds
 from rogmem.progress import STAGES, flow_states
@@ -789,6 +790,8 @@ def view(span: str = "24h", tab: str = "all", page: int = 1, now: datetime | Non
         "page_size": PAGE_SIZE,
         "total": total,
         "rows": page_rows,
+        # 队列行只是作业；系统另有一类不写 queue 的模型工作。这条读数出自同一个收口。
+        "activity": activity.snapshot(),
         "counts": {
             "all": queued_tasks + totals["leased"] + totals["failed"] + totals["other"] + done_tasks,
             "done": done_tasks,

@@ -39,11 +39,11 @@ def _queue_file(engine, source_id: str, body: str, chunks: list[tuple[int, str]]
     con.commit()
 
 
-BODY = "云岚甲在北窗实验室任职，后来转到南港书院。林知远在腾讯负责本地化团队，后来业务移交给兄弟团队。"
+BODY = "云岚甲在北窗实验室任职，后来转到南港书院。韩跑跑在腾讯负责本地化团队，后来业务移交给兄弟团队。"
 CHUNKS = [
     (0, "云岚甲在北窗实验室任职，后来转到南港书院。"),
     (1, "后来业务移交给兄弟团队。"),
-    (2, "林知远在腾讯负责本地化团队，后来业务移交给兄弟团队。"),
+    (2, "韩跑跑在腾讯负责本地化团队，后来业务移交给兄弟团队。"),
 ]
 HITS = [{"id": "c-yunlan", "name": "云岚甲", "type": "人物", "aliases": ["测试员甲"]}]
 
@@ -75,9 +75,9 @@ def test_a_fact_from_the_whole_file_lands_once(tmp_path, monkeypatch):
         return {
             "crystals": [
                 {
-                    "name": "林知远",
+                    "name": "韩跑跑",
                     "type": "人物",
-                    "facts": [{"claim": "在腾讯负责本地化团队", "evidence": "林知远在腾讯负责本地化团队，后来业务移交给兄弟团队。"}],
+                    "facts": [{"claim": "在腾讯负责本地化团队", "evidence": "韩跑跑在腾讯负责本地化团队，后来业务移交给兄弟团队。"}],
                 }
             ]
         }

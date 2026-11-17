@@ -153,10 +153,10 @@ def propose(source: str) -> dict:
         field("性别", "女", "裁决无效性别是女")
     if "再裁决成更新性别是女" in source:
         field("性别", "女", "再裁决成更新性别是女")
-    if "我叫林知远" in source:
-        field("真名", "林知远", "我叫林知远")
-    if "真名是林知远" in source:
-        field("真名", "林知远", "真名是林知远")
+    if "我叫韩跑跑" in source:
+        field("真名", "韩跑跑", "我叫韩跑跑")
+    if "真名是韩跑跑" in source:
+        field("真名", "韩跑跑", "真名是韩跑跑")
     if "真名是李四" in source:
         field("真名", "李四", "真名是李四")
     if "所属组织是腾讯" in source:

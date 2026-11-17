@@ -74,10 +74,10 @@ def _write(kind: str, field: str, value: str, quote: str, event_at: str, extra: 
 def _recall_name() -> bool:
     from rogmem import engine
 
-    _write("user", "真名", "林知远", "林知远", "2026-10-24T01:00:00+00:00", "我叫")
-    found = engine.search("林知远")
+    _write("user", "真名", "韩跑跑", "韩跑跑", "2026-10-24T01:00:00+00:00", "我叫")
+    found = engine.search("韩跑跑")
     blob = json.dumps(found, ensure_ascii=False)
-    return "林知远" in blob and bool(found.get("crystals"))
+    return "韩跑跑" in blob and bool(found.get("crystals"))
 
 
 def _recall_raw() -> bool:

@@ -30,7 +30,7 @@ def test_owner_appellation_stays_as_written_and_does_not_lock_the_page(tmp_path,
     detail = engine.crystal_detail("owner")
     assert detail["summary"]["真名"] == "尚无来源"
     assert detail["summary"]["别名"] == "尚无来源"
-    assert "林知远" not in engine.format_crystal_article(detail)
+    assert "韩跑跑" not in engine.format_crystal_article(detail)
     assert [row["note"] for row in engine.revisions("owner")].count("预写真名与别名") == 0
     saved = engine.save_basic(
         {"sketch_char_limit": "3500", "owner_appellation": "  云岚甲、甲哥   lin  "}

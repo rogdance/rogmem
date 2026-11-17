@@ -29,7 +29,7 @@ def test_month_ranges_still_count_as_career():
 
 
 BODY = """# 简历
-林知远
+韩跑跑
 ## 经历
 2018-2020 甲公司 工程师 支付核心
 2020-2023 乙集团 高级工程师
@@ -77,7 +77,7 @@ def test_unit_chunks_do_not_expand_when_nothing_overlaps():
 
 
 def test_absent_verdict_is_not_reported_as_synthetic_none():
-    items = [{"op": "field", "field": "真名", "value": "林知远", "quote": "林知远", "crystal": "记忆主人"}]
+    items = [{"op": "field", "field": "真名", "value": "韩跑跑", "quote": "韩跑跑", "crystal": "记忆主人"}]
     sheet = [{"crystal": "记忆主人", "type": "人物", "entries": [
         {"kind": "chapter", "key": "代表作品", "verdict": "写入", "value": "x", "quote": "x"},
     ]}]
@@ -87,7 +87,7 @@ def test_absent_verdict_is_not_reported_as_synthetic_none():
 
 
 def test_forbid_synthetic_none_when_sheet_missing_entries_filled_as_none():
-    items = [{"op": "field", "field": "真名", "value": "林知远", "quote": "林知远", "crystal": "记忆主人"}]
+    items = [{"op": "field", "field": "真名", "value": "韩跑跑", "quote": "韩跑跑", "crystal": "记忆主人"}]
     sheet = [{"crystal": "记忆主人", "type": "人物", "entries": [
         {"kind": "chapter", "key": "事业经历", "verdict": "无", "value": "", "quote": ""},
         {"kind": "chapter", "key": "教育背景", "verdict": "无", "value": "", "quote": ""},
@@ -98,7 +98,7 @@ def test_forbid_synthetic_none_when_sheet_missing_entries_filled_as_none():
 
 def test_field_only_publish_rejected_under_coverage():
     items = [
-        {"op": "field", "field": "真名", "value": "林知远", "quote": "林知远", "crystal": "记忆主人"},
+        {"op": "field", "field": "真名", "value": "韩跑跑", "quote": "韩跑跑", "crystal": "记忆主人"},
         {"op": "field", "field": "现职", "value": "工程师", "quote": "腾讯 工程师", "crystal": "记忆主人"},
     ]
     with pytest.raises(RuntimeError, match="覆盖|残段|事业经历|教育"):
@@ -239,7 +239,7 @@ def test_mark_chunks_cited_never_updates_without_seq(tmp_path, monkeypatch):
 def test_field_only_forced_write_is_not_coverage_complete(tmp_path, monkeypatch):
     engine = _open_engine(tmp_path, monkeypatch)
     con = _insert_source(engine, "partial-src", BODY, [(0, CAREER_CHUNK), (1, EDU_CHUNK)])
-    engine._add_statement(con, "owner", "真名", None, "林知远", "林知远", "partial-src", "user", "written", None)
+    engine._add_statement(con, "owner", "真名", None, "韩跑跑", "韩跑跑", "partial-src", "user", "written", None)
     con.commit()
     state = coverage_state_for_source(con, "partial-src", BODY)
     assert state == "partial"

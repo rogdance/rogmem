@@ -194,6 +194,28 @@ def test_fleet_lists_every_device_and_marks_only_the_viewer(tmp_path, monkeypatc
     assert engine.db().execute("SELECT status FROM agents WHERE id=?", (stopped,)).fetchone()["status"] == "启用"
 
 
+def test_a_core_read_is_counted_through_the_tool(tmp_path, monkeypatch):
+    """core 走 run_in_executor，那条线程没有请求上下文；计数必须仍在工具这一层发出，
+    否则宿主列表里每次开场都要读的核心记忆一次都不会被记上。"""
+    import asyncio
+
+    engine = _open(tmp_path, monkeypatch)
+    import rogmem.app as app
+
+    agent_id, _public = _claim(engine, "dev-trae", "TraeMac", "Trae")
+    assert engine.db().execute("SELECT call_count FROM agents WHERE id=?", (agent_id,)).fetchone()["call_count"] == 0
+
+    async def drive():
+        token = app.CURRENT.set({"id": agent_id})
+        try:
+            return await app.core(budget=0)
+        finally:
+            app.CURRENT.reset(token)
+
+    assert json.loads(asyncio.run(drive()))
+    assert engine.db().execute("SELECT call_count FROM agents WHERE id=?", (agent_id,)).fetchone()["call_count"] == 1
+
+
 def test_access_status_joins_the_host_list():
     from rogmem.ui import hosts_page
 
@@ -881,10 +903,11 @@ def _memory_tools() -> tuple[set[str], set[str]]:
     reads = set()
     writes = set()
     for node in tree.body:
-        if not isinstance(node, ast.FunctionDef):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        called = {item.func.id for item in ast.walk(node) if isinstance(item, ast.Call) and isinstance(item.func, ast.Name)}
-        if "_count_memory_read" in called:
+        # 计数器可以直接调用，也可以交给 to_thread 去跑；异步工具不能因此漏掉。
+        used = {item.id for item in ast.walk(node) if isinstance(item, ast.Name)}
+        if "_count_memory_read" in used:
             reads.add(node.name)
         elif node.name in {"submit_turn", "guide", "submit_draft"}:
             writes.add(node.name)
