@@ -9608,7 +9608,7 @@ def cost_page(board: dict, providers: list[dict] | None = None, prices: dict | N
 <svg id="ov-svg" role="img" aria-label="成本趋势" aria-describedby="ov-caption" aria-roledescription="柱状图" tabindex="0"></svg>
 <div id="ov-tip" class="ov-tip" hidden role="status" aria-live="polite"></div>
 <figcaption id="ov-caption" class="ov-caption{working}">{esc(caption_text)}</figcaption>
-{_avail_legend(avail)}
+{_avail_legend()}
 </figure>
 </section>
 <section class="panel" id="calls">
@@ -10845,22 +10845,11 @@ def _chart_availability(series: list, window: dict | None) -> dict:
     return for_chart(series if isinstance(series, list) else [], window if isinstance(window, dict) else {})
 
 
-def _avail_legend(avail: dict) -> str:
-    names: list[str] = []
-    for bucket in avail.get("buckets") or []:
-        for item in bucket.get("who") or []:
-            name = str(item.get("name") or "")
-            if name and name not in names:
-                names.append(name)
-    if len(names) == 1:
-        lead = esc(names[0]) + " 的探活色块在时间刻度下方，对齐每个时段。"
-    else:
-        lead = "色块在时间刻度下方，对齐每个时段，表示当时正在调用的模型。"
+def _avail_legend() -> str:
     return (
         "<p class='ov-avail-legend'>"
-        + lead
-        + "绿是可用，黄是降级，红是不可用，颜色越深表示这种状态占这一格越久。"
-        "两种异常同时出现时，色块用更久的那一种。空心是这一格还没有探活记录。</p>"
+        "模型探活状态：位于时间刻度下方。绿是可用，黄是降级，红不可用，颜色越深表示该状态占比越久。"
+        "两种异常同时出现时，色块用更久的那一种。空心是这格暂无探活记录。</p>"
     )
 
 
@@ -10947,7 +10936,7 @@ def queue_page(board: dict) -> str:
 <svg id="q-svg" role="img" aria-label="蒸馏完成走势" aria-describedby="q-caption" aria-roledescription="柱状图" tabindex="0"></svg>
 <div id="q-tip" class="ov-tip" hidden role="status" aria-live="polite"></div>
 <figcaption id="q-caption" class="ov-caption">所选时段里完成的任务 · 北京时间 · 悬停或方向键查看。{untimed_note}此刻进行中 {int(summary.get('running') or 0)} 项，未跑完 {int(summary.get('stopped') or 0)} 项。</figcaption>
-{_avail_legend(avail)}
+{_avail_legend()}
 </figure>
 </section>
 <section class="panel" id="queue-tasks">

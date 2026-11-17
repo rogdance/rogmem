@@ -334,7 +334,7 @@ def test_both_pages_carry_the_same_probe_mix(tmp_path, monkeypatch):
     cost = _payload(cost_page(_cost_board(series, window), [], {}), "COST")
     queue = _payload(queue_page(_queue_board(series, window)), "QUEUE")
     assert cost["availability"]["buckets"] == queue["availability"]["buckets"]
-    assert "占这一格越久" in cost_page(_cost_board(series, window), [], {})
+    assert "占比越久" in cost_page(_cost_board(series, window), [], {})
     assert "空心" in queue_page(_queue_board(series, window))
     assert "__AVAIL_JS__" not in cost_page(_cost_board([], window), [], {})
 
