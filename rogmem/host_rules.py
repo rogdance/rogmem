@@ -5,9 +5,30 @@ from __future__ import annotations
 from pathlib import Path
 
 RULES_REV = 2
-# Bump when anything the host installs changes: rule_body below, or rogmem/host_hook.py.
-# The management page offers a one-shot prompt to refresh installed hosts when it moves.
-HOST_BUNDLE_REV = 2
+
+
+def _bundle_rev() -> str:
+    """What the host installs, as a content id.
+
+    Any change to the rule text or to the hook moves it, so 宿主管理 can offer a refresh
+    without anyone remembering to bump a number by hand. The wheel ships both files, so the
+    server and an up-to-date client compute the same id; a stale client computes its own.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    here = Path(__file__).resolve().parent
+    for name in ("host_rules.py", "host_hook.py"):
+        try:
+            digest.update(name.encode("utf-8"))
+            digest.update((here / name).read_bytes())
+        except OSError:
+            return str(RULES_REV)
+    return digest.hexdigest()[:12]
+
+
+# The host-side plugin version. Content-addressed on purpose: it moves by itself.
+HOST_BUNDLE_REV = _bundle_rev()
 MARKER_START = "<!-- rogmem-rule:start -->"
 MARKER_END = "<!-- rogmem-rule:end -->"
 BLOCK_START = f"【rogmem 规则版本：{RULES_REV}】"

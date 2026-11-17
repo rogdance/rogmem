@@ -297,8 +297,8 @@ def test_host_management_offers_a_plugin_update_prompt():
     assert "更新宿主插件" in page
     assert "__HOST_BUNDLE_REV__" not in page
     assert "__UPDATE_TEMPLATE__" not in page
-    assert f"var bundleRev = {HOST_BUNDLE_REV};" in page
-    assert f"V{HOST_BUNDLE_REV}" in page
+    assert f"var bundleRev = {json.dumps(HOST_BUNDLE_REV)};" in page
+    assert str(HOST_BUNDLE_REV) in page
     assert "rogmem-host-bundle-seen" in page
     assert "python -m rogmem hosts update --confirm" in page
     # 更新提示不能作为 <p class='note'> 落在接入弹窗之前，保持既有版式约定

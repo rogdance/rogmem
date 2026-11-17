@@ -5191,7 +5191,7 @@ _HOST_FLEET_SCRIPT = r"""
   var button = document.getElementById("add-host");
   var modal = document.getElementById("add-host-modal");
   var status = document.getElementById("add-host-status");
-  function fallbackCopy(text, done) {
+  function fallbackCopy(text, done, statusEl) {
     var area = document.createElement("textarea");
     area.value = text;
     document.body.appendChild(area);
@@ -5200,7 +5200,7 @@ _HOST_FLEET_SCRIPT = r"""
       document.execCommand("copy");
       done();
     } catch (err) {
-      status.textContent = "没有复制成功，请再试一次。";
+      (statusEl || status).textContent = "没有复制成功，请再试一次。";
     }
     area.remove();
   }
@@ -5275,9 +5275,9 @@ _HOST_FLEET_SCRIPT = r"""
         var text = updatePrompt.value || fillUpdate();
         var done = function () { updateCopy.textContent = "已复制"; markBundleSeen(); };
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(done).catch(function () { fallbackCopy(text, done); });
+          navigator.clipboard.writeText(text).then(done).catch(function () { fallbackCopy(text, done, updateStatusEl); });
         } else {
-          fallbackCopy(text, done);
+          fallbackCopy(text, done, updateStatusEl);
         }
       };
     }
@@ -5822,7 +5822,7 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
 <button type="button" id="update-hosts" class="quiet">更新宿主插件</button>
 <button type="button" id="add-host" class="row-end">添加宿主</button>
 </form>
-<div class="note" id="update-hosts-note" hidden>宿主端插件有新版本（V{HOST_BUNDLE_REV}）。点「更新宿主插件」，复制一段提示词贴给本机任意一个已安装的宿主，就能把本机所有已支持的宿主一起更新。</div>
+<div class="note" id="update-hosts-note" hidden>宿主端插件有新版本（{HOST_BUNDLE_REV}）。点「更新宿主插件」，复制一段提示词贴给本机任意一个已安装的宿主，就能把本机所有已支持的宿主一起更新。</div>
 <div class="host-fleet-wrap" style="overflow-x:auto;width:100%;max-width:calc(100vw - 2rem);box-sizing:border-box;-webkit-overflow-scrolling:touch;"><table id="host-fleet" data-viewer="{viewer}" style="min-width:860px;"><tr>{_host_head()}</tr>{''.join(fleet_rows)}</table></div>
 <div id="add-host-modal" class="modal" hidden>
 <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="add-host-title">
@@ -5843,7 +5843,7 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
 <p><button type="button" id="update-hosts-copy">复制提示</button> <button type="button" class="quiet" id="update-hosts-close">关闭</button></p>
 <p id="update-hosts-status" class="note"></p>
 </div></div>
-{_HOST_FLEET_SCRIPT.replace("__ORIGIN__", _LOCAL_INSTALLER).replace("__PROMPT_TEMPLATE__", prompt_json).replace("__HOST_BUNDLE_REV__", str(HOST_BUNDLE_REV)).replace("__UPDATE_TEMPLATE__", update_json)}"""
+{_HOST_FLEET_SCRIPT.replace("__ORIGIN__", _LOCAL_INSTALLER).replace("__PROMPT_TEMPLATE__", prompt_json).replace("__HOST_BUNDLE_REV__", json.dumps(HOST_BUNDLE_REV)).replace("__UPDATE_TEMPLATE__", update_json)}"""
     return page("宿主管理", "hosts", fleet_html)
 
 

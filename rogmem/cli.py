@@ -831,6 +831,7 @@ def hosts_status(args: argparse.Namespace) -> int:
             True,
             device_id=identity["device_id"],
             device_name=identity["device_name"],
+            bundle_rev=inst.installed_bundle_rev(home),
             hosts=inst.inspect_hosts(home),
         )
     )

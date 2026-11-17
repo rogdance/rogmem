@@ -1140,6 +1140,17 @@ def refresh_host_bundle(home: Path, programs: list[str] | None = None, allow_rea
     }
 
 
+def installed_bundle_rev(home: Path) -> str:
+    """The host-side plugin rev this computer last installed. Empty when it never refreshed."""
+    try:
+        loaded = json.loads((Path(home) / ".rogmem" / "host-bundle.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(loaded, dict):
+        return ""
+    return str(loaded.get("rev") or "")
+
+
 def onboard_prompt(secret: str) -> str:
     """One prompt for any installed host. The secret enrolls every installed program on this computer."""
     from rogmem.onboard import onboard_prompt as build

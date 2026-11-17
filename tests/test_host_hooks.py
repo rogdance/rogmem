@@ -727,7 +727,7 @@ def test_an_unenrolled_host_repeats_nothing(tmp_path, monkeypatch):
 
 
 def test_refresh_host_bundle_rewrites_rules_and_hook(tmp_path):
-    from installer.rogmem_installer import refresh_host_bundle
+    from installer.rogmem_installer import installed_bundle_rev, refresh_host_bundle
     from rogmem.host_rules import HOST_BUNDLE_REV
 
     home = _home(tmp_path)
@@ -742,7 +742,16 @@ def test_refresh_host_bundle_rewrites_rules_and_hook(tmp_path):
     marker = json.loads((home / ".rogmem" / "host-bundle.json").read_text(encoding="utf-8"))
     assert marker["rev"] == HOST_BUNDLE_REV
     assert set(marker["programs"]) == {"Cursor", "Hermes", "Codex"}
+    assert installed_bundle_rev(home) == HOST_BUNDLE_REV
     assert refresh_host_bundle(Path.home())["ok"] is False
+
+
+def test_host_bundle_rev_is_content_addressed():
+    from rogmem.host_rules import HOST_BUNDLE_REV, _bundle_rev
+
+    assert HOST_BUNDLE_REV == _bundle_rev()
+    assert len(HOST_BUNDLE_REV) == 12
+    assert all(ch in "0123456789abcdef" for ch in HOST_BUNDLE_REV)
 
 
 def test_hosts_update_command_rewrites_then_reports(tmp_path):
