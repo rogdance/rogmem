@@ -1462,7 +1462,6 @@ def off_loop(fn):
 
 def _run_core(budget: int, project: str, before: str) -> str:
     payload = engine.core_memory(engine.core_budget_for(budget), project, before=before)
-    _count_memory_read()
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -1471,12 +1470,16 @@ async def core(budget: int = 0, project: str = "", before: str = "") -> str:
     """装入历史包。budget 为 0 时用基础设置里的新会话字数。本对话已有成功返回时禁止再调，除非 before 是上次给出的续读位置。"""
     loop = asyncio.get_running_loop()
     try:
-        return await asyncio.wait_for(
+        result = await asyncio.wait_for(
             loop.run_in_executor(_TOOL_POOL, _run_core, budget, project, before),
             timeout=_CORE_DEADLINE,
         )
     except asyncio.TimeoutError as exc:
         raise RuntimeError("core timed out") from exc
+    # 读取计数靠请求上下文里的 CURRENT。run_in_executor 不带这个上下文，
+    # 所以计数改在工具这一层发出，走 to_thread：既拿到智能体，也不把写库压回事件循环。
+    await asyncio.to_thread(_count_memory_read)
+    return result
 
 
 @mcp.tool()

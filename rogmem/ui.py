@@ -2285,6 +2285,7 @@ code, kbd, pre, samp {{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, m
 .ov-figures .money {{ margin: 0; font-size: 22px; line-height: 1.4; font-weight: 600; letter-spacing: -0.3px; font-variant-numeric: tabular-nums; }}
 .ov-figures .is-secondary .money {{ color: var(--status-ink, var(--text-secondary)); font-weight: 500; }}
 .ov-split {{ margin: 6px 0 0; color: var(--text-muted); font-size: 13px; font-variant-numeric: tabular-nums; }}
+.ov-activity {{ margin: 0; padding: 10px 24px 14px; color: var(--text-muted); font-size: 13px; }}
 .ov-chart {{ position: relative; margin: 0; padding: 12px 24px 16px; border-top: 1px solid var(--border); }}
 .ov-chart svg {{ display: block; width: 100%; height: 244px; touch-action: manipulation; outline: none; }}
 .ov-chart svg:focus-visible {{ box-shadow: 0 0 0 2px var(--focus-color); border-radius: 4px; }}
@@ -9549,11 +9550,34 @@ def _avail_legend() -> str:
     )
 
 
+def _queue_activity_note(reading: dict) -> str:
+    """此刻有哪些模型调用在跑。
+
+    队列行只是蒸馏作业；向量补齐和词条整合不写队列，却同样在调模型。
+    这条读数出自模型的唯一收口，所以队列状态和成本明细不会再各说各话。
+    """
+
+    live = reading.get("open") or []
+    if live:
+        parts = "、".join(
+            f"{esc(str(item.get('worker') or ''))}（已 {max(0, int(item.get('seconds') or 0))} 秒）"
+            for item in live
+        )
+        return f"此刻在调用模型：{parts}。"
+    recent = reading.get("recent") or []
+    if recent:
+        head = recent[0]
+        worker = esc(str(head.get("worker") or ""))
+        return f"此刻没有模型调用；最近一次在 {max(0, int(head.get('ago') or 0))} 秒前（{worker}）。"
+    return "此刻没有模型调用。"
+
+
 def queue_page(board: dict) -> str:
     """队列状态。已完成跟着时段。排队中是此刻的队列。"""
 
     summary = board.get("summary") or {}
     counts = board.get("counts") or {}
+    activity_note = _queue_activity_note(board.get("activity") or {})
     untimed = int(summary.get("untimed_tasks") or 0)
     untimed_note = f"未标时间 {_grouped(untimed)} 项。" if untimed else ""
     span_tabs = []
@@ -9628,6 +9652,7 @@ def queue_page(board: dict) -> str:
 <div><p class="k">排队中</p><p class="money">{_grouped(summary.get('queued_tasks') or 0)} 项</p><p class="ov-split">{_grouped(summary.get('queued_chars') or 0)} 字</p></div>
 <div><p class="k">平均每小时</p><p class="money">{esc(_queue_rate(summary.get('per_hour_tasks')))} 项</p><p class="ov-split">{esc(_queue_rate(summary.get('per_hour_chars')))} 字</p></div>
 </div>
+<p class="ov-activity">{activity_note}</p>
 <figure class="ov-chart">
 <svg id="q-svg" role="img" aria-label="蒸馏完成走势" aria-describedby="q-caption" aria-roledescription="柱状图" tabindex="0"></svg>
 <div id="q-tip" class="ov-tip" hidden role="status" aria-live="polite"></div>

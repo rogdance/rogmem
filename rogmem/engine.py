@@ -1443,6 +1443,15 @@ def _remote_embed(texts: list[str]) -> list[list[float] | None]:
     return found
 
 
+def _track_activity():
+    """登记这次模型调用，供队列状态页回答「此刻在调用模型吗」。"""
+
+    from rogmem import activity
+    from rogmem.cost import current_worker
+
+    return activity.track(current_worker())
+
+
 @charging("向量嵌入")
 def _remote_embed_call(provider: dict, model: str, texts: list[str]) -> list[list[float] | None]:
     """One call. A rejected list is split; a single rejected text stays empty."""
@@ -1453,8 +1462,9 @@ def _remote_embed_call(provider: dict, model: str, texts: list[str]) -> list[lis
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + str(provider.get("api_key") or "")},
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = json.loads(resp.read().decode())
+        with _track_activity():
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = json.loads(resp.read().decode())
         _meter_chat(
             str(provider.get("base_url") or ""),
             model,
@@ -4837,8 +4847,9 @@ def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = 
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
     )
     try:
-        with urllib.request.urlopen(req, timeout=silence) as resp:
-            body = _read_completion(resp)
+        with _track_activity():
+            with urllib.request.urlopen(req, timeout=silence) as resp:
+                body = _read_completion(resp)
     except urllib.error.HTTPError as exc:
         if exc.code in {401, 403}:
             raise AuthPause("外部模型鉴权失败") from exc
