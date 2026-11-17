@@ -38,6 +38,35 @@ def test_model_page_names_the_workers():
     assert ">蒸馏<" not in html and "当前蒸馏" not in html
 
 
+def test_the_pipeline_page_carries_the_gate_knobs():
+    """闸门的每个数都要能在页面上改；表单必须把它们一起提交，否则保存等于没改。"""
+    from rogmem.ui import pipeline_page
+
+    schedule = {
+        "scan_interval": "60",
+        "probe_interval": "60",
+        "reconcile_hours": "3",
+        "sweep_at": "03:00",
+        "gate_quota_steps": "300,900,1800,3600,7200,18000",
+        "gate_throttle_seconds": "60",
+        "gate_probation_units": "2",
+        "gate_probation_seconds": "300",
+        "distill_concurrency": "3",
+    }
+    html = pipeline_page([], {}, {"source": "none"}, schedule)
+    for label, name, value in (
+        ("供应商探活", "probe_interval", "60"),
+        ("额度阶梯", "gate_quota_steps", "300,900,1800,3600,7200,18000"),
+        ("限流等待", "gate_throttle_seconds", "60"),
+        ("探活后限流条数", "gate_probation_units", "2"),
+        ("探活后限流时长", "gate_probation_seconds", "300"),
+        ("蒸馏并发", "distill_concurrency", "3"),
+    ):
+        assert label in html
+        assert f'name="{name}" value="{value}"' in html
+        assert f"{name}:this.{name}.value" in html
+
+
 def test_worker_prompts_do_not_dump_a_form():
     prompts = worker_prompts(sketch_limit=3500)
     blob = "\n".join(prompts.values())

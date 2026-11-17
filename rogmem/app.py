@@ -1814,6 +1814,29 @@ def _poll_seconds() -> float:
     return float(os.environ.get("ROGMEM_POLL", "0.2"))
 
 
+# The console may change the concurrency while the workers are already running, and
+# threads are spawned once. So the live limit is an admission count held around one
+# model call, not a thread count: a worker that finds no slot waits a tick and looks again.
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE_WORKERS = 0
+
+
+def _admit_distill(limit: int) -> bool:
+    """Take one running slot. False means this worker waits a tick."""
+    global _ACTIVE_WORKERS
+    with _ACTIVE_LOCK:
+        if _ACTIVE_WORKERS >= max(1, int(limit)):
+            return False
+        _ACTIVE_WORKERS += 1
+        return True
+
+
+def _release_distill() -> None:
+    global _ACTIVE_WORKERS
+    with _ACTIVE_LOCK:
+        _ACTIVE_WORKERS = max(0, _ACTIVE_WORKERS - 1)
+
+
 def _distill_loop(stop: threading.Event | None = None) -> None:
     """One unit per round, and always hand the interpreter back between rounds.
 
@@ -1822,15 +1845,21 @@ def _distill_loop(stop: threading.Event | None = None) -> None:
     re-taking engine.LOCK, and every request thread queued up behind it until
     the whole console looked hung. One unit is one model call, so pausing like
     the probe and reconcile loops do costs nothing worth having.
+
+    The workers are spawned once, so a concurrency changed in the console is an
+    admission count, not a thread count: lowering it takes effect on the next round.
     """
 
     while stop is None or not stop.is_set():
-        try:
-            engine.pump_one()
-        except Exception as exc:
-            # A fault that one unit cannot survive must not take the worker with it: a
-            # silent thread death drops concurrency from three to two and nobody is told.
-            print(f"ROGMEM_DISTILL {type(exc).__name__} {exc}", flush=True)
+        if _admit_distill(engine.distill_concurrency()):
+            try:
+                engine.pump_one()
+            except Exception as exc:
+                # A fault that one unit cannot survive must not take the worker with it: a
+                # silent thread death drops concurrency from three to two and nobody is told.
+                print(f"ROGMEM_DISTILL {type(exc).__name__} {exc}", flush=True)
+            finally:
+                _release_distill()
         if stop is None:
             time.sleep(_poll_seconds())
         elif stop.wait(_poll_seconds()):

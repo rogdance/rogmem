@@ -1197,9 +1197,23 @@ def embed_threads() -> int:
     return max(1, min(cores, int(cores * machine_budget())))
 
 
-def distill_concurrency() -> int:
-    """How many distill units may run at once. 1 restores the old serial worker."""
-    raw = (os.environ.get("ROGMEM_DISTILL_CONCURRENCY") or "3").strip()
+def distill_concurrency(*, offline: bool = False) -> int:
+    """How many distill units may run at once. 1 restores the old serial worker.
+
+    Settings first so the console can change it without a rebuild; the environment
+    stays as the fallback for a deployment that only has env to speak with.
+
+    ``offline`` is for the liveness answer, which promises not to touch the database:
+    a locked or slow database must not be able to make /healthz wait.
+    """
+    raw = ""
+    if not offline:
+        try:
+            raw = (get_setting("distill_concurrency") or "").strip()
+        except Exception:
+            raw = ""
+    if not raw:
+        raw = (os.environ.get("ROGMEM_DISTILL_CONCURRENCY") or "3").strip()
     try:
         n = int(raw)
     except ValueError:
@@ -1265,7 +1279,7 @@ def health_snapshot() -> dict:
         "embed": _EMBED,
         "scan": str(_SCAN or ""),
         "password_ready": _PASSWORD_READY,
-        "distill_concurrency": distill_concurrency(),
+        "distill_concurrency": distill_concurrency(offline=True),
         "distill_leased": 0,
     }
 
@@ -3420,6 +3434,8 @@ def lease_next() -> dict | None:
         provider_id = _distill_provider_id()
         if provider_id and gate_cooling(provider_id):
             return None
+        if provider_id and _probation_blocks(con, provider_id):
+            return None
         _reclaim_expired(con, now)
         candidates, units = _schedule(con, now)
         picked, streak = choose_next(
@@ -5223,6 +5239,11 @@ def _prompt_injection(source=None, **overrides) -> dict:
         "material_kind": label,
         "project_ref": ref,
         "source_id": str(overrides.get("source_id") or _source_id(source) or ""),
+        # Which host sent this, and which conversation it came out of. Both are already on
+        # the source row; carrying them costs one column read and tells the model where the
+        # words it is reading actually came from.
+        "agent_name": str(overrides.get("agent_name") or _source_column(source, "agent_name") or ""),
+        "session_id": str(overrides.get("session_id") or _source_column(source, "session_id") or ""),
         "event_at": event_at,
         "ingested_at": ingested_at,
         "event_basis": event_basis,
@@ -6137,6 +6158,8 @@ def _llm_draft(
     ingested_at: str = "",
     event_basis: str = "",
     owner_appellation: str | None = None,
+    agent_name: str = "",
+    session_id: str = "",
 ) -> dict | None:
     """Call approved Draft when a distill target exists.
 
@@ -6167,6 +6190,8 @@ def _llm_draft(
         ingested_at=ingested_at,
         event_basis=event_basis,
         owner_appellation=owner_appellation,
+        agent_name=agent_name,
+        session_id=session_id,
     )
     context = _distill_known_pages(kind, project_ref)
     user = header + (("\n\n" + context) if context else "") + "\n\n" + redact_text(text)
@@ -6221,6 +6246,8 @@ def _with_approved_draft(text: str, kind: str = "", **integrate_kw) -> dict:
                 "material_kind",
                 "project_ref",
                 "source_id",
+                "agent_name",
+                "session_id",
                 "event_at",
                 "ingested_at",
                 "event_basis",
@@ -7933,6 +7960,8 @@ def _merge_existing_page(
                     page_name=page_name,
                     page_type=page_type,
                     owner_appellation=_stored_owner_appellation(),
+                    agent_name=_source_column(source, "agent_name"),
+                    session_id=_source_column(source, "session_id"),
                 ),
             },
         ],
@@ -16112,20 +16141,35 @@ def _stamp_health(provider_id: str, result: dict) -> None:
 
 
 def probe_interval_seconds() -> float:
+    """How often a provider is checked. One small call, so this can be short.
+
+    The wait for a quota window is decided by the ladder, never by this clock: a window
+    can come back at any minute, and looking only once per rung turns a five-hour window
+    into a five-hour outage after the provider is already answering.
+    """
     raw = get_setting("probe_interval")
     if raw.strip().isdigit():
         return float(raw)
     try:
-        return float(os.environ.get("ROGMEM_PROVIDER_PROBE", "300"))
+        return float(os.environ.get("ROGMEM_PROVIDER_PROBE", str(PROBE_INTERVAL_DEFAULT)))
     except ValueError:
-        return 300.0
+        return float(PROBE_INTERVAL_DEFAULT)
 
 
 # The shared provider gate. One place answers "may this provider be called right now".
 # It lives in settings so a restart keeps the step the ladder reached.
+#
+# Every number below is a default that settings can override, because how a provider
+# meters a rolling window is the operator's to know and ours to guess.
 GATE_JITTER = 0.1
+PROBE_INTERVAL_DEFAULT = 60
 _THROTTLE_GATE_SECONDS = 60
 _QUOTA_GATE_STEPS = (300, 900, 1800, 3600, 7200, 18000)
+# A quota window that has just reopened is not proof the window has room: the probe is
+# one tiny call. Behind a reopened gate the line is held to this many units in flight
+# for this long, so three workers cannot spend a whole window on their first breath.
+PROBATION_UNITS_DEFAULT = 2
+PROBATION_SECONDS_DEFAULT = 300
 _GATE_OPEN = {
     "state": "open",
     "until_unix": 0.0,
@@ -16139,6 +16183,84 @@ _GATE_OPEN = {
 
 def _gate_key(provider_id: str) -> str:
     return f"provider_gate:{provider_id}"
+
+
+def _positive_int_setting(key: str, default: int, *, low: int, high: int) -> int:
+    """A number from settings, clamped. A blank or broken value is the default."""
+    try:
+        raw = (get_setting(key) or "").strip()
+    except Exception:
+        return default
+    if not raw.isdigit():
+        return default
+    return max(low, min(int(raw), high))
+
+
+def quota_gate_steps() -> tuple[int, ...]:
+    """The ladder a repeated quota window climbs, in seconds. Settings may replace it."""
+    try:
+        raw = (get_setting("gate_quota_steps") or "").strip()
+    except Exception:
+        raw = ""
+    if raw:
+        steps = tuple(
+            int(part)
+            for part in (piece.strip() for piece in raw.split(","))
+            if part.isdigit() and 1 <= int(part) <= 86400
+        )
+        if steps:
+            return steps
+    return _QUOTA_GATE_STEPS
+
+
+def throttle_gate_seconds() -> float:
+    """The flat wait for a plain 429. Also the time a quota reopen is watched."""
+    return float(_positive_int_setting("gate_throttle_seconds", _THROTTLE_GATE_SECONDS, low=1, high=86400))
+
+
+def probation_units() -> int:
+    """How many units may be in flight right after a quota window reopens. 0 turns it off."""
+    return _positive_int_setting("gate_probation_units", PROBATION_UNITS_DEFAULT, low=0, high=32)
+
+
+def probation_seconds() -> float:
+    return float(_positive_int_setting("gate_probation_seconds", PROBATION_SECONDS_DEFAULT, low=1, high=86400))
+
+
+"""provider_id → (deadline unix, units allowed in flight). Empty whenever no gate reopened."""
+_PROBATION: dict[str, tuple[float, int]] = {}
+
+
+def _arm_probation(provider_id: str, previous: dict) -> None:
+    """Watch a just-reopened quota window. Only a quota reopen arms it."""
+    if not provider_id or str(previous.get("reason") or "") != "quota_window":
+        return
+    units = probation_units()
+    if units <= 0:
+        _PROBATION.pop(provider_id, None)
+        return
+    _PROBATION[provider_id] = (time.time() + probation_seconds(), units)
+
+
+def _probation_blocks(con, provider_id: str) -> bool:
+    """True while a reopened provider already has its few units in flight.
+
+    Costs nothing when no gate has reopened: the empty dict is the whole check.
+    """
+    armed = _PROBATION.get(provider_id)
+    if not armed:
+        return False
+    until, units = armed
+    if time.time() >= until:
+        _PROBATION.pop(provider_id, None)
+        return False
+    inflight = con.execute("SELECT COUNT(*) AS n FROM queue WHERE state='leased'").fetchone()["n"]
+    return int(inflight or 0) >= units
+
+
+def probation_until(provider_id: str) -> float:
+    armed = _PROBATION.get(provider_id)
+    return float(armed[0]) if armed else 0.0
 
 
 def _distill_provider_id() -> str:
@@ -16246,6 +16368,8 @@ def gate_status(provider_id: str) -> dict:
         "code": reading["code"],
         "until_unix": float(reading["until_unix"]) if cooling else 0.0,
         "next_probe_unix": next_probe,
+        # After a quota reopen the line is watched: this is when that watch ends.
+        "probation_until_unix": probation_until(provider_id),
     }
 
 
@@ -16281,11 +16405,13 @@ def gate_hold(provider_id: str, reason: str, retry_after: float | None = None, c
         previous = gate_reading(provider_id)
         if reason == "throttle":
             level = 0
-            base = _THROTTLE_GATE_SECONDS
+            base = throttle_gate_seconds()
         else:
+            steps = quota_gate_steps()
             same = previous["state"] == "cooling" and previous["reason"] == "quota_window"
-            level = min(previous["level"] + 1, len(_QUOTA_GATE_STEPS) - 1) if same else 0
-            base = _QUOTA_GATE_STEPS[level]
+            # A ladder shortened in settings must clamp an old, longer step, not IndexError.
+            level = min(previous["level"] + 1, len(steps) - 1) if same else 0
+            base = float(steps[level])
         wait = float(retry_after) if retry_after and retry_after > 0 else base
         now = time.time()
         reading = {
@@ -16306,11 +16432,17 @@ def gate_hold(provider_id: str, reason: str, retry_after: float | None = None, c
 
 
 def gate_clear(provider_id: str) -> dict:
-    """A provider that answered clears its gate at once, with no step-down."""
+    """A provider that answered clears its gate at once, with no step-down.
+
+    A reopened quota window is watched for a while afterwards: the probe that opened it
+    used one tiny call, which says nothing about how much room the window has left.
+    """
+    previous = gate_reading(provider_id)
     reading = {**_GATE_OPEN, "at": utcnow()}
     with LOCK:
         set_setting(_gate_key(provider_id), json.dumps(reading, ensure_ascii=False))
         db().commit()
+    _arm_probation(provider_id, previous)
     return reading
 
 
@@ -16785,12 +16917,53 @@ def save_basic(values: dict) -> dict:
 def pipeline_config() -> dict:
     return {
         "scan_interval": get_setting("scan_interval") or "60",
-        "probe_interval": get_setting("probe_interval") or "300",
+        "probe_interval": get_setting("probe_interval") or str(PROBE_INTERVAL_DEFAULT),
         "reconcile_hours": get_setting("reconcile_hours") or "3",
         "sweep_at": get_setting("sweep_at") or "03:00",
         "thinking_distill": reasoning_level("distill"),
         "thinking_merge": reasoning_level("merge"),
+        # The gate's own numbers. How a provider meters a rolling window is the
+        # operator's to know, so none of these is only a constant in the code.
+        "gate_quota_steps": ",".join(str(step) for step in quota_gate_steps()),
+        "gate_throttle_seconds": str(int(throttle_gate_seconds())),
+        "gate_probation_units": str(probation_units()),
+        "gate_probation_seconds": str(int(probation_seconds())),
+        "distill_concurrency": str(distill_concurrency()),
     }
+
+
+# The four original jobs stay required so an older caller keeps working; everything
+# the gate panel adds is optional and a blank field means "leave it as it is".
+def _checked_pipeline_extras(values: dict) -> tuple[dict, str]:
+    """Validate the gate and concurrency fields. Blank is skipped, not cleared."""
+    extra: dict[str, str] = {}
+    steps = str(values.get("gate_quota_steps") or "").strip()
+    if steps:
+        parts = [piece.strip() for piece in steps.split(",") if piece.strip()]
+        if not parts or not all(piece.isdigit() and 1 <= int(piece) <= 86400 for piece in parts):
+            return {}, "额度阶梯写成像 300,900,1800 这样，每档 1 到 86400 秒"
+        extra["gate_quota_steps"] = ",".join(parts)
+    for key, label in (
+        ("gate_throttle_seconds", "限流等待"),
+        ("gate_probation_seconds", "探活后限流时长"),
+    ):
+        raw = str(values.get(key) or "").strip()
+        if not raw:
+            continue
+        if not raw.isdigit() or not 1 <= int(raw) <= 86400:
+            return {}, f"{label}要是 1 到 86400 秒"
+        extra[key] = raw
+    raw = str(values.get("gate_probation_units") or "").strip()
+    if raw:
+        if not raw.isdigit() or not 0 <= int(raw) <= 32:
+            return {}, "探活后限流条数要是 0 到 32，0 表示关掉这条限流"
+        extra["gate_probation_units"] = raw
+    raw = str(values.get("distill_concurrency") or "").strip()
+    if raw:
+        if not raw.isdigit() or not 1 <= int(raw) <= 32:
+            return {}, "蒸馏并发要是 1 到 32"
+        extra["distill_concurrency"] = raw
+    return extra, ""
 
 
 def save_pipeline(values: dict) -> dict:
@@ -16809,11 +16982,16 @@ def save_pipeline(values: dict) -> dict:
     hour, minute = int(sweep_at[:2]), int(sweep_at[3:])
     if hour > 23 or minute > 59:
         return {"ok": False, "error": "清扫时刻写成 03:00 这样"}
+    extra, refused = _checked_pipeline_extras(values)
+    if refused:
+        return {"ok": False, "error": refused}
     with LOCK:
         set_setting("scan_interval", scan)
         set_setting("probe_interval", probe)
         set_setting("reconcile_hours", hours)
         set_setting("sweep_at", sweep_at)
+        for key, value in extra.items():
+            set_setting(key, value)
         db().commit()
     return {"ok": True, "config": pipeline_config()}
 

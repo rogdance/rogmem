@@ -8190,7 +8190,7 @@ def models_page(providers: list[dict], assigned: dict, effective: dict, embed: d
     inner = f"""<div class='panel'>
 <form id="new-provider" onsubmit="event.preventDefault(); post('/admin/api/settings/models', {{name:this.elements.name.value, base_url:this.elements.base_url.value, api_key:this.elements.api_key.value, models:this.elements.models.value, kind:this.elements.kind.value}});"></form>
 <table class="models"><tr><th>供应商</th><th>接口</th><th>模型</th><th>模型类型</th><th class="key">密钥</th><th class="health">健康</th><th>备注</th><th class="ops"></th></tr>{rows}{draft}</table>
-<p class='note'>保存时立刻测一次。之后按管线设置里的探活间隔再测，默认 5 分钟。连不上、鉴权被拒或服务端 5xx 记为异常（红）。限流、额度、参数被拒，或成功响应里带了错误码，记为降级（黄）。出现这些情况时，运行日志留下一条未结案告警；同一状态不重复记，恢复后结案。文本对话和向量嵌入在 <a href='/admin/settings/pipeline'>管线设置</a> 里分配给对应的工人。</p>
+<p class='note'>保存时立刻测一次。之后按管线设置里的探活间隔再测，默认 60 秒。连不上、鉴权被拒或服务端 5xx 记为异常（红）。限流、额度、参数被拒，或成功响应里带了错误码，记为降级（黄）。出现这些情况时，运行日志留下一条未结案告警；同一状态不重复记，恢复后结案。文本对话和向量嵌入在 <a href='/admin/settings/pipeline'>管线设置</a> 里分配给对应的工人。</p>
 </div>
 <script>
 (function () {{
@@ -9979,17 +9979,26 @@ def pipeline_page(providers: list[dict], assigned: dict, effective: dict, schedu
         ("词条整合", "reconcile_hours", "小时", ""),
         ("每日清扫", "sweep_at", "世界时间", "03:00"),
     )
+    gate = (
+        ("额度阶梯", "gate_quota_steps", "秒，逗号分隔，逐档上升", "300,900,1800,3600,7200,18000"),
+        ("限流等待", "gate_throttle_seconds", "秒", ""),
+        ("探活后限流条数", "gate_probation_units", "条，同时最多几条在跑；0 表示关掉", ""),
+        ("探活后限流时长", "gate_probation_seconds", "秒", ""),
+        ("蒸馏并发", "distill_concurrency", "个，调低立即生效，调高重启后生效", ""),
+    )
 
     def job_row(label: str, name: str, unit: str, placeholder: str) -> str:
         hold = f' placeholder="{placeholder}"' if placeholder else ""
         return (
             "<section class='setting-row setting-line'>"
             f"<h2>{label}</h2>"
-            f'<label class="job-field"><input name="{name}" value="{esc(schedule.get(name))}"{hold} aria-label="{label}"> {unit}</label>'
+            f'<label class="job-field"><input name="{name}" value="{esc(schedule.get(name) or "")}"{hold} aria-label="{label}"> {unit}</label>'
             "</section>"
         )
 
     job_rows = "".join(job_row(*item) for item in jobs)
+    gate_rows = "".join(job_row(*item) for item in gate)
+    gate_names = ", ".join(f"{name}:this.{name}.value" for _label, name, _unit, _hold in gate)
     inner = f"""<div class="settings-stack">
 <form class="panel settings-form" onsubmit="event.preventDefault(); post('/admin/api/settings/assign', {{model_distill:this.model_distill.value, model_merge:this.model_merge.value, model_embed:this.model_embed.value, thinking_distill:this.thinking_distill.value, thinking_merge:this.thinking_merge.value}});">
 <header class="setting-head"><h2>工人设置</h2></header>
@@ -9998,9 +10007,11 @@ def pipeline_page(providers: list[dict], assigned: dict, effective: dict, schedu
 </div>
 <div class="setting-foot"><button type="submit">保存</button></div>
 </form>
-<form class="panel settings-form" onsubmit="event.preventDefault(); post('/admin/api/settings/pipeline', {{scan_interval:this.scan_interval.value, probe_interval:this.probe_interval.value, reconcile_hours:this.reconcile_hours.value, sweep_at:this.sweep_at.value}});">
-<header class="setting-head"><h2>定时任务</h2></header>
+<form class="panel settings-form" onsubmit="event.preventDefault(); post('/admin/api/settings/pipeline', {{scan_interval:this.scan_interval.value, probe_interval:this.probe_interval.value, reconcile_hours:this.reconcile_hours.value, sweep_at:this.sweep_at.value, {gate_names}}});">
+<header class="setting-head"><h2>定时任务与闸门</h2></header>
 {job_rows}
+<p class="note">供应商报额度窗口时，阶梯决定派单停多久；探活不受它影响，一直按上面的探活间隔看一眼，一有回应就立刻开闸。开闸之后先按「探活后限流条数」放行，过了限流时长再完全放开——探活只花几个字，撑不住一整轮真实任务。</p>
+{gate_rows}
 <div class="setting-foot"><button type="submit">保存</button></div>
 </form>
 </div>"""

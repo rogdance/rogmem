@@ -48,6 +48,22 @@ def test_distill_concurrency_invalid_uses_default(monkeypatch):
     assert engine.distill_concurrency() == 1
 
 
+def test_distill_concurrency_prefers_the_setting(monkeypatch):
+    monkeypatch.setenv("ROGMEM_DISTILL_CONCURRENCY", "3")
+    monkeypatch.setattr(engine, "get_setting", lambda *_a, **_k: "5")
+    assert engine.distill_concurrency() == 5
+
+
+def test_concurrency_offline_never_touches_the_database(monkeypatch):
+    """The liveness answer promises no database, so it must not read a setting."""
+    monkeypatch.setenv("ROGMEM_DISTILL_CONCURRENCY", "3")
+    called = []
+    monkeypatch.setattr(engine, "get_setting", lambda *_a, **_k: called.append(1) or "9")
+    assert engine.distill_concurrency(offline=True) == 3
+    assert called == []
+    assert engine.distill_concurrency() == 9
+
+
 def test_health_reports_concurrency(tmp_path, monkeypatch):
     monkeypatch.setenv("ROGMEM_DISTILL_CONCURRENCY", "3")
     _open(tmp_path, monkeypatch)
