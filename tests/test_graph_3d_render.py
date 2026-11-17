@@ -1,8 +1,4 @@
-"""三维记忆图谱契约：默认走三维、静态资源现成、加载状态机照旧、星图仍可切回。
-
-星图（cosmos）那套的细节契约在 test_design_port / test_graph_label_follow_contract /
-test_graph_auto_labels_render 里，且都显式指定了 renderer="cosmos"。
-"""
+"""三维记忆图谱契约：静态资源现成、加载状态机照旧、铺名层按开关收发。"""
 
 from __future__ import annotations
 
@@ -22,13 +18,6 @@ def _open(tmp_path, monkeypatch):
 
     engine.connect(tmp_path, tmp_path / "scan")
     return engine
-
-
-def test_default_renderer_constant_is_three_d():
-    from rogmem.engine import GRAPH_RENDERER_DEFAULT, GRAPH_RENDERER_VALUES
-
-    assert GRAPH_RENDERER_DEFAULT == "3d"
-    assert set(GRAPH_RENDERER_VALUES) == {"3d", "cosmos"}
 
 
 def test_graph_page_ships_the_three_d_module_by_default():
@@ -72,51 +61,24 @@ def test_three_d_page_carries_none_of_the_star_map_only_bits():
         assert needle not in page, f"三维页泄漏星图专用代码 {needle!r}"
 
 
-def test_star_map_renderer_is_still_available():
+def test_graph_page_never_loads_a_2d_renderer():
     from rogmem.ui import graph_page
 
-    page = graph_page(renderer="cosmos")
-    assert "/admin/static/cosmos-graph.min.js" in page
-    assert "rogmemDraw3D" not in page
+    page = graph_page()
+    assert "rogmemDraw3D" in page
+    assert "/admin/static/cosmos-graph.min.js" not in page
 
 
-def test_renderer_setting_round_trips_and_rejects_junk(tmp_path, monkeypatch):
-    engine = _open(tmp_path, monkeypatch)
-    assert engine.graph_renderer() == "3d"
-    assert engine.save_basic({"graph_renderer": "cosmos"})["ok"] is True
-    assert engine.graph_renderer() == "cosmos"
-    # 2d 是星图的别名，收下并归一。
-    assert engine.save_basic({"graph_renderer": "2d"})["ok"] is True
-    assert engine.graph_renderer() == "cosmos"
-    assert engine.save_basic({"graph_renderer": "webgl"})["ok"] is False
-    assert engine.basic_config()["graph_renderer"] == "cosmos"
-
-
-def test_route_serves_three_d_by_default_and_the_star_map_on_demand(tmp_path, monkeypatch):
-    engine = _open(tmp_path, monkeypatch)
+def test_route_serves_the_three_d_graph(tmp_path, monkeypatch):
+    _open(tmp_path, monkeypatch)
     from starlette.testclient import TestClient
 
     from rogmem.app import mcp
 
     client = TestClient(mcp.streamable_http_app())
-    three = client.get("/admin/graph").text
-    assert "rogmemDraw3D" in three
-    assert "/admin/static/cosmos-graph.min.js" not in three
-    engine.save_basic({"graph_renderer": "cosmos"})
-    flat = client.get("/admin/graph").text
-    assert "rogmemDraw3D" not in flat
-    assert "/admin/static/cosmos-graph.min.js" in flat
-
-
-def test_basic_page_offers_the_renderer_switch():
-    from rogmem.ui import basic_page
-
-    chosen = basic_page({"graph_renderer": "cosmos"})
-    assert 'name="graph_renderer"' in chosen
-    assert '<option value="3d"' in chosen
-    assert '<option value="cosmos" selected' in chosen
-    default = basic_page({})
-    assert '<option value="3d" selected' in default
+    page = client.get("/admin/graph").text
+    assert "rogmemDraw3D" in page
+    assert "/admin/static/cosmos-graph.min.js" not in page
 
 
 def test_auto_labels_default_to_on_everywhere():
@@ -148,14 +110,6 @@ def test_three_d_on_state_carries_the_label_layer_and_the_budget():
     off = re.search(r"Z_off = ([0-9.]+)", page)
     assert on and off, "需要有 Z_on / Z_off 常量定义"
     assert float(on.group(1)) > float(off.group(1))
-
-
-def test_two_d_star_map_does_not_carry_the_three_d_label_layer():
-    from rogmem.ui import graph_page
-
-    page = graph_page(auto_labels=True, renderer="cosmos")
-    for needle in ("rogmem3dLabels", "graph-3d-labels"):
-        assert needle not in page
 
 
 def test_sphere_layout_gives_depth_not_a_plane():
