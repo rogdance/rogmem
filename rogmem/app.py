@@ -179,15 +179,15 @@ def _mark_channel(response: Response) -> Response:
     return response
 
 
-def _graph_label_flags() -> tuple[bool, int, str]:
+def _graph_label_flags() -> tuple[bool, int]:
     """记忆图谱和结晶页关联图谱共用这一组设置，不另做开关。"""
-    return engine.graph_auto_labels(), engine.graph_label_budget(), engine.graph_renderer()
+    return engine.graph_auto_labels(), engine.graph_label_budget()
 
 
 def _graph_document() -> str:
     """The console front door. Remote open and /admin/graph render this same page."""
-    auto_labels, label_budget, renderer = _graph_label_flags()
-    return ui.graph_page(auto_labels=auto_labels, label_budget=label_budget, renderer=renderer)
+    auto_labels, label_budget = _graph_label_flags()
+    return ui.graph_page(auto_labels=auto_labels, label_budget=label_budget)
 
 
 async def channel_home(request: Request) -> Response:
@@ -646,7 +646,7 @@ def _crystal_page(request: Request, cid: str) -> Response:
     nav = decision["nav"]
     window = decision["window"]
     revs = engine.revisions(detail["id"]) if view == "log" else []
-    auto_labels, label_budget, renderer = _graph_label_flags()
+    auto_labels, label_budget = _graph_label_flags()
     return HTMLResponse(
         ui.crystal_page(
             detail,
@@ -659,7 +659,6 @@ def _crystal_page(request: Request, cid: str) -> Response:
             editing,
             auto_labels=auto_labels,
             label_budget=label_budget,
-            renderer=renderer,
         )
     )
 
@@ -1427,14 +1426,6 @@ async def pump(request: Request) -> Response:
     return JSONResponse({"next": engine.queue_next_lane(), "done": engine.pump_one()})
 
 
-@mcp.custom_route("/admin/static/cosmos-graph.min.js", methods=["GET"])
-async def graph_js(_request: Request) -> Response:
-    path = Path(__file__).parent / "vendor" / "cosmos-graph.min.js"
-    if not path.exists():
-        return Response("missing graph library", status_code=404)
-    return Response(path.read_bytes(), media_type="text/javascript")
-
-
 @mcp.custom_route("/admin/static/three/{path:path}", methods=["GET"])
 async def three_module(request: Request) -> Response:
     """登录页的 3D 视效自带 three.js，不走 CDN。只放行 vendor/three 里的文件。"""
@@ -1776,8 +1767,6 @@ def _login_asset(path: str) -> bool:
 
     three.js 子集不要求登录：路径由静态路由再校验一次，不越出 vendor/three。
     """
-    if path == "/admin/static/cosmos-graph.min.js":
-        return True
     if path.startswith("/admin/static/three/"):
         rest = path[len("/admin/static/three/"):]
         return bool(rest) and ".." not in rest.split("/")

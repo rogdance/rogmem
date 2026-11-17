@@ -352,9 +352,6 @@ def test_login_page_keeps_only_the_password_panel(tmp_path, monkeypatch):
         assert "/admin/graph" not in login_headers.get("Location", "")
         missing, _missing_body, _missing_headers = hub.req("GET", "/admin/static/login/step-enter.png")
         assert missing != 200
-        script, _script_body, script_headers = hub.req("GET", "/admin/static/cosmos-graph.min.js")
-        assert script == 200
-        assert "javascript" in script_headers.get("Content-Type", "")
         module, module_body, module_headers = hub.req("GET", "/admin/static/three/build/three.module.js")
         assert module == 200
         assert "javascript" in module_headers.get("Content-Type", "")
@@ -374,7 +371,7 @@ def test_login_assets_open_without_a_session():
     assert server._login_asset("/admin/static/three/build/three.module.js") is True
     assert server._login_asset("/admin/static/three/examples/jsm/controls/OrbitControls.js") is True
     assert server._login_asset("/admin/static/three/") is False
-    assert server._login_asset("/admin/static/three/../vendor/cosmos-graph.min.js") is False
+    assert server._login_asset("/admin/static/three/../vendor/three.LICENCE") is False
     assert server._login_asset("/admin/static/login/../ui.py") is False
     assert server._login_asset("/admin/api/settings/basic") is False
 

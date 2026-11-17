@@ -138,8 +138,6 @@ REQUIRED_PUBLIC = (
     "rogmem/onboard.py",
     "rogmem/vendor/weknora/LICENSE",
     "rogmem/vendor/weknora/NOTICE",
-    "rogmem/vendor/cosmos-graph.min.js",
-    "rogmem/vendor/cosmos-graph.LICENCE",
     "installer/COLD_START.md",
     "host/dsh/package.json",
     "deploy/build_compose.py",

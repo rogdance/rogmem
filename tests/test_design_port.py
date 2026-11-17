@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import zipfile
-from pathlib import Path
 
 from rogmem.names import names_correspond, owner_names_match
 from rogmem.sections import markdown_sections, pptx_sections, read_sections
@@ -362,157 +361,32 @@ def test_named_chain_and_sentence_fate(tmp_path, monkeypatch):
     assert fates["这句没有写进结晶"] == "丢掉"
 
 
-def test_starfield_cannot_blank_the_page():
-    """A draw failure stays in the starfield. The GPU context is given back when the page leaves."""
-    from rogmem.ui import graph_page
-
-    page = graph_page(renderer="cosmos")
-    assert "webglcontextlost" in page
-    assert "WEBGL_lose_context" in page
-    assert "pagehide" in page
-    vendor = (Path(__file__).parents[1] / "rogmem" / "vendor" / "cosmos-graph.min.js").read_text(encoding="utf-8")
-    assert 'debugShaders:r.debugShaders||i.props.debugShaders||"never"' in vendor
-    assert '||"errors"' not in vendor
-
-
 def test_browser_fallback_is_offered_and_refuses_local_files():
     from installer.rogmem_installer import open_system_browser
-    from rogmem.ui import graph_page
+    from rogmem.ui import basic_page, graph_page
 
     assert open_system_browser("file:///etc/passwd") is False
     assert open_system_browser("") is False
-    page = graph_page(renderer="cosmos")
+    page = graph_page()
     assert "用系统浏览器打开同一页" in page
     assert "rogmemOpenBrowser" in page
     assert "graph-screen" in page
     assert "el.clientWidth" in page
     assert "el.clientHeight" in page
-    assert "cosmos-graph.min.js" in page
-    assert "backgroundColor: '#111111'" in page
-    assert "function rogmemHairline" in page
-    assert "return 1 / pixelRatio" in page
-    assert "linkDefaultWidth: rogmemHairline(ratio)" in page
-    assert "linkDefaultColor: '#c4c4c4'" in page
-    assert "pointDefaultColor: '#f4f4f4'" in page
-    assert "hoveredPointRingColor: '#ffffff'" in page
-    assert "renderHoveredPointRing: true" in page
-    assert "var lift = 1.2" in page
-    assert "var growMs = 320" in page
-    assert "function easeInOut" in page
-    assert "function writeDrawnSize" in page
-    assert "buf.write(scratch, index * 4)" in page
-    assert "graph.requestRender" in page
-    assert "requestAnimationFrame(stepMotion)" in page
-    assert "function liftNode" in page
-    assert "function restHot" in page
-    assert "function hideName" in page
-    assert "#3a3d42" not in page
-    assert "linkDefaultWidth: 0.35" not in page
-    assert "linkVisibilityMinTransparency: 1" in page
-    assert "linkBlending: false" in page
-    assert "linkBlending: true" not in page
-    assert "0.4 + 1.75 * heat" in page
-    assert "function rogmemGlass" in page
-    assert "setImageData" in page
-    assert "setPointColors" not in page
-    assert "只画尚未结束的关系" not in page
-    assert "点一个星点打开那篇结晶" not in page
-    assert "点越大，连得越多" not in page
-    assert "点越亮" not in page
-    assert "#3a4a62" not in page
-    assert "#a9c8ff" not in page
-    assert "function rogmemHsl" not in page
-    assert "function rogmemInk" not in page
-    assert "217, 0.62, 0.55" not in page
-    assert "70 + 175 * heat" not in page
-    assert "rogmemGlow" not in page
-    assert "pointDefaultShape: 8" in page
-    assert "fitViewOnInit: false" in page
-    assert "count >" not in page
-    assert "Object.create(null)" in page
     assert "prefers-reduced-motion" in page
-    assert "ForceGraph3D" not in page
-    assert "controls.autoRotate" not in page
-    assert "var spinSeconds" not in page
-    from rogmem.ui import basic_page
-
+    # 图谱不再随渲染方式切换，基础设置里也不再有渲染方式开关。
     basic = basic_page({"sketch_char_limit": "3500", "graph_spin_seconds": "180"})
     assert "图谱转一圈的秒数" not in basic
     assert 'name="graph_spin_seconds"' not in basic
-    assert "prefers-reduced-motion" in page
-    assert "node.links" not in page
-    vendor = Path(__file__).parents[1] / "rogmem" / "vendor" / "cosmos-graph.min.js"
-    assert vendor.stat().st_size > 100_000
-    assert b"var CosmosGraph" in vendor.read_bytes()[:220]
+    assert 'name="graph_renderer"' not in basic
 
 
-def test_graph_counts_active_nodes_and_a_click_only_recolors_neighbors():
-    """The library graph shows how many live pages there are.
+def test_graph_counts_active_nodes():
+    """记忆图谱报出当前有多少活跃结晶。"""
+    from rogmem.ui import graph_page
 
-    A click recolors that page and the pages tied directly to it.
-    A click on empty space clears that color. A double click opens the page.
-    """
-    import shutil
-    import subprocess
-
-    from rogmem.ui import graph_mount, graph_page
-
-    page = graph_page(renderer="cosmos")
+    page = graph_page()
     assert "<div class='page-head'><h1>记忆图谱</h1><p class='graph-count' id='graph-count'></p></div>" in page
     assert "nodes.length + ' 个活跃结晶'" not in page
     assert "'活跃结晶：' + nodes.length" in page
     assert "getElementById('graph-count')" in page
-    fetch = page.split("fetch('/admin/api/graph'", 1)[1]
-    assert fetch.index("getElementById('graph-count')") < fetch.index("rogmemDraw(")
-    assert "rogmemDraw(document.getElementById('graph'), nodes, edges, true)" in page
-    assert "getPropertyValue('--brand')" in page
-    assert "[239, 101, 118]" in page
-    assert "imageIndex[n] = (picked.marked[n] || n === hot) ? 1 : 0" in page
-    assert "setLinkColors(linkColors)" in page
-    assert "graph.graph.update" in page
-    assert "graph.create()" in page
-    assert "openOnDouble" in page
-    assert "function tintNode" in page
-    assert "tintNode(pointIndex, true)" in page
-    assert "tintNode(leaving, false)" in page
-    assert "focusMark[n] = picked.marked[n]" in page
-    click = page.split("onPointClick:", 1)[1].split("onBackgroundClick:", 1)[0]
-    focused = click.split("return;", 1)[1]
-    assert "paintFocus(pointIndex)" in focused
-    assert "location =" not in focused
-    assert "location = '/admin/crystals/' + encodeURIComponent(id)" in click
-    background = page.split("onBackgroundClick:", 1)[1].split("onPointMouseOver:", 1)[0]
-    assert "if (!focusMode) return;" in background
-    assert "if (lastClick >= 0)" in background
-    assert "lastClick = -1" in background
-    assert "paintFocus(-1)" in background
-    assert background.index("lastClick = -1") < background.index("paintFocus(-1)")
-    plain = graph_mount("graph", renderer="cosmos")
-    assert "edges, false)" in plain
-    assert "id='graph-count'" not in plain
-
-    node = shutil.which("node")
-    assert node
-    start = page.find("function rogmemMarkNeighborhood")
-    end = page.find("function rogmemHairline")
-    source = page[start:end]
-    assert source.startswith("function rogmemMarkNeighborhood")
-    script = source + """
-const edgesSrc = Uint32Array.from([0, 1, 2]);
-const edgesDst = Uint32Array.from([1, 2, 3]);
-const first = rogmemMarkNeighborhood(4, edgesSrc, edgesDst, 3, 1);
-if (!first.marked[1] || !first.marked[0] || !first.marked[2] || first.marked[3]) process.exit(1);
-if (!first.linkOn[0] || !first.linkOn[1] || first.linkOn[2]) process.exit(2);
-const second = rogmemMarkNeighborhood(4, edgesSrc, edgesDst, 3, 0);
-if (!second.marked[0] || !second.marked[1] || second.marked[2] || second.marked[3]) process.exit(3);
-if (!second.linkOn[0] || second.linkOn[1] || second.linkOn[2]) process.exit(4);
-const alone = rogmemMarkNeighborhood(2, new Uint32Array(0), new Uint32Array(0), 0, 0);
-if (!alone.marked[0] || alone.marked[1]) process.exit(5);
-const far = rogmemMarkNeighborhood(4, edgesSrc, edgesDst, 3, 3);
-if (!far.marked[3] || !far.marked[2] || far.marked[0] || far.marked[1]) process.exit(6);
-if (far.linkOn[0] || far.linkOn[1] || !far.linkOn[2]) process.exit(7);
-const none = rogmemMarkNeighborhood(4, edgesSrc, edgesDst, 3, -1);
-if (none.marked[0] || none.marked[1] || none.marked[2] || none.marked[3]) process.exit(8);
-if (none.linkOn[0] || none.linkOn[1] || none.linkOn[2]) process.exit(9);
-"""
-    subprocess.run([node, "-e", script], check=True)

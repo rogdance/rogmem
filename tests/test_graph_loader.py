@@ -104,11 +104,10 @@ def test_render_failure_is_not_reported_as_a_load_failure():
     assert "'图谱没有载入" not in draw
 
 
-def test_both_renderers_share_the_one_fetch_call_site():
-    """取数只有一处。两种渲染器都不再各写一份 fetch。"""
-    for renderer in ("3d", "cosmos"):
-        html = graph_page(renderer=renderer)
-        assert html.count("fetch('/admin/api/graph'") == 1
+def test_graph_shares_the_one_fetch_call_site():
+    """取数只有一处。"""
+    html = graph_page()
+    assert html.count("fetch('/admin/api/graph'") == 1
 
 
 def test_render_watchdog_leaves_the_loader_alone_while_data_is_still_coming():

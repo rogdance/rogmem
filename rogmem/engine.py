@@ -8101,8 +8101,6 @@ GRAPH_AUTO_LABELS_DEFAULT = True
 GRAPH_LABEL_BUDGET_DEFAULT = 50
 GRAPH_LABEL_BUDGET_MIN = 1
 GRAPH_LABEL_BUDGET_MAX = 200
-GRAPH_RENDERER_DEFAULT = "3d"
-GRAPH_RENDERER_VALUES = ("3d", "cosmos")
 
 COST_SPAN_VALUES = ("all", "24h", "7d", "30d")
 COST_DETAIL_VALUES = ("all", "24h", "30d")
@@ -8134,16 +8132,6 @@ def graph_label_budget() -> int:
     if value < GRAPH_LABEL_BUDGET_MIN or value > GRAPH_LABEL_BUDGET_MAX:
         return GRAPH_LABEL_BUDGET_DEFAULT
     return value
-
-
-def graph_renderer() -> str:
-    """How the graph page draws: the 3D renderer by default, the flat star map on demand.
-
-    An unrecognised stored value degrades to the default rather than raising, so a hand-edited
-    or stale row never takes the page down.
-    """
-    raw = (get_setting("graph_renderer") or "").strip().lower()
-    return raw if raw in GRAPH_RENDERER_VALUES else GRAPH_RENDERER_DEFAULT
 
 
 def cost_filters() -> dict | None:
@@ -16860,7 +16848,6 @@ def basic_config() -> dict:
         "nas_path": nas_configured_path(),
         "graph_auto_labels": "1" if graph_auto_labels() else "0",
         "graph_label_budget": str(graph_label_budget()),
-        "graph_renderer": graph_renderer(),
         "passwordless": "1" if passwordless_enabled() else "0",
         "store_path": store["path"],
         "store_bytes": store["bytes"],
@@ -16908,14 +16895,6 @@ def save_basic(values: dict) -> dict:
         if budget_n < GRAPH_LABEL_BUDGET_MIN or budget_n > GRAPH_LABEL_BUDGET_MAX:
             return {"ok": False, "error": f"图谱同屏名称数要是 {GRAPH_LABEL_BUDGET_MIN} 到 {GRAPH_LABEL_BUDGET_MAX} 的整数"}
         label_budget = str(budget_n)
-    graph_render: str | None = None
-    if "graph_renderer" in incoming:
-        raw_render = str(incoming.get("graph_renderer") or "").strip().lower()
-        if raw_render == "2d":
-            raw_render = "cosmos"
-        if raw_render not in GRAPH_RENDERER_VALUES:
-            return {"ok": False, "error": "图谱渲染方式要是 3d 或 cosmos"}
-        graph_render = raw_render
     nas_path: str | None = None
     if "nas_path" in incoming:
         raw_nas = str(incoming.get("nas_path") or "").strip()
@@ -16934,7 +16913,7 @@ def save_basic(values: dict) -> dict:
         if raw_open not in {"", "0", "1", "on", "off", "true", "false", "yes", "no"}:
             return {"ok": False, "error": "免密登录要是 0 或 1"}
         passwordless = "1" if raw_open in {"1", "on", "true", "yes"} else "0"
-    if all(item is None for item in (sketch, budget, spin, appellation, auto_labels, label_budget, graph_render, nas_path, passwordless)):
+    if all(item is None for item in (sketch, budget, spin, appellation, auto_labels, label_budget, nas_path, passwordless)):
         return {"ok": True, "config": basic_config()}
     sessions_reset = passwordless == "0" and passwordless_enabled()
     with LOCK:
@@ -16950,8 +16929,6 @@ def save_basic(values: dict) -> dict:
             set_setting("graph_auto_labels", auto_labels)
         if label_budget is not None:
             set_setting("graph_label_budget", label_budget)
-        if graph_render is not None:
-            set_setting("graph_renderer", graph_render)
         if nas_path is not None:
             set_setting("nas_path", nas_path)
         if passwordless is not None:
