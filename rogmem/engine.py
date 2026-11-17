@@ -4475,6 +4475,18 @@ def _chat_max_tokens(base: str, model: str) -> int:
     return 4096
 
 
+# 一次并页的答案就是一页，额度按一页给，不按模型的绝对上限给。max_tokens 也要付思考的账，
+# 把它交到 524288 时，重并页会把十万到廿六万 token 花在思考上，回来的只剩开头一截——
+# 2026-11-17 那批 JSON 解析错就是这些调用。真实库里 95% 的并页答案在 5.5 万以内，最大的
+# 非退化答案 95823，页面本身最大 66250 字。131072 在这之上，在退化带之下。
+MERGE_MAX_COMPLETION = 131072
+
+
+def _merge_max_tokens(base: str, model: str) -> int:
+    """并页的额度：一页能有多大。不超过模型自己的上限。"""
+    return min(_chat_max_tokens(base, model), MERGE_MAX_COMPLETION)
+
+
 def _distill_system(kind: str) -> str:
     """Files and sessions share one prompt. The header says who is speaking."""
     return distill_system(kind)
@@ -7988,7 +8000,7 @@ def _merge_existing_page(
     base, key, model = target
     payload = {
         "model": model,
-        "max_tokens": _chat_max_tokens(base, model),
+        "max_tokens": _merge_max_tokens(base, model),
         "messages": [
             {"role": "system", "content": INTEGRATE_PAGE_SYSTEM},
             {
@@ -8013,14 +8025,10 @@ def _merge_existing_page(
     content, reason = _complete_chat(base, key, payload, role="distill")
     if reason == "length":
         # A reply that stopped for room is not a page. Writing it would drop whatever it
-        # never reached, and the guard no longer pastes the missing paragraphs back. Try
-        # once with the model's full ceiling, then hand the unit back to the queue.
-        room = max(int(payload["max_tokens"]), _chat_max_tokens(base, model))
-        if room > int(payload["max_tokens"]):
-            payload["max_tokens"] = room
-            content, reason = _complete_chat(base, key, payload, role="distill")
-        if reason == "length":
-            raise ModelCallFailed("并页没有写完这一页")
+        # never reached, and the guard no longer pastes the missing paragraphs back. The
+        # room above is already the page's own room, so there is no fuller room to try:
+        # hand the unit back to the queue, which runs this merge again.
+        raise ModelCallFailed("并页没有写完这一页")
     parsed = _parse_page_merge(content or "")
     page = parsed["page"]
     conflicts = parsed["conflicts"]

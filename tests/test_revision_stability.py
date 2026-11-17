@@ -218,6 +218,56 @@ def test_a_reply_that_stopped_for_room_is_not_written_as_the_page(tmp_path, monk
         engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
 
 
+def test_a_merge_asks_for_a_page_of_room_not_the_model_s_whole_ceiling(tmp_path, monkeypatch):
+    """A merge reply is one page. Handing the merge the model's own ceiling let thinking eat
+    the room and the answer come back as its opening line, which is the JSON error that kept
+    recurring on 2026-11-17 (95% of real merges finish inside 55k)."""
+    engine = _open(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("https://api.minimax.chat/v1", "k", "MiniMax-M3.1-Flash"))
+    seen = {}
+
+    def fake(_base, _key, payload, **_kwargs):
+        seen.update(payload)
+        return (
+            json.dumps({"same": "是", "page": "铜铃改挂到第五格。", "conflicts": [], "gist": ""}, ensure_ascii=False),
+            "stop",
+        )
+
+    monkeypatch.setattr(engine, "_complete_chat", fake)
+    engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
+    assert seen["max_tokens"] == engine.MERGE_MAX_COMPLETION
+    assert engine.MERGE_MAX_COMPLETION < engine._chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash")
+
+
+def test_a_merge_that_stopped_for_room_is_not_asked_again_with_the_whole_ceiling(tmp_path, monkeypatch):
+    """The room a merge gets is already the page's room, so there is no roomier second try:
+    the unit goes back to the queue instead of spending the model's full ceiling again."""
+    import pytest
+
+    from rogmem.engine import ModelCallFailed
+
+    engine = _open(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("https://api.minimax.chat/v1", "k", "MiniMax-M3.1-Flash"))
+    calls = []
+
+    def fake(_base, _key, payload, **_kwargs):
+        calls.append(payload["max_tokens"])
+        return "铜铃改挂到第五格。", "length"
+
+    monkeypatch.setattr(engine, "_complete_chat", fake)
+    with pytest.raises(ModelCallFailed):
+        engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
+    assert calls == [engine.MERGE_MAX_COMPLETION]
+
+
+def test_the_page_ceiling_never_raises_a_smaller_model_s_own_ceiling():
+    from rogmem.engine import _chat_max_tokens, _merge_max_tokens
+
+    assert _merge_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash") == 131072
+    assert _chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash") == 524288
+    assert _merge_max_tokens("https://api.other.example/v1", "small-model") == 4096
+
+
 def test_merge_of_the_same_page_writes_the_written_page(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     old = "夜航员把铜铃留在第三格。[^1]\n\n[^1]: 实 「夜航员把铜铃留在第三格。」\n\n[^2] [[潮信]]"
