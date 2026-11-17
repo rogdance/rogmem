@@ -611,7 +611,9 @@ def test_a_crystal_link_can_be_removed_when_the_revision_says_why(tmp_path, monk
     assert reason in gist
 
 
-def test_a_crystal_link_stays_when_the_revision_gives_no_reason(tmp_path, monkeypatch):
+def test_a_crystal_link_leaves_with_the_sentence_the_merge_replaced(tmp_path, monkeypatch):
+    """The written page is the page. The sentence it replaced, and the link that sat on it,
+    stay readable in the revision log instead of being pasted back beside the new wording."""
     engine = _open(tmp_path, monkeypatch)
     old = "他现在在[[南港书院]]任教。[^1]\n\n[^1]: 实 「他现在在南港书院任教。」"
     _owner_with_citation(engine, old)
@@ -626,13 +628,16 @@ def test_a_crystal_link_stays_when_the_revision_gives_no_reason(tmp_path, monkey
     _quiet_model(monkeypatch, engine, reply)
     engine._land_markdown_pages(source, [{"name": "记忆主人", "type": "人物", "body": "后来这句不成立。"}])
     body = engine.db().execute("SELECT body_md FROM crystallizations WHERE id='owner'").fetchone()["body_md"]
-    assert "他现在在[[南港书院]]任教。" in body
-    assert "[[南港书院]]" in body
-    assert "他后来离开了那家书院。" not in body
-    assert not any(line.strip() == "[[南港书院]]" for line in body.splitlines())
+    assert "他后来离开了那家书院。" in body
+    assert "他现在在[[南港书院]]任教。" not in body
+    assert "[[南港书院]]" not in body
+    logged = engine.db().execute("SELECT change FROM revisions WHERE crystal_id='owner'").fetchall()
+    assert any("他现在在[[南港书院]]任教。" in (row["change"] or "") for row in logged)
 
 
-def test_an_update_keeps_the_named_sentence_beside_the_new_one(tmp_path, monkeypatch):
+def test_an_update_leaves_the_wording_it_replaced_out_of_the_page(tmp_path, monkeypatch):
+    """The superseded sentence is not written beside the new one. Keeping both is what a
+    page no longer does, and `revisions` still holds the whole page from before the change."""
     engine = _open(tmp_path, monkeypatch)
     old = "他现在在[[南港书院]]任教。"
     _owner_with_citation(engine, old)
@@ -655,11 +660,15 @@ def test_an_update_keeps_the_named_sentence_beside_the_new_one(tmp_path, monkeyp
     engine._land_markdown_pages(source, [{"name": "记忆主人", "type": "人物", "body": "后来这句不成立。"}])
     body = engine.db().execute("SELECT body_md FROM crystallizations WHERE id='owner'").fetchone()["body_md"]
     assert revised in body
-    assert "他现在在[[南港书院]]任教。" in body
-    assert not any(line.strip() == "[[南港书院]]" for line in body.splitlines())
+    assert "他现在在[[南港书院]]任教。" not in body
+    assert "[[南港书院]]" not in body
+    logged = engine.db().execute("SELECT change FROM revisions WHERE crystal_id='owner'").fetchall()
+    assert any("他现在在[[南港书院]]任教。" in (row["change"] or "") for row in logged)
 
 
-def test_a_summary_does_not_withdraw_unnamed_links(tmp_path, monkeypatch):
+def test_a_written_page_that_drops_a_link_leaves_it_out(tmp_path, monkeypatch):
+    """Links travel with the sentence they sat on. The written page decided what stays,
+    and what it replaced is kept in the revision log rather than re-hung on the page."""
     engine = _open(tmp_path, monkeypatch)
     old = "他在[[南港书院]]任教，也用[[北窗灯塔]]。"
     _owner_with_citation(engine, old)
@@ -675,11 +684,12 @@ def test_a_summary_does_not_withdraw_unnamed_links(tmp_path, monkeypatch):
     _quiet_model(monkeypatch, engine, reply)
     engine._land_markdown_pages(source, [{"name": "记忆主人", "type": "人物", "body": "后来这句不成立。"}])
     body = engine.db().execute("SELECT body_md FROM crystallizations WHERE id='owner'").fetchone()["body_md"]
-    assert "他在任教，也用[[北窗灯塔]]。" in body
+    assert revised in body
     assert "[[南港书院]]" not in body
-    assert "[[北窗灯塔]]" in body
-    assert revised not in body
+    assert "[[北窗灯塔]]" not in body
     assert not any(line.strip() in {"[[南港书院]]", "[[北窗灯塔]]"} for line in body.splitlines())
+    logged = engine.db().execute("SELECT change FROM revisions WHERE crystal_id='owner'").fetchall()
+    assert any("他在[[南港书院]]任教，也用[[北窗灯塔]]。" in (row["change"] or "") for row in logged)
 
 
 def test_naming_a_longer_link_does_not_withdraw_the_shorter_one(tmp_path, monkeypatch):
@@ -707,7 +717,7 @@ def test_naming_a_longer_link_does_not_withdraw_the_shorter_one(tmp_path, monkey
     assert "[[南港]]" in body
 
 
-def test_a_conflict_subject_alone_does_not_withdraw_a_link(tmp_path, monkeypatch):
+def test_a_conflict_verdict_does_not_keep_a_link_the_written_page_dropped(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     old = "他现在在[[南港书院]]任教。"
     _owner_with_citation(engine, old)
@@ -727,7 +737,8 @@ def test_a_conflict_subject_alone_does_not_withdraw_a_link(tmp_path, monkeypatch
     _quiet_model(monkeypatch, engine, reply)
     engine._land_markdown_pages(source, [{"name": "记忆主人", "type": "人物", "body": "后来这句不成立。"}])
     body = engine.db().execute("SELECT body_md FROM crystallizations WHERE id='owner'").fetchone()["body_md"]
-    assert "[[南港书院]]" in body
+    assert "他后来仍在那里任教。" in body
+    assert "[[南港书院]]" not in body
 
 
 def test_restoring_a_citation_does_not_replace_the_mark_the_revision_kept(tmp_path, monkeypatch):
@@ -775,7 +786,7 @@ def test_a_citation_whose_words_remain_keeps_its_note(tmp_path, monkeypatch):
     assert "[^1]" in body.split("近来如此。", 1)[0]
 
 
-def test_a_citation_stays_when_the_revision_gives_no_reason(tmp_path, monkeypatch):
+def test_a_citation_leaves_with_the_sentence_the_merge_replaced(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     old = "他现在关注南港书院。[^1]\n\n[^1]: 实 「他现在关注南港书院。」"
     _owner_with_citation(engine, old)
@@ -790,8 +801,10 @@ def test_a_citation_stays_when_the_revision_gives_no_reason(tmp_path, monkeypatc
     _quiet_model(monkeypatch, engine, reply)
     engine._land_markdown_pages(source, [{"name": "记忆主人", "type": "人物", "body": "后来这句不成立。"}])
     body = engine.db().execute("SELECT body_md FROM crystallizations WHERE id='owner'").fetchone()["body_md"]
-    assert "[^1]" in body
-    assert "他现在关注南港书院" in body
+    assert "他后来不再关注南港书院。" in body
+    assert "他现在关注南港书院。[^1]" not in body
+    logged = engine.db().execute("SELECT change FROM revisions WHERE crystal_id='owner'").fetchall()
+    assert any("他现在关注南港书院。" in (row["change"] or "") for row in logged)
 
 
 def test_a_scanned_file_records_its_write_time(tmp_path, monkeypatch):

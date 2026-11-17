@@ -1825,7 +1825,12 @@ def _distill_loop(stop: threading.Event | None = None) -> None:
     """
 
     while stop is None or not stop.is_set():
-        engine.pump_one()
+        try:
+            engine.pump_one()
+        except Exception as exc:
+            # A fault that one unit cannot survive must not take the worker with it: a
+            # silent thread death drops concurrency from three to two and nobody is told.
+            print(f"ROGMEM_DISTILL {type(exc).__name__} {exc}", flush=True)
         if stop is None:
             time.sleep(_poll_seconds())
         elif stop.wait(_poll_seconds()):

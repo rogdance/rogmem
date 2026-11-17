@@ -7677,232 +7677,18 @@ def _fact_sections(text: str) -> list[tuple[str, list[str]]]:
     return folded
 
 
-def _claim_text(paragraph: str) -> str:
-    return re.sub(r"\[\^[^\]]+\]", "", paragraph or "").strip()
+def _page_paragraph_set(page: str) -> set[str]:
+    """The page's paragraphs as a set, so a lookup does not re-split the page every time.
 
-
-def _strip_named_relations(
-    paragraph: str,
-    explanation: str,
-    link_names: set[str],
-    passages: set[str],
-    notes: dict,
-) -> str:
-    """Drop links and marks the explanation names. Other words stay where they were."""
-    from rogmem.pages_md import citation_passage
-
-    text = paragraph or ""
-
-    def drop_mark(match: re.Match) -> str:
-        passage = citation_passage(notes.get(match.group(1), ""))
-        if passage and _mentions_apart(passage, explanation, passages):
-            return ""
-        return match.group(0)
-
-    text = re.sub(r"\[\^([^\]]+)\]", drop_mark, text)
-    for raw in _crystal_links(text):
-        name = _link_name(raw)
-        if name and _mentions_apart(name, explanation, link_names):
-            text = text.replace(f"[[{raw}]]", "", 1)
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip()
-
-
-def _stable_words(
-    paragraph: str,
-    explanation: str,
-    link_names: set[str],
-    passages: set[str],
-    notes: dict,
-) -> str:
-    """The unnamed words, with marks and named links taken out of the comparison."""
-    return re.sub(r"\s+", "", _claim_text(_strip_named_relations(paragraph, explanation, link_names, passages, notes)))
-
-
-def _graft_unnamed_marks(
-    host: str,
-    old: str,
-    explanation: str,
-    link_names: set[str],
-    passages: set[str],
-    notes: dict,
-) -> str:
-    """The model kept the old words and added more. Unnamed marks stay on those words."""
-    from rogmem.pages_md import citation_passage
-
-    literal = _claim_text(_strip_named_relations(old, explanation, link_names, passages, notes)).strip()
-    text = host or ""
-    if not literal:
-        return text
-    found = text.find(literal)
-    if found < 0:
-        return text
-    insert_at = found + len(literal)
-    missing = []
-    for key in re.findall(r"\[\^([^\]]+)\]", old or ""):
-        token = f"[^{key}]"
-        if token in text:
-            continue
-        passage = citation_passage(notes.get(key, ""))
-        if passage and _mentions_apart(passage, explanation, passages):
-            continue
-        missing.append(token)
-    if not missing:
-        return text
-    return text[:insert_at] + "".join(missing) + text[insert_at:]
-
-
-def _paragraph_named(paragraph: str, explanation: str, notes: dict, passages: set[str]) -> bool:
-    """The explanation names this paragraph when it quotes the paragraph or its passage."""
-    from rogmem.pages_md import citation_passage
-
-    if not (explanation or "").strip() or not (paragraph or "").strip():
-        return False
-    for line in paragraph.splitlines():
-        text = line.strip()
-        if text and text in explanation:
-            return True
-    for key in re.findall(r"\[\^([^\]]+)\]", paragraph):
-        passage = citation_passage(notes.get(key, ""))
-        if passage and _mentions_apart(passage, explanation, passages):
-            return True
-    return False
-
-
-def _heading_named(heading: str, explanation: str, longer: set[str]) -> bool:
-    if not heading:
-        return False
-    return _mentions_apart(heading, explanation, longer)
-
-
-def _restore_unnamed_paragraph(
-    paragraph: str,
-    explanation: str,
-    link_names: set[str],
-    passages: set[str],
-    notes: dict,
-) -> str:
-    """Paste the unnamed words back. A relation the explanation names may leave."""
-    return _strip_named_relations(paragraph, explanation, link_names, passages, notes)
-
-
-def _merge_replace_gap(
-    old_slice: list[str],
-    new_slice: list[str],
-    flags: list[bool],
-    explanation: str,
-    link_names: set[str],
-    passages: set[str],
-    notes: dict,
-) -> list[str]:
-    """Keep unnamed words. Do not guess which extra paragraph is the rewrite.
-
-    A new paragraph that still contains the old words is that paragraph plus an
-    insertion, so it stays and the old paragraph is not copied again. A one-to-one
-    change that does not contain the old words is a rewrite: the old words stay and
-    the rewrite does not. Any other count is not one paragraph replacing another,
-    so the old words stay and every extra paragraph stays too.
+    Checking one mark used to walk `_fact_sections(page)` again, so a page carrying a
+    thousand footnotes was split a thousand times on every merge.
     """
-    if old_slice and all(flags):
-        return [item for item in new_slice if item and item.strip()]
-    slots: list[str | None] = []
-    used: set[int] = set()
-    pending = 0
-    for index, paragraph in enumerate(old_slice):
-        if flags[index]:
-            if index < len(new_slice) and index not in used:
-                slots.append(new_slice[index])
-                used.add(index)
-            else:
-                slots.append(None)
-            continue
-        host = None
-        old_words = _stable_words(paragraph, explanation, link_names, passages, notes)
-        for new_index, new_paragraph in enumerate(new_slice):
-            if new_index in used:
-                continue
-            new_words = _stable_words(new_paragraph, explanation, link_names, passages, notes)
-            if old_words and old_words in new_words:
-                host = new_index
-                break
-        if host is not None:
-            used.add(host)
-            slots.append(_graft_unnamed_marks(new_slice[host], paragraph, explanation, link_names, passages, notes))
-            continue
-        restored = _restore_unnamed_paragraph(paragraph, explanation, link_names, passages, notes)
-        slots.append(restored or None)
-        if restored:
-            pending += 1
-    unused = [new_slice[index] for index in range(len(new_slice)) if index not in used]
-    out = [item for item in slots if item and item.strip()]
-    if not pending:
-        out.extend(item for item in unused if item and item.strip())
-        return out
-    if len(unused) == pending:
-        return out
-    out.extend(item for item in unused if item and item.strip())
-    return out
-
-
-def _merge_paragraphs(
-    old: list[str],
-    new: list[str],
-    named: list[bool],
-    explanation: str,
-    link_names: set[str],
-    passages: set[str],
-    notes: dict,
-) -> list[str]:
-    """Unnamed paragraphs stay verbatim and in order. Insertions stay.
-
-    Equality is the paragraph text. A blank-line paragraph the old page did not
-    have is an insertion. A one-to-one rewrite of an unnamed paragraph is not.
-    """
-    if not old:
-        return list(new)
-    if not new:
-        restored = []
-        for paragraph, flag in zip(old, named):
-            if flag:
-                continue
-            text = _restore_unnamed_paragraph(paragraph, explanation, link_names, passages, notes)
-            if text:
-                restored.append(text)
-        return restored
-    out: list[str] = []
-    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            out.extend(old[i1:i2])
-        elif tag == "insert":
-            out.extend(new[j1:j2])
-        elif tag == "delete":
-            for index in range(i1, i2):
-                if named[index]:
-                    continue
-                text = _restore_unnamed_paragraph(old[index], explanation, link_names, passages, notes)
-                if text:
-                    out.append(text)
-        else:
-            out.extend(
-                _merge_replace_gap(
-                    old[i1:i2],
-                    new[j1:j2],
-                    named[i1:i2],
-                    explanation,
-                    link_names,
-                    passages,
-                    notes,
-                )
-            )
-    return out
-
-
-def _page_has_paragraph(page: str, paragraph: str) -> bool:
-    target = (paragraph or "").strip()
-    if not target:
-        return False
-    return any(target in paras for _heading, paras in _fact_sections(page))
+    return {
+        para.strip()
+        for _heading, paras in _fact_sections(page)
+        for para in paras
+        if para.strip()
+    }
 
 
 def _bind_paragraph_notes(sections: list[tuple[str, list[str]]], old: str, new: str) -> tuple[list[tuple[str, list[str]]], dict[str, str]]:
@@ -7911,13 +7697,16 @@ def _bind_paragraph_notes(sections: list[tuple[str, list[str]]], old: str, new: 
 
     old_notes = cite_notes(old)
     new_notes = cite_notes(new)
+    old_paras = _page_paragraph_set(old)
+    new_paras = _page_paragraph_set(new)
     used: dict[str, str] = {}
     used_keys: set[str] = set()
     bound: list[tuple[str, list[str]]] = []
 
     def desired(paragraph: str, key: str) -> str:
-        in_old = _page_has_paragraph(old, paragraph)
-        in_new = _page_has_paragraph(new, paragraph)
+        target = (paragraph or "").strip()
+        in_old = bool(target) and target in old_paras
+        in_new = bool(target) and target in new_paras
         if in_new and not in_old:
             return new_notes.get(key, "") or old_notes.get(key, "")
         if in_old and not in_new:
@@ -7976,91 +7765,25 @@ def _assemble_page(sections: list[tuple[str, list[str]]], notes: dict[str, str])
     return text
 
 
-def _sections_claim(sections: list[tuple[str, list[str]]]) -> str:
-    parts: list[str] = []
-    for heading, paras in sections:
-        if heading:
-            parts.append(heading)
-        parts.extend(paras)
-    return _claim_text("\n".join(parts))
+def _shape_merged_page(old: str, new: str) -> str:
+    """The model's page is the page. The old wording is not kept beside it.
 
+    This used to paste back every paragraph the model left out, so a page that had
+    accumulated wordings kept all of them: the live owner page reached 860,572
+    characters, one merge then sent all of it back to the model, and the provider refused
+    the call. What a merge replaced stays readable in `revisions`, which stores the whole
+    page before and after each change, so the guard no longer decides which wording is
+    current by pasting the old one next to the new.
 
-def _put_back_named_wording(
-    ordered: list[tuple[str, list[str]]],
-    old_sections: list[tuple[str, list[str]]],
-    explanation: str,
-    longer: set[str],
-    notes: dict,
-    passages: set[str],
-) -> None:
-    """更新 keeps the previous wording. If it is gone, paste that paragraph back."""
-    by_heading: dict[str, list[str]] = {}
-    for heading, paras in ordered:
-        by_heading.setdefault(heading, paras)
-    claims = _sections_claim(ordered)
-    for heading, old_paras in old_sections:
-        current = by_heading.get(heading)
-        if current is None:
-            continue
-        heading_is_named = _heading_named(heading, explanation, longer)
-        cursor = 0
-        for para in old_paras:
-            named = heading_is_named or _paragraph_named(para, explanation, notes, passages)
-            found = next((index for index in range(cursor, len(current)) if current[index] == para), None)
-            if not named:
-                if found is not None:
-                    cursor = found + 1
-                continue
-            claim = _claim_text(para)
-            if not claim or claim in claims or found is not None:
-                if found is not None:
-                    cursor = found + 1
-                continue
-            current.insert(cursor, para)
-            claims += "\n" + claim
-            cursor += 1
-
-
-def _restore_unnamed_blocks(old: str, new: str, explanation: str, conflicts: list) -> str:
-    """Unnamed paragraphs stay verbatim and in their original order.
-
-    The program checks that text only. It does not decide which sentence is current,
-    which subject a heading names, or where a new fact belongs. A paragraph the
-    explanation does not quote is pasted back. A paragraph it quotes may take the
-    model's words. Paragraphs and headings the old page did not have are insertions
-    and stay. Old headings keep their order. Note definitions, and lines that are
-    only marks or crystal links, are not paragraphs: they are not pasted back and
-    not written out as a new trailing line. When a conflict's verdict is 更新, a
-    named paragraph's previous wording must still occur; otherwise that paragraph
-    is pasted back beside the model's new one.
+    What is still the program's job: old headings keep their order, a heading the old page
+    did not have keeps its place as an insertion, and note definitions and lines that are
+    only marks or crystal links are not paragraphs.
     """
-    from rogmem.pages_md import citation_passage, cite_notes
-
     old_sections = _fact_sections(old)
     new_sections = _fact_sections(new)
     if not old_sections:
         bound, used = _bind_paragraph_notes(new_sections, old, new)
         return _assemble_page(bound, used) or (old or "").strip()
-    notes = cite_notes(old)
-    passages = {
-        citation_passage(note)
-        for note in list(notes.values()) + list(cite_notes(new).values())
-        if citation_passage(note)
-    }
-    fact_lines: set[str] = set()
-    headings: set[str] = set()
-    for title, paras in old_sections + new_sections:
-        if title:
-            headings.add(title)
-        for para in paras:
-            for line in para.splitlines():
-                text = line.strip()
-                if text:
-                    fact_lines.add(text)
-    longer = set(headings) | fact_lines
-    explanation = explanation or ""
-    link_names = {_link_name(link) for link in _crystal_links(old) + _crystal_links(new)}
-    link_names.discard("")
     old_keys: list[str] = []
     old_map: dict[str, list[str]] = {}
     for title, paras in old_sections:
@@ -8072,22 +7795,6 @@ def _restore_unnamed_blocks(old: str, new: str, explanation: str, conflicts: lis
         if title not in new_map:
             new_map[title] = paras
     old_key_set = set(old_keys)
-    contents: dict[str, list[str]] = {}
-    for title in old_keys:
-        old_paras = old_map[title]
-        heading_is_named = _heading_named(title, explanation, longer)
-        flags = [
-            heading_is_named or _paragraph_named(para, explanation, notes, passages) for para in old_paras
-        ]
-        contents[title] = _merge_paragraphs(
-            old_paras,
-            new_map.get(title, []),
-            flags,
-            explanation,
-            link_names,
-            passages,
-            notes,
-        )
     sentinel = "\0"
     insert_after: dict[str, list[tuple[str, list[str]]]] = {sentinel: []}
     for title in old_keys:
@@ -8104,15 +7811,22 @@ def _restore_unnamed_blocks(old: str, new: str, explanation: str, conflicts: lis
     ordered: list[tuple[str, list[str]]] = []
     ordered.extend(insert_after.get(sentinel, []))
     for title in old_keys:
-        ordered.append((title, contents.get(title, [])))
+        ordered.append((title, list(new_map.get(title, []))))
         ordered.extend(insert_after.get(title, []))
-    if any(isinstance(item, dict) and str(item.get("verdict") or "") == "更新" for item in conflicts or []):
-        _put_back_named_wording(ordered, old_sections, explanation, longer, notes, passages)
     bound, used = _bind_paragraph_notes(ordered, old, new)
-    return _assemble_page(bound, used)
+    # A reply that carried no usable paragraph leaves the page as it was. Returning an
+    # empty body here would write a blank page and park the source on a blank checkpoint.
+    return _assemble_page(bound, used) or (old or "").strip()
 
 
 def _keep_both_pages(old: str, new: str) -> str:
+    """The stored page stays. Only material it does not already carry is added.
+
+    Appending both bodies put every later copy of the same facts on the page a second
+    time, so a repository page grew with each landing and every later merge sent all of
+    it back. A paragraph the page already carries, whole or as a passage inside one of
+    its paragraphs, is not written out again.
+    """
     old = (old or "").strip()
     new = (new or "").strip()
     if not old:
@@ -8121,7 +7835,17 @@ def _keep_both_pages(old: str, new: str) -> str:
         return old
     if old in new and _relations_cover(new, old):
         return new
-    return old + "\n\n" + new
+    kept = [para.strip() for para in re.split(r"\n\s*\n", old) if para.strip()]
+    added: list[str] = []
+    for para in (part.strip() for part in re.split(r"\n\s*\n", new)):
+        if not para:
+            continue
+        if any(para in other for other in kept) or any(para in other for other in added):
+            continue
+        added.append(para)
+    if not added:
+        return old
+    return old + "\n\n" + "\n\n".join(added)
 
 
 def _parse_page_merge(raw: str) -> dict:
@@ -8214,9 +7938,16 @@ def _merge_existing_page(
         ],
     }
     content, reason = _complete_chat(base, key, payload, role="distill")
-    if not content and reason == "length":
-        payload["max_tokens"] = max(int(payload["max_tokens"]), _chat_max_tokens(base, model))
-        content, _reason = _complete_chat(base, key, payload, role="distill")
+    if reason == "length":
+        # A reply that stopped for room is not a page. Writing it would drop whatever it
+        # never reached, and the guard no longer pastes the missing paragraphs back. Try
+        # once with the model's full ceiling, then hand the unit back to the queue.
+        room = max(int(payload["max_tokens"]), _chat_max_tokens(base, model))
+        if room > int(payload["max_tokens"]):
+            payload["max_tokens"] = room
+            content, reason = _complete_chat(base, key, payload, role="distill")
+        if reason == "length":
+            raise ModelCallFailed("并页没有写完这一页")
     parsed = _parse_page_merge(content or "")
     page = parsed["page"]
     conflicts = parsed["conflicts"]
@@ -8233,7 +7964,7 @@ def _merge_existing_page(
         return old, conflicts, "", gist, False, "", ""
     if not page:
         raise RuntimeError("并页没有交回修订")
-    page = _restore_unnamed_blocks(old, page, explanation, conflicts)
+    page = _shape_merged_page(old, page)
     kept_old = page.strip() == (old or "").strip()
     sources = (old,) if kept_old else (old, new)
     proposed = parsed["name"] if parsed["same"] == "是" else ""
@@ -16395,7 +16126,15 @@ def probe_interval_seconds() -> float:
 GATE_JITTER = 0.1
 _THROTTLE_GATE_SECONDS = 60
 _QUOTA_GATE_STEPS = (300, 900, 1800, 3600, 7200, 18000)
-_GATE_OPEN = {"state": "open", "until_unix": 0.0, "level": 0, "reason": "", "code": "", "at": ""}
+_GATE_OPEN = {
+    "state": "open",
+    "until_unix": 0.0,
+    "probe_unix": 0.0,
+    "level": 0,
+    "reason": "",
+    "code": "",
+    "at": "",
+}
 
 
 def _gate_key(provider_id: str) -> str:
@@ -16439,6 +16178,10 @@ def gate_reading(provider_id: str) -> dict:
     except (TypeError, ValueError):
         reading["until_unix"] = 0.0
     try:
+        reading["probe_unix"] = float(data.get("probe_unix") or 0)
+    except (TypeError, ValueError):
+        reading["probe_unix"] = 0.0
+    try:
         reading["level"] = int(data.get("level") or 0)
     except (TypeError, ValueError):
         reading["level"] = 0
@@ -16446,6 +16189,25 @@ def gate_reading(provider_id: str) -> dict:
     reading["code"] = str(data.get("code") or "")
     reading["at"] = str(data.get("at") or "")
     return reading
+
+
+def gate_next_probe(provider_id: str) -> float:
+    """When a cooling gate is next checked, as a unix time. 0 when it is open.
+
+    The ladder decides how long the line stays off this provider. It must not decide how
+    long until we look again: a quota window can come back at any minute, the check is one
+    small call, and a gate that only looks once per rung turns a five-hour window into a
+    five-hour outage after the provider is already answering. So the next check is at most
+    one probe interval out, whatever rung the ladder reached. A record written before this
+    clock existed falls back to the deadline, which is what it did before.
+    """
+    reading = gate_reading(provider_id)
+    if reading["state"] != "cooling":
+        return 0.0
+    probe_at = float(reading.get("probe_unix") or 0.0)
+    if probe_at <= 0:
+        return float(reading["until_unix"])
+    return probe_at
 
 
 def gate_cooling(provider_id: str) -> bool:
@@ -16472,7 +16234,7 @@ def gate_status(provider_id: str) -> dict:
             last = float(item.get("health_unix") or 0)
             break
     if cooling:
-        next_probe = float(reading["until_unix"])
+        next_probe = gate_next_probe(provider_id)
     else:
         next_probe = (last + probe_interval_seconds()) if last else 0.0
     return {
@@ -16525,9 +16287,12 @@ def gate_hold(provider_id: str, reason: str, retry_after: float | None = None, c
             level = min(previous["level"] + 1, len(_QUOTA_GATE_STEPS) - 1) if same else 0
             base = _QUOTA_GATE_STEPS[level]
         wait = float(retry_after) if retry_after and retry_after > 0 else base
+        now = time.time()
         reading = {
             "state": "cooling",
-            "until_unix": time.time() + _gate_wait(wait, jitter),
+            "until_unix": now + _gate_wait(wait, jitter),
+            # 退避多久是派单的事；下一次探活只等一个常规间隔。
+            "probe_unix": now + probe_interval_seconds(),
             "level": level,
             "reason": reason,
             "code": str(code or ""),
@@ -16560,6 +16325,7 @@ def _gate_extend(provider_id: str, seconds: float) -> None:
         if reading["state"] != "cooling":
             return
         reading["until_unix"] = time.time() + float(seconds)
+        reading["probe_unix"] = time.time() + float(seconds)
         set_setting(_gate_key(provider_id), json.dumps(reading, ensure_ascii=False))
         db().commit()
 
@@ -16572,8 +16338,8 @@ def probe_providers_if_due() -> int:
         provider_id = str(item.get("id"))
         reading = gate_reading(provider_id)
         if reading["state"] == "cooling":
-            # A cooling provider is probed on the gate's own schedule, never sooner.
-            if now < reading["until_unix"]:
+            # 冷却压住的是派单，不是这次探活：按探活时钟走，最多一个间隔。
+            if now < gate_next_probe(provider_id):
                 continue
         else:
             last = float(item.get("health_unix") or 0)
