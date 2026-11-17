@@ -459,8 +459,8 @@ def test_graph_counts_active_nodes_and_a_click_only_recolors_neighbors():
 
     page = graph_page(renderer="cosmos")
     assert "<div class='page-head'><h1>记忆图谱</h1><p class='graph-count' id='graph-count'></p></div>" in page
-    assert "nodes.length + ' 个活跃节点'" not in page
-    assert "'活跃节点：' + nodes.length" in page
+    assert "nodes.length + ' 个活跃结晶'" not in page
+    assert "'活跃结晶：' + nodes.length" in page
     assert "getElementById('graph-count')" in page
     fetch = page.split("fetch('/admin/api/graph'", 1)[1]
     assert fetch.index("getElementById('graph-count')") < fetch.index("rogmemDraw(")
