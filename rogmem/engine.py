@@ -479,6 +479,9 @@ _VEC_READ_BATCH = 2000
 _EMBED = "off"
 _HUB_PUBLIC = ""
 _PASSWORD_READY = False
+# The concurrency /healthz is allowed to report. Cached like the two above, so the answer
+# stays truthful when the console changes it, without the request ever opening the database.
+_LIVE_CONCURRENCY = 0
 _MODEL = None
 _EMBED_GATE = threading.Lock()
 _VECTOR_CATCHUP = threading.Lock()
@@ -1197,27 +1200,36 @@ def embed_threads() -> int:
     return max(1, min(cores, int(cores * machine_budget())))
 
 
-def distill_concurrency(*, offline: bool = False) -> int:
+def _concurrency_from_env() -> int:
+    raw = (os.environ.get("ROGMEM_DISTILL_CONCURRENCY") or "3").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 3
+    return max(1, min(n, 32))
+
+
+def distill_concurrency() -> int:
     """How many distill units may run at once. 1 restores the old serial worker.
 
     Settings first so the console can change it without a rebuild; the environment
     stays as the fallback for a deployment that only has env to speak with.
 
-    ``offline`` is for the liveness answer, which promises not to touch the database:
-    a locked or slow database must not be able to make /healthz wait.
+    This reads a setting, so it is not what /healthz asks: the liveness answer reads the
+    cached number instead (``_remember_liveness``), which stays truthful because every
+    writer of the setting refreshes that cache.
     """
     raw = ""
-    if not offline:
-        try:
-            raw = (get_setting("distill_concurrency") or "").strip()
-        except Exception:
-            raw = ""
+    try:
+        raw = (get_setting("distill_concurrency") or "").strip()
+    except Exception:
+        raw = ""
     if not raw:
-        raw = (os.environ.get("ROGMEM_DISTILL_CONCURRENCY") or "3").strip()
+        return _concurrency_from_env()
     try:
         n = int(raw)
     except ValueError:
-        n = 3
+        return _concurrency_from_env()
     return max(1, min(n, 32))
 
 
@@ -1256,13 +1268,17 @@ def hub_id() -> str:
 
 def _remember_liveness() -> None:
     """Cache what /healthz is allowed to say. The request itself must not open the database."""
-    global _HUB_PUBLIC, _PASSWORD_READY
+    global _HUB_PUBLIC, _PASSWORD_READY, _LIVE_CONCURRENCY
     try:
         _HUB_PUBLIC = hub_id()
     except Exception:
         _HUB_PUBLIC = _HUB_PUBLIC or ""
     try:
         _PASSWORD_READY = bool(get_setting("admin_password"))
+    except Exception:
+        pass
+    try:
+        _LIVE_CONCURRENCY = distill_concurrency()
     except Exception:
         pass
 
@@ -1279,7 +1295,7 @@ def health_snapshot() -> dict:
         "embed": _EMBED,
         "scan": str(_SCAN or ""),
         "password_ready": _PASSWORD_READY,
-        "distill_concurrency": distill_concurrency(offline=True),
+        "distill_concurrency": _LIVE_CONCURRENCY or _concurrency_from_env(),
         "distill_leased": 0,
     }
 
@@ -17021,6 +17037,7 @@ def save_pipeline(values: dict) -> dict:
         for key, value in extra.items():
             set_setting(key, value)
         db().commit()
+    _remember_liveness()
     return {"ok": True, "config": pipeline_config()}
 
 

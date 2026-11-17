@@ -54,14 +54,40 @@ def test_distill_concurrency_prefers_the_setting(monkeypatch):
     assert engine.distill_concurrency() == 5
 
 
-def test_concurrency_offline_never_touches_the_database(monkeypatch):
-    """The liveness answer promises no database, so it must not read a setting."""
+def test_the_liveness_answer_never_touches_the_database(monkeypatch):
+    """/healthz promises no database, so its number must come from the cached snapshot."""
     monkeypatch.setenv("ROGMEM_DISTILL_CONCURRENCY", "3")
+    monkeypatch.setattr(engine, "_LIVE_CONCURRENCY", 7)
     called = []
     monkeypatch.setattr(engine, "get_setting", lambda *_a, **_k: called.append(1) or "9")
-    assert engine.distill_concurrency(offline=True) == 3
+    snapshot = engine.health_snapshot()
+    assert snapshot["distill_concurrency"] == 7
     assert called == []
     assert engine.distill_concurrency() == 9
+
+
+def test_saving_the_pipeline_refreshes_the_liveness_number(tmp_path, monkeypatch):
+    """The console changes the concurrency; /healthz must stop reporting the old one."""
+    monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
+    monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    monkeypatch.setenv("ROGMEM_EMBED", "off")
+    monkeypatch.setenv("ROGMEM_DISTILL_CONCURRENCY", "3")
+    engine.connect(tmp_path, tmp_path / "scan")
+    engine.set_embed_mode("off")
+    assert engine.health_snapshot()["distill_concurrency"] == 3
+    saved = engine.save_pipeline(
+        {
+            "scan_interval": "60",
+            "probe_interval": "60",
+            "reconcile_hours": "3",
+            "sweep_at": "03:00",
+            "distill_concurrency": "6",
+        }
+    )
+    assert saved["ok"] is True
+    assert engine.distill_concurrency() == 6
+    assert engine.health_snapshot()["distill_concurrency"] == 6
 
 
 def test_health_reports_concurrency(tmp_path, monkeypatch):
