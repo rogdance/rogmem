@@ -1107,11 +1107,62 @@ def install_host_hooks(home: Path, programs: list[str] | None = None, allow_real
     return written
 
 
+def refresh_host_bundle(home: Path, programs: list[str] | None = None, allow_real: bool = False) -> dict:
+    """Rewrite the host-side plugin (global rules + hook) for installed hosts.
+
+    This is the update path behind 宿主管理's 「更新宿主插件」. It only touches the two
+    host-side artifacts and a local version marker: no key is minted, no existing config
+    changes, no memory data moves. An empty selection is every detected supported host.
+    """
+    if _real_user_home(Path(home)) and not allow_real:
+        return {"ok": False, "refused": "real-home", "rev": 0, "programs": [], "rules": [], "hooks": []}
+    from rogmem.host_rules import HOST_BUNDLE_REV
+
+    selected = chosen_hosts(home, programs)
+    rules = install_global_rules(home, allow_real=True, programs=programs)
+    hooks = install_host_hooks(home, programs=programs, allow_real=True)
+    try:
+        marker = Path(home) / ".rogmem" / "host-bundle.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps({"rev": HOST_BUNDLE_REV, "programs": selected}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return {
+        "ok": True,
+        "refused": "",
+        "rev": HOST_BUNDLE_REV,
+        "programs": selected,
+        "rules": rules,
+        "hooks": hooks,
+    }
+
+
+def installed_bundle_rev(home: Path) -> str:
+    """The host-side plugin rev this computer last installed. Empty when it never refreshed."""
+    try:
+        loaded = json.loads((Path(home) / ".rogmem" / "host-bundle.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(loaded, dict):
+        return ""
+    return str(loaded.get("rev") or "")
+
+
 def onboard_prompt(secret: str) -> str:
     """One prompt for any installed host. The secret enrolls every installed program on this computer."""
     from rogmem.onboard import onboard_prompt as build
 
     return build(secret)
+
+
+def host_update_prompt() -> str:
+    """One prompt that refreshes the client and re-installs the plugin on every supported host."""
+    from rogmem.onboard import host_update_prompt as build
+
+    return build()
 
 
 def redeem_grant(home: Path, base_url: str, grant: str, program: str, post, allow_real: bool = False) -> dict:

@@ -286,6 +286,25 @@ def test_access_status_joins_the_host_list():
     assert "未安装" not in body
 
 
+def test_host_management_offers_a_plugin_update_prompt():
+    from rogmem.host_rules import HOST_BUNDLE_REV
+    from rogmem.ui import hosts_page
+
+    page = hosts_page([], {"rows": [], "facets": {"devices": [], "agents": []}, "viewer_known": False}, {})
+    assert 'id="update-hosts"' in page
+    assert 'id="update-hosts-note"' in page
+    assert 'id="update-hosts-modal"' in page
+    assert "更新宿主插件" in page
+    assert "__HOST_BUNDLE_REV__" not in page
+    assert "__UPDATE_TEMPLATE__" not in page
+    assert f"var bundleRev = {json.dumps(HOST_BUNDLE_REV)};" in page
+    assert str(HOST_BUNDLE_REV) in page
+    assert "rogmem-host-bundle-seen" in page
+    assert "python -m rogmem hosts update --confirm" in page
+    # 更新提示不能作为 <p class='note'> 落在接入弹窗之前，保持既有版式约定
+    assert "<p class='note'>" not in page.split('id="add-host-modal"', 1)[0]
+
+
 def test_history_progress_is_local_stock_still_waiting(tmp_path, monkeypatch):
     from rogmem.ui import hosts_page
 

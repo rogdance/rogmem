@@ -44,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--program", action="append", dest="programs", help="只接入这些宿主，可重复。不传则接入全部已发现且受支持的宿主")
     connect.add_argument("--base-url", default="http://127.0.0.1:18780", help="中枢基址，配置写 /mcp")
     connect.add_argument("--grant", default="", help="添加宿主签发的短时准入凭证")
+    update = hosts_sub.add_parser("update", help="把已支持宿主的全局规则与 hook 更新到最新；未 --confirm 只出形状")
+    _add_home(update)
+    _add_dry_run(update)
+    update.add_argument("--confirm", action="store_true", help="确认更新；真实主目录仍默认拒绝")
+    update.add_argument("--program", action="append", dest="programs", help="只更新这些宿主，可重复。不传则更新全部已发现且受支持的宿主")
     status = hosts_sub.add_parser("status", help="查看本机宿主接入状态，不写入")
     _add_home(status)
     _add_dry_run(status)
@@ -826,6 +831,7 @@ def hosts_status(args: argparse.Namespace) -> int:
             True,
             device_id=identity["device_id"],
             device_name=identity["device_name"],
+            bundle_rev=inst.installed_bundle_rev(home),
             hosts=inst.inspect_hosts(home),
         )
     )
@@ -872,6 +878,39 @@ def hosts_connect(args: argparse.Namespace) -> int:
         if any(not item["ok"] for item in redeemed):
             payload["ok"] = False
     return _emit(payload)
+
+
+def hosts_update(args: argparse.Namespace) -> int:
+    """Rewrite the host-side plugin for every installed host. No key, no config, no data."""
+    inst = _installer()
+    home = _home(args)
+    dry = _dry_run(args)
+    programs = list(args.programs) if args.programs else None
+    if dry:
+        return _emit(
+            _base_result(
+                "hosts.update",
+                True,
+                programs=inst.chosen_hosts(home, programs),
+                text="确认之前不会更新任何宿主。",
+            )
+        )
+    result = inst.refresh_host_bundle(home, programs, allow_real=True)
+    written = list(result.get("rules") or []) + [name for name in (result.get("hooks") or []) if name not in (result.get("rules") or [])]
+    return _emit(
+        _base_result(
+            "hosts.update",
+            False,
+            ok=bool(result.get("ok")),
+            refused=result.get("refused") or "",
+            rev=result.get("rev") or 0,
+            programs=result.get("programs") or [],
+            rules=result.get("rules") or [],
+            hooks=result.get("hooks") or [],
+            wrote=bool(written),
+            text="已把本机已支持宿主的全局规则和 hook 更新到最新。" if result.get("ok") else "没有更新。",
+        )
+    )
 
 
 def _hermes_turns(home: Path) -> list[dict]:
@@ -1135,6 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
             "scan": hosts_scan,
             "status": hosts_status,
             "connect": hosts_connect,
+            "update": hosts_update,
         }.get(args.hosts_command)
         if action is None:
             parser.parse_args(["hosts", "--help"])

@@ -11211,7 +11211,10 @@ def _core_convention(*, continued: bool, truncated: bool, continuation: dict | N
         )
     elif truncated:
         text += " 有内容没装进这次预算。绝对禁止把没装进来的当成已知。"
-    text += " 按一个具体问题查找用 search。绝对禁止用 search 顶替历史包。"
+    text += (
+        " 涉及本人的约定/偏好或本项目的现状、历史决策时，速写没写、写在状态截点之后、或你只是大概记得，"
+        "先 search 核对再答，宁查勿猜。按一个具体问题查找用 search。绝对禁止用 search 顶替历史包。"
+    )
     return text
 
 

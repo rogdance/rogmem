@@ -682,3 +682,84 @@ def test_an_undecodable_child_pipe_does_not_drop_the_turn(tmp_path, monkeypatch)
     )
     stored = (tmp_path / ".rogmem" / "outbox.jsonl").read_text(encoding="utf-8")
     assert "青石记下这句原话" in stored
+
+
+def test_a_later_user_turn_repeats_the_standing_order(tmp_path, monkeypatch):
+    """The packet is a one-time bootstrap. Later turns carry one short read-when-needed line."""
+    import rogmem.host_hook as hook
+
+    monkeypatch.setattr(hook, "_core_text", lambda home, program, project="": "历史包")
+    monkeypatch.setattr(hook, "_endpoint", lambda home, program: ("http://127.0.0.1:18780/mcp", "rm_test", "dev"))
+    monkeypatch.setattr(hook, "_flush", lambda home, program, rows, timeout=30: [])
+
+    opened = handle(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "合成句：第一问。"},
+        home=tmp_path,
+        program="Trae",
+    )
+    assert opened["hookSpecificOutput"]["additionalContext"].startswith("【rogmem 历史包】")
+
+    later = handle(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "合成句：第二问。"},
+        home=tmp_path,
+        program="Trae",
+    )
+    reminder = later["hookSpecificOutput"]["additionalContext"]
+    assert "search" in reminder and "宁查勿猜" in reminder
+    assert "历史包" not in reminder
+
+
+def test_an_unenrolled_host_repeats_nothing(tmp_path, monkeypatch):
+    import rogmem.host_hook as hook
+
+    monkeypatch.setattr(hook, "_core_text", lambda home, program, project="": "历史包")
+    monkeypatch.setattr(hook, "_flush", lambda home, program, rows, timeout=30: [])
+    markers = tmp_path / ".rogmem" / "hook-core"
+    markers.mkdir(parents=True)
+    (markers / "Trae-s.ok").write_text("ok\n", encoding="utf-8")
+    assert hook._enrolled(tmp_path, "Trae") is False
+    later = handle(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "合成句：第二问。"},
+        home=tmp_path,
+        program="Trae",
+    )
+    assert later == {}
+
+
+def test_refresh_host_bundle_rewrites_rules_and_hook(tmp_path):
+    from installer.rogmem_installer import installed_bundle_rev, refresh_host_bundle
+    from rogmem.host_rules import HOST_BUNDLE_REV
+
+    home = _home(tmp_path)
+    result = refresh_host_bundle(home)
+    assert result["ok"] is True
+    assert result["rev"] == HOST_BUNDLE_REV
+    assert set(result["programs"]) == {"Cursor", "Hermes", "Codex"}
+    assert (home / ".cursor" / "rules" / "rogmem.mdc").is_file()
+    assert (home / ".cursor" / "hooks" / "rogmem.py").is_file()
+    assert (home / ".hermes" / "rogmem-rule.md").is_file()
+    assert (home / ".codex" / "hooks" / "rogmem.py").is_file()
+    marker = json.loads((home / ".rogmem" / "host-bundle.json").read_text(encoding="utf-8"))
+    assert marker["rev"] == HOST_BUNDLE_REV
+    assert set(marker["programs"]) == {"Cursor", "Hermes", "Codex"}
+    assert installed_bundle_rev(home) == HOST_BUNDLE_REV
+    assert refresh_host_bundle(Path.home())["ok"] is False
+
+
+def test_host_bundle_rev_is_content_addressed():
+    from rogmem.host_rules import HOST_BUNDLE_REV, _bundle_rev
+
+    assert HOST_BUNDLE_REV == _bundle_rev()
+    assert len(HOST_BUNDLE_REV) == 12
+    assert all(ch in "0123456789abcdef" for ch in HOST_BUNDLE_REV)
+
+
+def test_hosts_update_command_rewrites_then_reports(tmp_path):
+    import rogmem.cli as cli
+
+    home = _home(tmp_path)
+    assert cli.main(["hosts", "update", "--home", str(home)]) == 0
+    assert not (home / ".cursor" / "rules" / "rogmem.mdc").exists()
+    assert cli.main(["hosts", "update", "--confirm", "--home", str(home)]) == 0
+    assert (home / ".cursor" / "rules" / "rogmem.mdc").is_file()
+    assert (home / ".hermes" / "rogmem-rule.md").is_file()
