@@ -214,6 +214,24 @@ async def healthz(_request: Request) -> Response:
     return JSONResponse(engine.health_snapshot())
 
 
+@mcp.custom_route("/metrics", methods=["GET"])
+async def metrics_prometheus(_request: Request) -> Response:
+    """Prometheus text exposition. May touch the DB; not a liveness probe."""
+    from rogmem import metrics as metrics_mod
+
+    snap = await asyncio.to_thread(metrics_mod.snapshot, engine.db())
+    body = metrics_mod.render_prometheus(snap)
+    return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+@mcp.custom_route("/metrics.json", methods=["GET"])
+async def metrics_json(_request: Request) -> Response:
+    from rogmem import metrics as metrics_mod
+
+    snap = await asyncio.to_thread(metrics_mod.snapshot, engine.db())
+    return JSONResponse(snap)
+
+
 def _client_response(payload: bytes | None) -> Response:
     from rogmem.host_client import bundle_filename
 
