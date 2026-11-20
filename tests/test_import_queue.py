@@ -132,9 +132,9 @@ def test_a_read_that_cannot_land_does_not_stay_claimed(tmp_path, monkeypatch):
 
 
 def test_the_list_page_carries_both_the_fresh_hint_and_the_row_watch():
-    """#170 的探测条与本页的行订阅各做各的：探测条提示别处的新入库，订阅把刚导入的行走完。
+    """#170 的探测与本页的行订阅各做各的：探测发现别处的新入库就静默刷新，订阅把刚导入的行走完。
 
-    导入落行之后要顺手把探测条的基线抬到最新，否则过 20 秒它会报一条已经看得见的「有新的」。
+    导入落行之后要顺手把探测的基线抬到最新，否则过 20 秒它会把已经看得见的行当成新入库整页刷新。
     """
     from rogmem.ui import sources_page
 

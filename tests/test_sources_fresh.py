@@ -1,7 +1,7 @@
-"""列表画好之后，新入库的会话/文件由一次轻探测报出来，页面自己不动。
+"""列表画好之后，新入库的会话/文件由一次轻探测发现，并静默刷新列表。
 
 这一支只做「有没有新内容」的判断：探测按列表同样的筛选读最新一条的标记，
-页面拿自己画时的标记去比；不同才亮一条提示，点一下才重新加载。
+页面拿自己画时的标记去比；不同就整页刷新——不弹提示、不要求点击。
 """
 
 from urllib.parse import parse_qs
@@ -56,7 +56,7 @@ def test_probe_reads_the_same_rows_the_list_does(tmp_path, monkeypatch):
         "total": 3,
     }
     assert engine.source_latest_probe("file")["marker"].endswith("|f0")
-    # 筛选一落空，标记也空：提示不该替列表把看不见的行报出来。
+    # 筛选一落空，标记也空：探测不该替列表把看不见的行报出来。
     assert engine.source_latest_probe("session", kind="summary") == {"marker": "", "total": 0}
     assert engine.source_latest_probe("session", query="句子1")["marker"].endswith("|s1")
 
@@ -84,7 +84,7 @@ def test_no_flag_off_the_first_page_or_under_a_status_filter():
 
 
 def test_ties_keep_the_list_and_the_probe_on_the_same_top(tmp_path, monkeypatch):
-    """同刻入库时，基线（列表首行）和探测必须指同一行，否则列表刚画好就误报有新内容。"""
+    """同刻入库时，基线（列表首行）和探测必须指同一行，否则列表刚画好就误刷。"""
     engine = _open(tmp_path, monkeypatch)
     for index in range(4):
         _insert(engine, f"t{index}", "user", "2026-01-01T00:00:00+00:00", f"同刻{index}")
@@ -95,7 +95,7 @@ def test_ties_keep_the_list_and_the_probe_on_the_same_top(tmp_path, monkeypatch)
 
 
 def test_a_new_row_of_the_same_instant_still_raises_the_count(tmp_path, monkeypatch):
-    """头没动、条数涨了，同样是「有新内容」——页面靠净增数把它报出来。"""
+    """头没动、条数涨了，同样是「有新内容」——页面靠净增数把它刷出来。"""
     engine = _open(tmp_path, monkeypatch)
     _insert(engine, "tz", "user", "2026-01-01T00:00:00+00:00", "先到")
     engine.db().commit()
@@ -122,3 +122,17 @@ def test_the_latest_route_answers_with_a_marker(tmp_path, monkeypatch):
     response = client.get("/admin/api/sources/latest?tab=session")
     assert response.status_code == 200
     assert response.json() == {"marker": "2026-01-01T00:00:00+00:00|s0", "total": 1}
+
+
+def test_new_rows_reload_quietly_without_a_tip():
+    """探测载体常隐；发现新入库时脚本直接刷新，不亮提示、不要求点击。"""
+    row = _row("s0", "2026-01-01T00:00:00+00:00")
+    listed = {"total": 1, "page": 1, "page_size": 20}
+    html = sources_page([row], "session", {}, {"statuses": []}, listed)
+    assert "id='sources-fresh'" in html
+    assert "class='fresh' hidden" in html
+    assert ".fresh[hidden] { display: none; }" in html
+    assert "fresh-btn" not in html
+    assert "点击加载" not in html
+    assert "会在上面亮一下" not in html
+    assert "location.reload()" in html
