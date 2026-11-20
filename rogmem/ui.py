@@ -2191,7 +2191,8 @@ button.peek:active {{ transform: none; }}
 .page-head {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 16px; }}
 .page-head h1 {{ margin: 0; }}
 .graph-count {{ margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-muted); font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }}
-#graph > .graph-count {{ position: absolute; top: 12px; right: 14px; z-index: 12; color: #c8c8c8; text-shadow: 0 0 4px #111, 0 1px 2px #111; pointer-events: none; }}
+#graph > .graph-count {{ position: absolute; top: 14px; right: 16px; z-index: 20; color: #c8c8c8; text-shadow: 0 0 4px #111, 0 1px 2px #111; pointer-events: none; }}
+#graph > canvas.graph-3d {{ display: block; position: relative; z-index: 1; }}
 .local-mark {{ color: var(--brand); font-weight: 600; }}
 .modal-card.wide {{ width: min(720px, calc(100% - 32px)); }}
 .lamp {{ display: inline-flex; align-items: center; gap: 6px; }}
@@ -6329,6 +6330,22 @@ function rogmemLoaderGone(el) {
   loader.classList.add('is-gone');
   setTimeout(function () { if (loader && loader.parentNode) loader.remove(); }, 260);
 }
+function rogmemGraphCount(el) {
+  // 活跃结晶叠在 #graph 里；换画面时必须带走，不能被 replaceChildren 清掉。
+  if (!el || !el.querySelector) return null;
+  return el.querySelector(':scope > #graph-count') || el.querySelector('#graph-count');
+}
+function rogmemReplaceGraphBody(el) {
+  // 星图主体可以整页换掉；#graph-count 是沉浸式 chrome，始终留在容器末尾。
+  if (!el || !el.replaceChildren) return;
+  var tally = rogmemGraphCount(el);
+  var kids = Array.prototype.slice.call(arguments, 1);
+  if (tally) {
+    for (var i = kids.length - 1; i >= 0; i--) if (kids[i] === tally) kids.splice(i, 1);
+    kids.push(tally);
+  }
+  el.replaceChildren.apply(el, kids);
+}
 function rogmemGraphNote(el, text) {
   // 加载中改 loader 那句话；已经落到错误态就改错误卡片那句话。取数期间始终有话说。
   if (!el || !el.querySelector) return;
@@ -6349,7 +6366,7 @@ function rogmemShowError(el, text, retry) {
   // 能就地重取就地重取。整页刷新只是没有取数入口时的退路。
   btn.onclick = typeof retry === 'function' ? function () { retry(); } : function () { location.reload(); };
   box.appendChild(btn);
-  el.replaceChildren(box);
+  rogmemReplaceGraphBody(el, box);
   rogmemClearBusy(el);
 }
 function rogmemGraphCacheKey(el) {
@@ -6527,12 +6544,12 @@ function rogmem3dSegments(edgeCount) {
 
 function rogmemDraw3D(el, nodes, edges, focusMode) {
   var THREE = window.__rogmemThree;
-  if (!THREE) { el.replaceChildren(rogmemOpenBrowser()); rogmemClearBusy(el); return; }
+  if (!THREE) { rogmemReplaceGraphBody(el, rogmemOpenBrowser()); rogmemClearBusy(el); return; }
   if (!nodes.length) {
     var empty = document.createElement('p');
     empty.className = 'note';
     empty.textContent = '还没有可以铺开的星点。';
-    el.replaceChildren(empty);
+    rogmemReplaceGraphBody(el, empty);
     rogmemClearBusy(el);
     return;
   }
@@ -6619,7 +6636,7 @@ function rogmem3dBuild(el, ctx) {
   renderer.setClearColor(0x000000);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.domElement.className = 'graph-3d';
-  el.replaceChildren(renderer.domElement, rogmemGraphTip());
+  rogmemReplaceGraphBody(el, renderer.domElement, rogmemGraphTip());
 
   var controls = new THREE.OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;

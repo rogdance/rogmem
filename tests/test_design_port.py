@@ -394,3 +394,7 @@ def test_graph_counts_active_nodes():
     assert "nodes.length + ' 个活跃结晶'" not in page
     assert "'活跃结晶：' + nodes.length" in page
     assert "getElementById('graph-count')" in page
+    # 三维挂载用 replaceChildren 换画布时必须保住计数，否则右上角灰字整段消失。
+    assert "function rogmemReplaceGraphBody(el)" in page
+    assert "rogmemReplaceGraphBody(el, renderer.domElement, rogmemGraphTip())" in page
+    assert "el.replaceChildren(renderer.domElement, rogmemGraphTip())" not in page
