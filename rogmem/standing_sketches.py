@@ -272,7 +272,7 @@ def _gather_material(
 
         stmts = con.execute(
             """SELECT id, field, chapter, text, quote FROM statements
-               WHERE crystal_id=? AND invalid_at IS NULL
+               WHERE crystal_id=? AND invalid_at IS NULL AND trust='written'
                ORDER BY created_at ASC, id ASC""",
             (cid,),
         ).fetchall()
@@ -535,12 +535,17 @@ def list_ready(con: sqlite3.Connection) -> list[dict]:
 
 
 def pack_for_core(con: sqlite3.Connection, *, project: str = "") -> list[dict]:
-    """Thin core read: only ``standing_sketches``. Prefer project overlay when present."""
+    """Thin core read: only ``standing_sketches``. Prefer project overlay when present.
+
+    Stale rows are omitted — refresh belongs on write hooks, never as a silent
+    crystallizations scan inside core. Serving stale answer_md would be an
+    unsourced-looking wall relative to the current crystal state.
+    """
     ensure_schema(con)
     wanted = _project_key(project)
     rows = con.execute(
-        """SELECT id, question, answer_md FROM standing_sketches
-           WHERE IFNULL(answer_md,'') != ''
+        """SELECT id, question, answer_md, stale FROM standing_sketches
+           WHERE IFNULL(answer_md,'') != '' AND IFNULL(stale, 1) = 0
            ORDER BY id"""
     ).fetchall()
     baselines: dict[str, dict] = {}

@@ -161,3 +161,40 @@ def test_submit_text_honours_block_policy(tmp_path, monkeypatch):
     assert result["ok"] is False
     assert result.get("defense") == DefenseAction.BLOCK.value
     assert "sk-abc123DEF456" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_history_ingest_honours_block_policy(tmp_path, monkeypatch):
+    """Defense gate is an ingest contract, not a submit_text-only hook."""
+    monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
+    monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    from rogmem import engine
+
+    engine.connect(tmp_path, tmp_path / "scan")
+    engine.set_setting(
+        "memory_defense",
+        json.dumps(
+            {"enabled": True, "rules": [{"on": "sensitive_data", "action": "block"}]},
+            ensure_ascii=False,
+        ),
+    )
+    result = engine.ingest_history(
+        [
+            {
+                "role": "user",
+                "text": "请记住 sk-abc123DEF456",
+                "event_at": "2026-01-01T00:00:00+00:00",
+                "session_id": "hist",
+                "turn_id": "t-hist",
+                "seq": 1,
+            }
+        ],
+        program="cursor",
+        device_name="本机",
+    )
+    assert result.get("refused", 0) >= 1 or result.get("imported") == []
+    bodies = [
+        row["body"]
+        for row in engine.db().execute("SELECT body FROM sources WHERE session_id='hist'")
+    ]
+    assert not any("sk-abc123DEF456" in (b or "") for b in bodies)

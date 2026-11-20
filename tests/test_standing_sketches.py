@@ -44,7 +44,7 @@ def _add_statement(engine, crystal_id: str, sid: str, text: str, quote: str) -> 
     engine.db().execute(
         """INSERT INTO statements(
              id, crystal_id, field, chapter, text, quote, source_id, trust, rank, created_at
-           ) VALUES(?,?, '约定','协作',?,?, 'src', '实','主', '2026-01-01T00:00:00+00:00')""",
+           ) VALUES(?,?, '约定','协作',?,?, 'src', 'written','user', '2026-01-01T00:00:00+00:00')""",
         (sid, crystal_id, text, quote),
     )
     engine.db().commit()
@@ -108,6 +108,38 @@ def test_statement_quote_required(tmp_path, monkeypatch):
     assert "不得伪造测试结果" in item["answer_md"]
     assert "引文连续原文" in item["answer_md"]
     assert "无引文的胡说约定" not in item["answer_md"]
+
+
+def test_unverified_statements_excluded_from_standing(tmp_path, monkeypatch):
+    engine = _open(tmp_path, monkeypatch)
+    from rogmem import standing_sketches as ss
+
+    _put_owner_sketch(engine, "无关。")
+    engine.db().execute(
+        """INSERT INTO statements(
+             id, crystal_id, field, chapter, text, quote, source_id, trust, rank, created_at
+           ) VALUES('u1','owner','约定','协作','不得伪造测试结果。','不得伪造测试结果。',
+                    'src','unverified','实','2026-01-01T00:00:00+00:00')"""
+    )
+    engine.db().commit()
+    ss.refresh_one(engine.db(), "owner-collaboration")
+    engine.db().commit()
+    item = next(i for i in ss.list_ready(engine.db()) if i["id"] == "owner-collaboration")
+    assert item["ready"] is False
+    assert "不得伪造测试结果" not in (item["answer_md"] or "")
+
+
+def test_pack_for_core_omits_stale(tmp_path, monkeypatch):
+    engine = _open(tmp_path, monkeypatch)
+    from rogmem import standing_sketches as ss
+
+    _put_owner_sketch(engine, "协作约定：新鲜版本。")
+    engine.db().execute(
+        "UPDATE standing_sketches SET stale=1 WHERE id='owner-collaboration'"
+    )
+    engine.db().commit()
+    packed = ss.pack_for_core(engine.db())
+    assert "记忆主人协作约定" not in [item["name"] for item in packed]
 
 
 def test_project_overlay_is_cross_page(tmp_path, monkeypatch):

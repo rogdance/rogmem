@@ -21,8 +21,12 @@ DEDUP_COSINE = 0.97
 # When embed is off / unavailable: text affinity for the same probe role.
 DEDUP_TEXT_RATIO = 0.92
 DEDUP_TOP_K = 5
+# Substring reinforce needs enough mass that incidental overlap is unlikely.
+# Four characters (old floor) lets "18080" / short slots inflate proof.
+REINFORCE_QUOTE_MIN = 12
 
-_SEPARATORS = re.compile(r"[\s_\-·.．,，、/\"'“”‘’「」『』]+")
+# Include CJK sentence punctuation so "断电。" and "断电" share a fold key.
+_SEPARATORS = re.compile(r"[\s_\-·.．。!！?？;；:：,，、/\"'“”‘’「」『』]+")
 _DIGIT_RUN = re.compile(r"\d+")
 _NEGATION = re.compile(
     r"(不|没|無|无|非|未|勿|别|別|并非|並非|never|not|no|without)\s*",
@@ -465,7 +469,7 @@ def reinforce_restated_statements(
     ).fetchall()
     for row in rows:
         quote = str(row["quote"] or "").strip()
-        if len(quote) < 4 or quote not in hay:
+        if len(quote) < REINFORCE_QUOTE_MIN or quote not in hay:
             continue
         from rogmem.engine import _link_statement_source
 

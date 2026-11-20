@@ -2201,6 +2201,21 @@ def _memory_defense_policy():
         return default_policy()
 
 
+def _screen_ingest_body(text: str):
+    """Single ingest gate for live turns and history imports.
+
+    Returns ``(body, decision, blocked)``. Blocked bodies must not be stored.
+    """
+    from rogmem.memory_defense import DefenseAction, screen as defense_screen
+
+    decision = defense_screen(text, _memory_defense_policy())
+    if decision.action is DefenseAction.BLOCK:
+        return None, decision, True
+    if decision.action is DefenseAction.REDACT and decision.redacted_content is not None:
+        return decision.redacted_content, decision, False
+    return text, decision, False
+
+
 def _record_defense_decision(con: sqlite3.Connection, decision, *, source_kind: str = "") -> None:
     """记下决策计数与指纹预览；永不写原值。"""
     from rogmem.memory_defense import DefenseAction
@@ -2243,7 +2258,7 @@ def submit_text(
     lane: str = "fast",
     event_basis: str = "",
 ) -> dict:
-    from rogmem.memory_defense import DefenseAction, screen as defense_screen
+    from rogmem.memory_defense import DefenseAction
 
     stored_lane = lane_for(
         kind=kind,
@@ -2255,8 +2270,8 @@ def submit_text(
     cleaned = strip_recall(text)
     if cleaned is None:
         return {"ok": False, "error": "只有召回内容，未入库"}
-    decision = defense_screen(cleaned, _memory_defense_policy())
-    if decision.action is DefenseAction.BLOCK:
+    body, decision, blocked = _screen_ingest_body(cleaned)
+    if blocked:
         with LOCK:
             con = db()
             _record_defense_decision(con, decision, source_kind=kind)
@@ -2266,11 +2281,7 @@ def submit_text(
             "error": "敏感数据按 Memory Defense 策略已拒绝入库",
             "defense": DefenseAction.BLOCK.value,
         }
-    body = cleaned
-    redacted_flag = 0
-    if decision.action is DefenseAction.REDACT and decision.redacted_content is not None:
-        body = decision.redacted_content
-        redacted_flag = 1
+    redacted_flag = 1 if decision.action is DefenseAction.REDACT else 0
     content_hash = hashlib.sha256(text.encode()).hexdigest()
     idem = f"{session_id}:{seq}:{content_hash}"
     planned = _planned_chunks(body, "", 0)[0]
@@ -2342,6 +2353,8 @@ def _prepare_history_jobs(
     """解析并哈希。不切块、不嵌入。切块留给已经在跑的向量补齐。
     返回 (待插入 jobs, 已拒绝条数)。被 ingest_history / ingest_history_for_job 共用。
     """
+    from rogmem.memory_defense import DefenseAction
+
     jobs: list[dict] = []
     refused = 0
     for turn in turns or []:
@@ -2351,11 +2364,15 @@ def _prepare_history_jobs(
         if role not in {"user", "assistant"} or not event_at or cleaned is None:
             refused += 1
             continue
+        body, decision, blocked = _screen_ingest_body(cleaned)
+        if blocked:
+            refused += 1
+            continue
         kind = "user" if role == "user" else "agent"
         session_id = str(turn.get("session_id") or program)
         turn_id = str(turn.get("turn_id") or session_id)
         seq = int(turn.get("seq") or 0)
-        content_hash = hashlib.sha256(cleaned.encode()).hexdigest()
+        content_hash = hashlib.sha256((body or "").encode()).hexdigest()
         jobs.append({
             "kind": kind,
             "session_id": session_id,
@@ -2366,8 +2383,15 @@ def _prepare_history_jobs(
             "label": resolve_device_name(turn.get("device_name") or device_name),
             "idem": f"{session_id}:{seq}:{content_hash}",
             "content_hash": content_hash,
-            "cleaned": cleaned,
+            "cleaned": body,
             "project": str(turn.get("project") or "").strip(),
+            "defense_action": decision.action.value
+            if decision.action is not DefenseAction.ALLOW or decision.hits
+            else "",
+            "defense_decision": decision
+            if decision.action is not DefenseAction.ALLOW or decision.hits
+            else None,
+            "redacted": 1 if decision.action is DefenseAction.REDACT else 0,
         })
     return order_history_newest_first(jobs), refused
 
@@ -2440,8 +2464,8 @@ def _ingest_history_inline(
         source_id = secrets.token_hex(8)
         con.execute(
             """INSERT INTO sources(id,kind,session_id,turn_id,msg_seq,device_id,device_name,agent_id,agent_name,
-               project_ref,event_at,event_basis,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,wait_until)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'已解析待向量化',?,0,?)""",
+               project_ref,event_at,event_basis,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,wait_until,redacted)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'已解析待向量化',?,0,?,?)""",
             (
                 source_id,
                 job["kind"],
@@ -2461,8 +2485,12 @@ def _ingest_history_inline(
                 job["cleaned"],
                 history_lane,
                 provisional_wait,
+                int(job.get("redacted") or 0),
             ),
         )
+        decision = job.get("defense_decision")
+        if decision is not None:
+            _record_defense_decision(con, decision, source_kind=job["kind"])
         _queue_source(con, source_id, history_lane)
         _set_pipeline(con, source_id, "解析", "ok")
         _set_pipeline(con, source_id, "向量", "run")
@@ -10486,29 +10514,10 @@ def _add_statement(con, crystal_id, field, chapter, text, quote, source_id, rank
 
                 refresh_after_crystal_change(con, crystal_id, commit=False)
             return same["id"]
-        # Near-duplicate paraphrase of an existing belief: reuse the live statement
-        # so proof rises without inventing a parallel wording row.
-        near = _near_dup_statement_for_belief(con, crystal_id, field, chapter, text)
-        if near is not None:
-            con.execute("UPDATE statements SET valid_until=? WHERE id=?", (until, near))
-            _link_statement_source(con, near, source_id, quote)
-            _attach_belief_after_statement(
-                con,
-                statement_id=near,
-                crystal_id=crystal_id,
-                field=field,
-                chapter=chapter,
-                text=text,
-                quote=quote,
-                source_id=source_id,
-                event_at=event_at,
-                trust=trust,
-            )
-            if (quote or "").strip():
-                from rogmem.standing_sketches import refresh_after_crystal_change
-
-                refresh_after_crystal_change(con, crystal_id, commit=False)
-            return near
+        # Near-dup belongs on the belief layer only. Collapsing distinct statement
+        # rows via embedding/text affinity would let vectors decide statement
+        # identity and silently drop newer wording — proof aggregation must not
+        # rewrite what the page currently asserts.
         con.execute(
             f"""UPDATE statements SET invalid_at=?
                WHERE crystal_id=? AND invalid_at IS NULL AND text!=?
@@ -10586,37 +10595,6 @@ def _attach_belief_after_statement(
         event_at=event_at,
         trust=trust,
     )
-
-
-def _near_dup_statement_for_belief(con, crystal_id, field, chapter, text) -> str | None:
-    """If a live belief near-matches ``text``, return one member statement id."""
-    from rogmem.belief import belief_place, probe_near_dup, should_merge
-
-    place = belief_place(field, chapter)
-    if not place or not text:
-        return None
-    twin, sim, threshold = probe_near_dup(
-        con, crystal_id=crystal_id, place=place, text=text
-    )
-    if twin is None or not should_merge(text, twin["text"], sim, threshold=threshold):
-        return None
-    row = con.execute(
-        """SELECT statement_id FROM belief_statements
-           WHERE belief_id=? LIMIT 1""",
-        (twin["id"],),
-    ).fetchone()
-    if row:
-        return str(row["statement_id"])
-    # Belief without membership yet: match by twin wording.
-    place_args = (place, place, place, place)
-    same = con.execute(
-        f"""SELECT id FROM statements
-           WHERE crystal_id=? AND invalid_at IS NULL AND text=?
-             AND {_PLACE_MATCH}
-           LIMIT 1""",
-        (crystal_id, twin["text"], *place_args),
-    ).fetchone()
-    return str(same["id"]) if same else None
 
 
 def _diff_blocks(text: str) -> list[str]:

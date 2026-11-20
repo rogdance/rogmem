@@ -123,37 +123,39 @@ def test_reinforce_restated_quotes_without_merge_json(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     con = engine.db()
     now = "2026-06-01T00:00:00+00:00"
+    quote = "证人确认雾季课题当晚断电"
     con.execute(
         "INSERT INTO crystallizations(id,type,name,status,summary_json,chapters_json) "
         "VALUES('c1','概念','雾季课题','active','{}','{}')"
     )
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane)
-           VALUES('s1','user',?,'h1','证人确认雾季断电','已萃取','fast')""",
-        (now,),
+           VALUES('s1','user',?,?,?,'已萃取','fast')""",
+        (now, "h1", quote),
     )
     sid = engine._add_statement(
         con,
         "c1",
         "概述",
         None,
-        "证人确认雾季断电",
-        "证人确认雾季断电",
+        quote,
+        quote,
         "s1",
         "user",
         "written",
         now,
     )
+    body2 = f"材料复述：{quote}。另有闲话。"
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane)
-           VALUES('s2','user',?,'h2','材料复述：证人确认雾季断电。另有闲话。','已萃取','fast')""",
-        (now,),
+           VALUES('s2','user',?,'h2',?,'已萃取','fast')""",
+        (now, body2),
     )
     n = reinforce_restated_statements(
         con,
         crystal_id="c1",
         source_id="s2",
-        body="材料复述：证人确认雾季断电。另有闲话。",
+        body=body2,
     )
     con.commit()
     assert n == 1
@@ -162,6 +164,70 @@ def test_reinforce_restated_quotes_without_merge_json(tmp_path, monkeypatch):
     ).fetchall()
     assert {row["source_id"] for row in rows} == {"s1", "s2"}
     assert engine._statement_proof_count(con, sid) >= 2
+
+
+def test_paraphrase_keeps_new_statement_wording(tmp_path, monkeypatch):
+    """Belief near-dup must not collapse statement identity or freeze old wording."""
+    engine = _open(tmp_path, monkeypatch)
+    con = engine.db()
+    now = "2026-06-01T00:00:00+00:00"
+    con.execute(
+        "INSERT INTO crystallizations(id,type,name,status,summary_json,chapters_json) "
+        "VALUES('c1','人物','证人','active','{}','{}')"
+    )
+    first = "证人确认雾季课题当晚断电"
+    second = "证人确认了雾季课题当晚断电"
+    for src, wording in (("s1", first), ("s2", second)):
+        con.execute(
+            """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane)
+               VALUES(?,?,?,?,?,'已萃取','fast')""",
+            (src, "user", now, f"h-{src}", wording),
+        )
+        engine._add_statement(
+            con, "c1", "概述", None, wording, wording, src, "user", "written", now
+        )
+    con.commit()
+    live = con.execute(
+        """SELECT id, text FROM statements
+           WHERE crystal_id='c1' AND invalid_at IS NULL AND trust='written'"""
+    ).fetchall()
+    assert len(live) == 1
+    assert live[0]["text"] == second
+    beliefs = con.execute(
+        "SELECT id FROM beliefs WHERE crystal_id='c1' AND invalid_at IS NULL "
+        "AND IFNULL(merged_into,'')=''"
+    ).fetchall()
+    assert len(beliefs) == 1
+    assert belief_proof_count(con, beliefs[0]["id"]) == 2
+
+
+def test_short_quote_does_not_reinforce(tmp_path, monkeypatch):
+    engine = _open(tmp_path, monkeypatch)
+    con = engine.db()
+    now = "2026-06-01T00:00:00+00:00"
+    con.execute(
+        "INSERT INTO crystallizations(id,type,name,status,summary_json,chapters_json) "
+        "VALUES('c1','概念','端口','active','{}','{}')"
+    )
+    con.execute(
+        """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane)
+           VALUES('s1','user',?,'h1','端口 18080','已萃取','fast')""",
+        (now,),
+    )
+    # Direct row: short quote that would false-hit many bodies if reinforced.
+    con.execute(
+        """INSERT INTO statements(
+             id, crystal_id, field, text, quote, source_id, trust, rank, created_at
+           ) VALUES('st1','c1','概述','生产端口','18080','s1','written','user',?)""",
+        (now,),
+    )
+    n = reinforce_restated_statements(
+        con,
+        crystal_id="c1",
+        source_id="s2",
+        body="别处也写了 18080 与无关闲话。",
+    )
+    assert n == 0
 
 
 def test_belief_schema_exists_after_connect(tmp_path, monkeypatch):
