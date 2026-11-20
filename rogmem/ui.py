@@ -5982,8 +5982,8 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
 <label>{device_filter}<select name='device'>{device_options}</select></label>
 <label>智能体<select name='agent'>{agent_options}</select></label>
 <button class='quiet' type='submit'>筛选</button>
-<button type="button" id="update-hosts" class="quiet">更新宿主插件</button>
-<button type="button" id="add-host" class="row-end">添加宿主</button>
+<button type="button" id="update-hosts" class="quiet row-end">更新宿主插件</button>
+<button type="button" id="add-host">添加宿主</button>
 </form>
 <div class="note" id="update-hosts-note" hidden>宿主端插件有新版本（{HOST_BUNDLE_REV}）。点「更新宿主插件」，复制一段提示词贴给本机任意一个已安装的宿主，就能把本机所有已支持的宿主一起更新。</div>
 <div class="host-fleet-wrap" style="overflow-x:auto;width:100%;max-width:calc(100vw - 2rem);box-sizing:border-box;-webkit-overflow-scrolling:touch;"><table id="host-fleet" data-viewer="{viewer}" style="min-width:860px;"><tr>{_host_head()}</tr>{''.join(fleet_rows)}</table></div>

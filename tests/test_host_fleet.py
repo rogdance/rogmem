@@ -286,14 +286,20 @@ def test_access_status_joins_the_host_list():
     assert "未安装" not in body
 
 
-def test_host_management_offers_a_plugin_update_prompt():
+def test_host_management_offers_a_plugin_update_prompt(tmp_path, monkeypatch):
     from rogmem.host_rules import HOST_BUNDLE_REV
     from rogmem.ui import hosts_page
 
+    _open(tmp_path, monkeypatch)
     page = hosts_page([], {"rows": [], "facets": {"devices": [], "agents": []}, "viewer_known": False}, {})
     assert 'id="update-hosts"' in page
     assert 'id="update-hosts-note"' in page
     assert 'id="update-hosts-modal"' in page
+    # 右对齐组：更新宿主插件在添加宿主左侧（row-end 挂在前者）
+    assert (
+        '<button type="button" id="update-hosts" class="quiet row-end">更新宿主插件</button>\n'
+        '<button type="button" id="add-host">添加宿主</button>'
+    ) in page
     assert "更新宿主插件" in page
     assert "__HOST_BUNDLE_REV__" not in page
     assert "__UPDATE_TEMPLATE__" not in page
