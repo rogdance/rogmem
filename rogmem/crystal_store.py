@@ -586,6 +586,7 @@ class CrystalStore:
             )
         from rogmem.crystal_index import sync_crystal
         from rogmem.section_index import sync_sections
+        from rogmem.standing_sketches import refresh_after_crystal_change
         from rogmem.wikilink import sync_wikilinks
 
         repo = ""
@@ -596,8 +597,13 @@ class CrystalStore:
         sync_crystal(self.con, crystal.id, crystal.name, crystal.body_md, crystal.sketch_md, crystal.status)
         # 段落引只在正文真变了才重建：否则每次落库（含状态流转）都要切段+逐段分词，属效率倒退。
         old_body = _row_get(row, "body_md") if row is not None else None
+        old_sketch = _row_get(row, "sketch_md") if row is not None else None
         if old_body != crystal.body_md:
             sync_sections(self.con, crystal.id, crystal.body_md)
+        if old_body != crystal.body_md or old_sketch != crystal.sketch_md:
+            # Standing sketches refresh off the core path: reassemble now so the
+            # next core pack only reads the thin standing_sketches table.
+            refresh_after_crystal_change(self.con, crystal.id, commit=False)
         if commit:
             self.con.commit()
         loaded = self.get(crystal.id)

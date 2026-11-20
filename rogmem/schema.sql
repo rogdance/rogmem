@@ -85,6 +85,19 @@ CREATE TABLE IF NOT EXISTS crystal_openings (
   repo TEXT NOT NULL DEFAULT ''
 );
 
+-- Cross-page standing sketches (question → answer). core reads these directly.
+CREATE TABLE IF NOT EXISTS standing_sketches (
+  id TEXT PRIMARY KEY,
+  question TEXT NOT NULL,
+  answer_md TEXT NOT NULL DEFAULT '',
+  source_crystal_ids TEXT NOT NULL DEFAULT '[]',
+  source_fingerprint TEXT NOT NULL DEFAULT '',
+  cite_json TEXT NOT NULL DEFAULT '[]',
+  refreshed_at TEXT NOT NULL DEFAULT '',
+  stale INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS standing_sketches_stale ON standing_sketches(stale);
+
 CREATE UNIQUE INDEX IF NOT EXISTS sources_idem ON sources(idempotency_key);
 CREATE INDEX IF NOT EXISTS sources_recent_turn
 ON sources(IFNULL(event_at, ''), id, kind, IFNULL(project_ref, ''))

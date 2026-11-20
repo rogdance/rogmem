@@ -887,6 +887,7 @@ def connect(data: Path, scan: Path) -> None:
     )
     from rogmem.crystal_store import migrate_crystal_store
     from rogmem import migrate as schema_migrate
+    from rogmem.standing_sketches import ensure_registry
 
     migrate_crystal_store(con)
     # 版本化迁移：新表/新约束只走这里；上面的幂等 ALTER 仍是版本 0 基线。
@@ -894,6 +895,7 @@ def connect(data: Path, scan: Path) -> None:
     from rogmem.belief import ensure_belief_schema
 
     ensure_belief_schema(con)
+    ensure_registry(con)
     _DB = con
     _LOCAL.con = con
     jieba.initialize()
@@ -10479,6 +10481,10 @@ def _add_statement(con, crystal_id, field, chapter, text, quote, source_id, rank
                 event_at=event_at,
                 trust=trust,
             )
+            if (quote or "").strip():
+                from rogmem.standing_sketches import refresh_after_crystal_change
+
+                refresh_after_crystal_change(con, crystal_id, commit=False)
             return same["id"]
         # Near-duplicate paraphrase of an existing belief: reuse the live statement
         # so proof rises without inventing a parallel wording row.
@@ -10498,6 +10504,10 @@ def _add_statement(con, crystal_id, field, chapter, text, quote, source_id, rank
                 event_at=event_at,
                 trust=trust,
             )
+            if (quote or "").strip():
+                from rogmem.standing_sketches import refresh_after_crystal_change
+
+                refresh_after_crystal_change(con, crystal_id, commit=False)
             return near
         con.execute(
             f"""UPDATE statements SET invalid_at=?
@@ -10542,6 +10552,10 @@ def _add_statement(con, crystal_id, field, chapter, text, quote, source_id, rank
         event_at=event_at,
         trust=trust,
     )
+    if (quote or "").strip():
+        from rogmem.standing_sketches import refresh_after_crystal_change
+
+        refresh_after_crystal_change(con, crystal_id, commit=False)
     return sid
 
 
@@ -12306,8 +12320,8 @@ def _core_convention(*, continued: bool, truncated: bool, continuation: dict | N
         text = "这是更早的摘录，不是历史包。速写不在这次返回里。绝对禁止把这次当成新的历史包。"
     else:
         text = (
-            "这是历史包。顺序是人物速写、工程速写，然后才是最近摘录。"
-            "身份、偏好、工程规范以速写为准。近况若摘录里的原句更新，以摘录为准。用户本场原话高于这包。"
+            "这是历史包。顺序是人物速写、工程速写、跨页常驻速写（问题→答案），然后才是最近摘录。"
+            "身份、偏好、工程规范以速写与常驻速写为准。近况若摘录里的原句更新，以摘录为准。用户本场原话高于这包。"
             "最近摘录按时间排，不按仓库切开。有仓库标记的带着，没有就空着。"
         )
         if not (project or "").strip():
@@ -12385,10 +12399,14 @@ def core_memory(
         loaded, truncated, continuation = _pack_recent(budget, project, before_text)
         omitted = ["最近摘录"] if truncated else []
         return _finish_core(loaded, omitted, truncated, continuation, continued=True, project=project)
+    from rogmem.standing_sketches import pack_for_core
+
+    standing_sections = pack_for_core(db(), project=project)
     if owner_sketch:
         sketch_sections = [{"name": "记忆主人", "text": owner_sketch}]
         if project_sketch_item is not None:
             sketch_sections.append(project_sketch_item)
+        sketch_sections.extend(standing_sections)
         loaded, omitted, used, sketch_cut = _pack_sketches(sketch_sections, budget)
         excerpts, cut, continuation = _pack_recent(max(0, budget - used), project, "")
         if cut and not excerpts:
@@ -12407,6 +12425,7 @@ def core_memory(
             covered.add(heading)
     if project_sketch_item is not None:
         sections.append(project_sketch_item)
+    sections.extend(standing_sections)
     loaded = []
     omitted = []
     used = 0
