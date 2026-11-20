@@ -76,6 +76,7 @@ from rogmem.prompts import (
     distill_system,
     proper_name_user,
 )
+from rogmem.typed_gate import parse_yes_no
 from rogmem.queue_priority import (
     ORIGIN_BATCH,
     ORIGIN_HISTORY,
@@ -9827,15 +9828,20 @@ def _judge_model(role: str) -> tuple[str, str, str] | None:
     return None
 
 
+# Binary gates need only an enum token; keep the completion budget tiny.
+_TYPED_YES_NO_MAX_TOKENS = 32
+
+
 @charging("身份合并")
-def _ask_model(role: str, system: str, user: str) -> dict:
+def _ask_yes_no(role: str, system: str, user: str) -> str:
+    """Ask a narrow yes/no gate. Returns ``是`` or ``否``; refuses unfinished replies."""
     target = _judge_model(role)
     if not target:
         raise RuntimeError("这一问没有模型")
     base, key, model = target
     payload = {
         "model": model,
-        "max_tokens": _chat_max_tokens(base, model),
+        "max_tokens": min(_chat_max_tokens(base, model), _TYPED_YES_NO_MAX_TOKENS),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -9843,26 +9849,26 @@ def _ask_model(role: str, system: str, user: str) -> dict:
     }
     content, reason = _complete_chat(base, key, payload, role=role)
     if not content and reason == "length":
-        payload["max_tokens"] = _chat_max_tokens(base, model)
+        payload["max_tokens"] = min(_chat_max_tokens(base, model), _TYPED_YES_NO_MAX_TOKENS)
         content, reason = _complete_chat(base, key, payload, role=role)
     if not content:
         raise RuntimeError("这一问没有给出正文")
-    return _model_json(content, reason)
+    _require_finished(reason)
+    try:
+        return parse_yes_no(content)
+    except ValueError as exc:
+        raise RuntimeError("身份合并结论无效") from exc
 
 
 def _ask_same_entity(name_a: str, name_b: str, anchors: list, extra: str) -> str:
     """One identity question. The caller decides whether a yes may merge."""
-    same = _ask_model(
+    return _ask_yes_no(
         "merge",
         MERGE_ENTITY_SYSTEM,
         "先判断是不是同一实体。这一问不合并页面。\n"
         f"甲：{name_a}\n乙：{name_b}\n锚点：{'、'.join(str(item) for item in anchors[:4])}\n"
         + (f"新的原始记忆：{extra[:400]}" if extra else ""),
     )
-    answer = same.get("answer")
-    if answer not in {"是", "否"}:
-        raise RuntimeError("身份合并结论无效")
-    return answer
 
 
 def _verbatim_missing(quote: str, published: str) -> str:
@@ -12060,7 +12066,7 @@ def _proper_name_ok(name: str, ctype: str, quote: str) -> bool:
     base, key, model = target
     payload = {
         "model": model,
-        "max_tokens": _chat_max_tokens(base, model),
+        "max_tokens": min(_chat_max_tokens(base, model), _TYPED_YES_NO_MAX_TOKENS),
         "messages": [
             {"role": "system", "content": PROPER_NAME_SYSTEM},
             {"role": "user", "content": proper_name_user(name, ctype, quote)},
@@ -12068,10 +12074,10 @@ def _proper_name_ok(name: str, ctype: str, quote: str) -> bool:
     }
     try:
         content, reason = _complete_chat(base, key, payload, role="proper")
-        data = _model_json(content, reason)
+        _require_finished(reason)
+        return parse_yes_no(content) == "是"
     except Exception:
         return False
-    return data.get("answer") == "是"
 
 
 def withdraw_projects_without_repo() -> int:

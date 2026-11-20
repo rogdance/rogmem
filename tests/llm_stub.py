@@ -224,8 +224,7 @@ class Handler(BaseHTTPRequestHandler):
                     ctype = line.split("：", 1)[1].strip()
             blocked_product = ctype == "产品" and any(word in name for word in ("模板", "框架", "方法论", "量表", "题库"))
             answer = "否" if blocked_product else "是" if name in {"周生生", "捷安特", "腾讯", "和平精英", "青石记", "北窗记", "rogmem", "面试评估框架"} else "否"
-            content = json.dumps({"answer": answer}, ensure_ascii=False)
-            out = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+            out = json.dumps({"choices": [{"message": {"content": answer}}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(out)))
@@ -234,8 +233,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if "是不是同一实体" in source:
             answer = "否" if "不是同一人" in source else "是"
-            content = json.dumps({"answer": answer}, ensure_ascii=False)
-            out = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+            out = json.dumps({"choices": [{"message": {"content": answer}}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(out)))

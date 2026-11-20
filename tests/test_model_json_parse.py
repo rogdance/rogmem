@@ -71,23 +71,19 @@ def test_a_missing_finish_reason_is_treated_as_finished():
 
 
 def test_the_identity_question_refuses_a_reply_that_stopped_for_room(monkeypatch):
-    # _ask_model is the other reader of a model JSON reply. A truncated answer that
-    # happens to parse must not be taken as the model's whole answer here either.
+    # Typed yes/no gates still refuse a finish=length reply, even if the fragment
+    # looks like a complete enum token.
     monkeypatch.setattr(engine, "_judge_model", lambda role: ("base", "key", "model"))
-    monkeypatch.setattr(
-        engine, "_complete_chat", lambda *a, **k: ('{"answer":"是","why":"写到一半', "length")
-    )
+    monkeypatch.setattr(engine, "_complete_chat", lambda *a, **k: ("是", "length"))
     with pytest.raises(ModelCallFailed):
-        engine._ask_model("merge", "系统", "问题")
+        engine._ask_yes_no("merge", "系统", "问题")
 
 
 def test_a_name_check_that_stopped_for_room_is_not_a_yes(monkeypatch):
-    # A proper-name check reads the same kind of reply. Stopped-for-room must fall to
-    # the safe side (not a name), never a partial "是" that would merge two entities.
+    # A proper-name check reads the typed enum. Stopped-for-room must fall to the
+    # safe side (not a name), never a partial "是".
     monkeypatch.setattr(engine, "llm_target", lambda role: ("base", "key", "model"))
-    monkeypatch.setattr(
-        engine, "_complete_chat", lambda *a, **k: ('{"answer":"是"', "length")
-    )
+    monkeypatch.setattr(engine, "_complete_chat", lambda *a, **k: ("是", "length"))
     assert engine._proper_name_ok("甲", "人物", "引文") is False
 
 
