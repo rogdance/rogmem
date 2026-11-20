@@ -886,8 +886,11 @@ def connect(data: Path, scan: Path) -> None:
            )"""
     )
     from rogmem.crystal_store import migrate_crystal_store
+    from rogmem import migrate as schema_migrate
 
     migrate_crystal_store(con)
+    # 版本化迁移：新表/新约束只走这里；上面的幂等 ALTER 仍是版本 0 基线。
+    schema_migrate.apply(con)
     from rogmem.belief import ensure_belief_schema
 
     ensure_belief_schema(con)
@@ -2187,6 +2190,44 @@ def _event_cannot_reopen(source, statement) -> bool:
     return not _can_settle_current(source, str(current or ""))
 
 
+def _memory_defense_policy():
+    from rogmem.memory_defense import default_policy, policy_from_json
+
+    try:
+        return policy_from_json(get_setting("memory_defense"))
+    except ValueError:
+        return default_policy()
+
+
+def _record_defense_decision(con: sqlite3.Connection, decision, *, source_kind: str = "") -> None:
+    """记下决策计数与指纹预览；永不写原值。"""
+    from rogmem.memory_defense import DefenseAction
+
+    action = decision.action.value if hasattr(decision.action, "value") else str(decision.action)
+    try:
+        con.execute(
+            """INSERT INTO defense_stats(action, count) VALUES(?, 1)
+               ON CONFLICT(action) DO UPDATE SET count = count + 1""",
+            (action,),
+        )
+    except sqlite3.Error:
+        return
+    if decision.action is DefenseAction.ALLOW and not decision.hits:
+        return
+    at = utcnow()
+    detector = decision.detector or ""
+    for hit in decision.hits or [{"detector": detector, "preview": ""}]:
+        preview = str(hit.get("preview") or "")
+        # belt: never persist a preview that looks like a full sk- token
+        if preview.startswith("sk-") and "..." not in preview:
+            preview = "[redacted]"
+        con.execute(
+            """INSERT INTO defense_hits(at, action, detector, preview, source_kind)
+               VALUES(?,?,?,?,?)""",
+            (at, action, str(hit.get("detector") or detector), preview, source_kind or ""),
+        )
+
+
 def submit_text(
     *,
     kind: str,
@@ -2200,6 +2241,8 @@ def submit_text(
     lane: str = "fast",
     event_basis: str = "",
 ) -> dict:
+    from rogmem.memory_defense import DefenseAction, screen as defense_screen
+
     stored_lane = lane_for(
         kind=kind,
         origin=ORIGIN_LIVE if kind != "summary" and lane in {"fast", "p0", "0", ""} else None,
@@ -2210,9 +2253,25 @@ def submit_text(
     cleaned = strip_recall(text)
     if cleaned is None:
         return {"ok": False, "error": "只有召回内容，未入库"}
+    decision = defense_screen(cleaned, _memory_defense_policy())
+    if decision.action is DefenseAction.BLOCK:
+        with LOCK:
+            con = db()
+            _record_defense_decision(con, decision, source_kind=kind)
+            con.commit()
+        return {
+            "ok": False,
+            "error": "敏感数据按 Memory Defense 策略已拒绝入库",
+            "defense": DefenseAction.BLOCK.value,
+        }
+    body = cleaned
+    redacted_flag = 0
+    if decision.action is DefenseAction.REDACT and decision.redacted_content is not None:
+        body = decision.redacted_content
+        redacted_flag = 1
     content_hash = hashlib.sha256(text.encode()).hexdigest()
     idem = f"{session_id}:{seq}:{content_hash}"
-    planned = _planned_chunks(cleaned, "", 0)[0]
+    planned = _planned_chunks(body, "", 0)[0]
     with LOCK:
         con = db()
         old = con.execute("SELECT id FROM sources WHERE idempotency_key=?", (idem,)).fetchone()
@@ -2238,8 +2297,8 @@ def submit_text(
             wait_until = None
         con.execute(
             """INSERT INTO sources(id,kind,session_id,turn_id,msg_seq,device_id,device_name,agent_id,agent_name,
-               project_ref,event_at,event_basis,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,wait_until)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'已解析待向量化',?,?,?)""",
+               project_ref,event_at,event_basis,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,wait_until,redacted)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'已解析待向量化',?,?,?,?)""",
             (
                 source_id,
                 kind,
@@ -2256,12 +2315,15 @@ def submit_text(
                 now,
                 idem,
                 content_hash,
-                cleaned,
+                body,
                 stored_lane,
                 pair,
                 wait_until,
+                redacted_flag,
             ),
         )
+        if decision.action is not DefenseAction.ALLOW or decision.hits:
+            _record_defense_decision(con, decision, source_kind=kind)
         if mate:
             con.execute("UPDATE sources SET pair_ready=1, wait_until=NULL WHERE turn_id=?", (turn_id,))
         _write_planned(con, source_id, planned)
