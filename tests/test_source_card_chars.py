@@ -22,7 +22,7 @@ def _source(engine, sid: str, body: str) -> None:
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename)
            VALUES(?,?,?,?,?,?,?,1,?)""",
-        (sid, "file", "2026-11-12T00:00:00+00:00", sid, body, "已向量化待蒸馏", "p1", "note.md"),
+        (sid, "file", "2026-11-12T00:00:00+00:00", sid, body, "已向量化待萃取", "p1", "note.md"),
     )
     engine.db().execute(
         "INSERT INTO queue(source_id,lane,state,enqueued_at) VALUES(?,?, 'queued', ?)",
@@ -64,7 +64,7 @@ def test_missing_card_recovers_chars_on_status_update(tmp_path, monkeypatch):
     assert engine.db().execute("SELECT body_chars FROM source_cards WHERE id=?", (sid,)).fetchone()["body_chars"] == 6
     engine.db().execute("DELETE FROM source_cards WHERE id=?", (sid,))
     engine.db().commit()
-    engine.db().execute("UPDATE sources SET status=? WHERE id=?", ("蒸馏中", sid))
+    engine.db().execute("UPDATE sources SET status=? WHERE id=?", ("萃取中", sid))
     engine.db().commit()
     card = engine.db().execute(
         "SELECT body_chars, body_preview FROM source_cards WHERE id=?",
@@ -92,15 +92,15 @@ def test_status_update_of_an_existing_card_keeps_its_chars(tmp_path, monkeypatch
     engine.db().commit()
     con = engine.db()
     con.execute("BEGIN")
-    con.execute("UPDATE sources SET status=? WHERE id=?", ("蒸馏中", sid))
+    con.execute("UPDATE sources SET status=? WHERE id=?", ("萃取中", sid))
     card = con.execute("SELECT body_chars, body_preview, status FROM source_cards WHERE id=?", (sid,)).fetchone()
     assert card["body_chars"] == 99
     assert card["body_preview"] == "KEEP"
-    assert card["status"] == "蒸馏中"
+    assert card["status"] == "萃取中"
     con.rollback()
     restored = con.execute("SELECT status FROM sources WHERE id=?", (sid,)).fetchone()
     kept = con.execute("SELECT body_chars FROM source_cards WHERE id=?", (sid,)).fetchone()
-    assert restored["status"] == "已向量化待蒸馏"
+    assert restored["status"] == "已向量化待萃取"
     assert kept["body_chars"] == 99
 
 
@@ -112,11 +112,11 @@ def test_reconnect_replaces_a_zero_char_status_trigger(tmp_path, monkeypatch):
     con.execute("DROP TRIGGER IF EXISTS source_cards_status")
     con.executescript(_OLD_STATUS_TRIGGER)
     con.execute("DELETE FROM source_cards WHERE id=?", (sid,))
-    con.execute("UPDATE sources SET status=? WHERE id=?", ("蒸馏中", sid))
+    con.execute("UPDATE sources SET status=? WHERE id=?", ("萃取中", sid))
     con.commit()
     assert con.execute("SELECT body_chars FROM source_cards WHERE id=?", (sid,)).fetchone()["body_chars"] == 0
     engine.connect(tmp_path, tmp_path / "scan")
     engine.db().execute("DELETE FROM source_cards WHERE id=?", (sid,))
-    engine.db().execute("UPDATE sources SET status=? WHERE id=?", ("已向量化待蒸馏", sid))
+    engine.db().execute("UPDATE sources SET status=? WHERE id=?", ("已向量化待萃取", sid))
     engine.db().commit()
     assert engine.db().execute("SELECT body_chars FROM source_cards WHERE id=?", (sid,)).fetchone()["body_chars"] == 6

@@ -30,7 +30,7 @@ def _seed_ranked_statements(con) -> None:
     )
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane)
-           VALUES('rank-src','user','2026-10-25T00:00:00+00:00','rank-h','夹具','已蒸馏','fast')"""
+           VALUES('rank-src','user','2026-10-25T00:00:00+00:00','rank-h','夹具','已萃取','fast')"""
     )
     for i in range(WEAK_N):
         sid = f"weak-{i:02d}"
@@ -151,7 +151,7 @@ def test_secret_question_returns_the_cited_original(tmp_path, monkeypatch):
     secret = "密钥 sk-abc_def9999zzzz 留在原文"
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane)
-           VALUES('sec-src','user','2026-10-25T00:00:00+00:00','sec-h',?,'已蒸馏','fast')""",
+           VALUES('sec-src','user','2026-10-25T00:00:00+00:00','sec-h',?,'已萃取','fast')""",
         (secret,),
     )
     cur = con.execute(
@@ -181,12 +181,12 @@ def test_forget_does_not_treat_underscore_as_a_wildcard(tmp_path, monkeypatch):
     now = engine.utcnow()
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('keep','user',?,'keep-h',?,'已蒸馏','fast',1)""",
+           VALUES('keep','user',?,'keep-h',?,'已萃取','fast',1)""",
         (now, f"保留 {decoy} 不动"),
     )
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('drop','user',?,'drop-h',?,'已蒸馏','fast',1)""",
+           VALUES('drop','user',?,'drop-h',?,'已萃取','fast',1)""",
         (now, f"请忘掉 {token}"),
     )
     con.commit()

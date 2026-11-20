@@ -165,7 +165,7 @@ def test_draft_and_merge_see_speech_time_against_the_page(tmp_path, monkeypatch)
     engine.db().execute(
         """INSERT INTO sources(id,kind,session_id,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
            VALUES('src-old','user','s-old','2024-05-01T08:00:00+00:00','2026-11-08T00:00:00+00:00','utterance','h',
-                  '合成句：那时候喜欢通宵改旧项目。','蒸馏中','p1',1)"""
+                  '合成句：那时候喜欢通宵改旧项目。','萃取中','p1',1)"""
     )
     engine.db().commit()
     source = engine.db().execute("SELECT * FROM sources WHERE id='src-old'").fetchone()
@@ -219,7 +219,7 @@ def test_a_different_subject_is_stored_as_its_own_page(tmp_path, monkeypatch):
             "stop",
         )
 
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
     monkeypatch.setattr(engine, "_complete_chat", fake_complete)
     page, conflicts, note, _gist, separate, name, ctype = engine._merge_existing_page(
         old,
@@ -248,7 +248,7 @@ def test_a_different_subject_is_stored_as_its_own_page(tmp_path, monkeypatch):
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
            VALUES('src-sep','file','2026-11-09T00:00:00+00:00','2026-11-09T00:00:00+00:00','file','h',
-                  '合成句。','蒸馏中','slow',1)"""
+                  '合成句。','萃取中','slow',1)"""
     )
     engine.db().commit()
     source = engine.db().execute("SELECT * FROM sources WHERE id='src-sep'").fetchone()
@@ -281,7 +281,7 @@ def test_an_older_utterance_does_not_replace_a_later_focus(tmp_path, monkeypatch
     def write(sid: str, text: str, when: str, basis: str) -> None:
         engine.db().execute(
             """INSERT INTO sources(id,kind,event_at,event_basis,ingested_at,content_hash,body,status,lane,pair_ready)
-               VALUES(?,?,?,?,?,?,?,'蒸馏中','p1',1)""",
+               VALUES(?,?,?,?,?,?,?,'萃取中','p1',1)""",
             (sid, "user", when, basis, "2026-11-08T00:00:00+00:00", sid, text),
         )
         engine.db().commit()
@@ -325,7 +325,7 @@ def test_source_page_explains_the_two_clocks():
 
 
 def _quiet_model(monkeypatch, engine, reply):
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
 
     def fake(_base, _key, payload, **_kwargs):
         user = payload["messages"][1]["content"]
@@ -347,7 +347,7 @@ def test_an_older_utterance_may_still_revise_the_stored_page(tmp_path, monkeypat
     spoken = "更早他在改旧灯塔。"
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
-           VALUES('src-old','user','2024-05-01T08:00:00+00:00','2026-11-08T00:00:00+00:00','utterance','h',?,'蒸馏中','p1',1)""",
+           VALUES('src-old','user','2024-05-01T08:00:00+00:00','2026-11-08T00:00:00+00:00','utterance','h',?,'萃取中','p1',1)""",
         (spoken,),
     )
     engine.db().commit()
@@ -393,7 +393,7 @@ def test_a_later_utterance_can_revise_the_stored_page(tmp_path, monkeypatch):
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
            VALUES('src-new','user','2026-11-01T00:00:00+00:00','2026-11-08T00:00:00+00:00','utterance','h',
-                  '他现在改做北窗灯塔。','蒸馏中','p1',1)"""
+                  '他现在改做北窗灯塔。','萃取中','p1',1)"""
     )
     engine.db().commit()
     source = engine.db().execute("SELECT * FROM sources WHERE id='src-new'").fetchone()
@@ -424,8 +424,8 @@ def test_page_clock_uses_speech_and_survives_mixed_zones(tmp_path, monkeypatch):
     )
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
-           VALUES('src-said','user','2024-05-01T08:00:00+00:00','2026-11-09T00:00:00+00:00','utterance','a','早年','蒸馏中','p1',1),
-                 ('src-file','file','2026-11-09T01:00:00+00:00','2026-11-09T02:00:00+00:00','file','b','文件','蒸馏中','slow',1)"""
+           VALUES('src-said','user','2024-05-01T08:00:00+00:00','2026-11-09T00:00:00+00:00','utterance','a','早年','萃取中','p1',1),
+                 ('src-file','file','2026-11-09T01:00:00+00:00','2026-11-09T02:00:00+00:00','file','b','文件','萃取中','slow',1)"""
     )
     engine.db().execute(
         """INSERT INTO statements(id,crystal_id,source_id,field,text,quote,trust,rank,event_at,created_at)
@@ -456,7 +456,7 @@ def test_a_separate_engineering_page_joins_the_one_repo_page(tmp_path, monkeypat
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
            VALUES('src-eng','user','2026-11-09T03:00:00+00:00','2026-11-09T04:00:00+00:00','utterance','h',
-                  '新约束：端口保持不动。','蒸馏中','p1',1)"""
+                  '新约束：端口保持不动。','萃取中','p1',1)"""
     )
     engine.db().commit()
     source = engine.db().execute("SELECT * FROM sources WHERE id='src-eng'").fetchone()
@@ -482,7 +482,7 @@ def _dock(engine):
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
            VALUES('src-dock','user','2026-11-09T03:00:00+00:00','2026-11-09T04:00:00+00:00','utterance','h',
-                  '另一处链接不是这艘船的仓库。','蒸馏中','p1',1)"""
+                  '另一处链接不是这艘船的仓库。','萃取中','p1',1)"""
     )
     engine.db().commit()
     return engine.db().execute("SELECT * FROM sources WHERE id='src-dock'").fetchone()
@@ -528,7 +528,7 @@ def test_a_separate_page_does_not_fork_an_existing_name(tmp_path, monkeypatch):
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
            VALUES('src-dup','user','2026-11-09T03:00:00+00:00','2026-11-09T04:00:00+00:00','utterance','h',
-                  '另一套说法。','蒸馏中','p1',1)"""
+                  '另一套说法。','萃取中','p1',1)"""
     )
     engine.db().commit()
     source = engine.db().execute("SELECT * FROM sources WHERE id='src-dup'").fetchone()
@@ -556,7 +556,7 @@ def _owner_with_citation(engine, body: str) -> None:
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
            VALUES('src-cite','user','2026-11-01T00:00:00+00:00','2026-11-08T00:00:00+00:00','utterance','h',
-                  '后来这句不成立。','蒸馏中','p1',1)"""
+                  '后来这句不成立。','萃取中','p1',1)"""
     )
     engine.db().commit()
 
@@ -826,7 +826,7 @@ def test_an_ingest_stamp_is_not_shown_as_speech(tmp_path, monkeypatch):
     stamped = "2026-11-08T12:00:00+00:00"
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('src-legacy','user',?,?, 'h','旧材料','蒸馏中','p1',1)""",
+           VALUES('src-legacy','user',?,?, 'h','旧材料','萃取中','p1',1)""",
         (stamped, stamped),
     )
     engine.db().commit()

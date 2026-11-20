@@ -24,7 +24,7 @@ _ROWS = [
         "project_ref": "",
         "ingested_at": "2026-11-12T03:00:00+00:00",
         "pipeline": "解析:ok,草稿:ok,并页:ok,速写:ok",
-        "status": "蒸馏已结晶",
+        "status": "萃取已结晶",
         "note": "",
     },
     {

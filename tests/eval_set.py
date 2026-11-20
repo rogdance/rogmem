@@ -51,7 +51,7 @@ def _put_source(kind: str, body: str, event_at: str):
     con = engine.db()
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,event_at)
-           VALUES(?,?,?,?,?,'已蒸馏','fast',?)""",
+           VALUES(?,?,?,?,?,'已萃取','fast',?)""",
         (sid, kind, event_at, hashlib.sha256(body.encode()).hexdigest(), body, event_at),
     )
     con.commit()

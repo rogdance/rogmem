@@ -89,7 +89,7 @@ def test_a_local_offset_still_names_the_model_that_was_called(tmp_path, monkeypa
 
     cost.record(
         at=local.isoformat(),
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="other",
         model="Qwen",
         usage=(1, 1, 0),
@@ -137,7 +137,7 @@ def test_each_hour_uses_the_model_called_in_that_hour(tmp_path, monkeypatch):
 
     cost.record(
         at=start.isoformat(),
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id=engine.DEFAULT_MINIMAX_ID,
         model="MiniMax-M3.1-Flash",
         usage=(1, 1, 0),
@@ -155,7 +155,7 @@ def test_each_hour_uses_the_model_called_in_that_hour(tmp_path, monkeypatch):
     )
     cost.record(
         at=second.isoformat(),
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="other",
         model="Qwen",
         usage=(1, 1, 0),

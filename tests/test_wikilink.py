@@ -127,7 +127,7 @@ def test_a_page_write_counts_as_crystallized_even_without_a_statement(tmp_path, 
     engine = _open(tmp_path, monkeypatch)
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane)
-           VALUES('src-page','file','2026-11-05T00:00:00+00:00','h','正文','蒸馏无结晶','fast')"""
+           VALUES('src-page','file','2026-11-05T00:00:00+00:00','h','正文','萃取无结晶','fast')"""
     )
     engine.db().execute(
         """INSERT INTO revisions(crystal_id,created_at,note,source_id)
@@ -136,7 +136,7 @@ def test_a_page_write_counts_as_crystallized_even_without_a_statement(tmp_path, 
     engine.db().commit()
     engine.settle_file_statuses()
     row = engine.db().execute("SELECT status, coverage FROM sources WHERE id='src-page'").fetchone()
-    assert row["status"] == "蒸馏已结晶"
+    assert row["status"] == "萃取已结晶"
     assert row["coverage"] == "pages"
 
 
@@ -169,7 +169,7 @@ def _product(engine, cid: str, name: str, body: str):
 def _file_source(engine, sid: str, body: str):
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,filename)
-           VALUES(?, 'file', '2026-11-06T00:00:00+00:00', ?, ?, '蒸馏中', 'fast', 'note.md')""",
+           VALUES(?, 'file', '2026-11-06T00:00:00+00:00', ?, ?, '萃取中', 'fast', 'note.md')""",
         (sid, sid, body),
     )
     engine.db().commit()
@@ -330,7 +330,7 @@ def test_merge_applies_a_new_title_without_opening_a_second_page(tmp_path, monke
             )
         return "一段速写。", "stop"
 
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
     monkeypatch.setattr(engine, "_complete_chat", fake_complete)
     engine._land_markdown_pages(
         source,
@@ -352,7 +352,7 @@ def test_one_git_address_stays_one_engineering_page(tmp_path, monkeypatch):
     repo = "https://github.com/example/memory"
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,project_ref,event_at)
-           VALUES('src-eng','user','2026-11-06T00:00:00+00:00','h','今天修检索。','蒸馏中','fast',?,
+           VALUES('src-eng','user','2026-11-06T00:00:00+00:00','h','今天修检索。','萃取中','fast',?,
                   '2026-11-06T00:00:00+00:00')""",
         (repo,),
     )
@@ -399,7 +399,7 @@ def test_engineering_session_sends_the_page_and_owner_sketch_file_does_not(tmp_p
         seen["user"] = payload["messages"][1]["content"]
         return "# 云岚甲\n类型：人物\n\n他在。\n", "stop"
 
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
     monkeypatch.setattr(engine, "_complete_chat", fake_complete)
     engine._llm_draft("今天继续改超时。", "user", project_ref=repo, source_id="src-user")
     assert "已有工程结晶：" in seen["user"]
@@ -426,16 +426,14 @@ def test_core_memory_is_the_owner_sketch_and_the_current_project_sketch(tmp_path
     told = sketch_system("人物", owner=True, limit=engine.sketch_char_limit())
     assert "800字以内" in told
     assert "3500字以内" not in told
-    fitted = engine._fit_sketch("甲。\n\n" + ("乙" * 900), 800)
-    assert len(fitted) <= 800
-    assert fitted.startswith("甲。")
     engine.db().execute("UPDATE crystallizations SET sketch_md=? WHERE id='owner'", ("甲" * 900,))
     engine.db().commit()
     kept = engine.save_crystal_markdown("owner", "正文。", "甲" * 900)
     assert kept["ok"] is True
     assert len(engine.crystal_detail("owner")["sketch_md"]) == 900
+    # 上限是目标，不剪人写的速写：超上限的原文按原样存下（半截不是速写）。
     engine.save_crystal_markdown("owner", "正文。", "乙" * 900)
-    assert len(engine.crystal_detail("owner")["sketch_md"]) <= 800
+    assert len(engine.crystal_detail("owner")["sketch_md"]) == 900
     engine.db().execute("UPDATE crystallizations SET sketch_md=? WHERE id='owner'", ("主人速写。",))
     engine._insert_crystal_page(engine.db(), "eng", "工程", "云岚核忆", holder="test")
     row = engine.db().execute("SELECT * FROM crystallizations WHERE id='eng'").fetchone()

@@ -58,3 +58,5 @@ def reindex_crystals(con: sqlite3.Connection) -> None:
     rows = con.execute("SELECT id, name, status, IFNULL(body_md,'') AS body_md, IFNULL(sketch_md,'') AS sketch_md FROM crystallizations")
     for row in rows:
         sync_crystal(con, row["id"], row["name"] or "", row["body_md"] or "", row["sketch_md"] or "", row["status"] or "")
+    # 段级索引不在这里全量重建：它只在口径升版或首次接入时重建一次（ensure_index_current），
+    # 每次启动都重切段+逐段分词是纯开销。

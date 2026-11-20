@@ -32,7 +32,7 @@ def _call(at: str, worker: str, model: str, usage):
 def _put_queue(engine, sid: str, state: str, when: str, body: str):
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename,pipeline)
-           VALUES(?,?,?,?,?,'已向量化待蒸馏','p1',1,?, '解析:ok~向量:ok')""",
+           VALUES(?,?,?,?,?,'已向量化待萃取','p1',1,?, '解析:ok~向量:ok')""",
         (sid, "file", when, sid, body, f"{sid}.md"),
     )
     engine.db().execute(
@@ -186,12 +186,12 @@ def test_named_lists_use_twenty_and_the_nav_does_not(tmp_path, monkeypatch):
     for index in range(25):
         engine.db().execute(
             """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-               VALUES(?,?,?,'h',?,'已蒸馏','fast',1)""",
+               VALUES(?,?,?,'h',?,'已萃取','fast',1)""",
             (f"s{index}", "user", f"2026-04-01T00:{index:02d}:00+00:00", f"会话{index}"),
         )
         engine.db().execute(
             """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename)
-               VALUES(?,?,?,'h',?,'已蒸馏','fast',1,?)""",
+               VALUES(?,?,?,'h',?,'已萃取','fast',1,?)""",
             (f"f{index}", "file", f"2026-04-02T00:{index:02d}:00+00:00", f"文件{index}", f"文件{index}.md"),
         )
     for index in range(60):

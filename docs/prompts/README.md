@@ -1,6 +1,6 @@
-> **已过期。** 不要用本目录的说明做现行方案判断。蒸馏提示在 `rogmem/prompts.py`。清单见 [`docs/CURRENT.md`](../CURRENT.md)。
+> **已过期。** 不要用本目录的说明做现行方案判断。萃取提示在 `rogmem/prompts.py`。清单见 [`docs/CURRENT.md`](../CURRENT.md)。
 
-# rogmem Wiki 蒸馏相关 Prompt 索引
+# rogmem Wiki 萃取相关 Prompt 索引
 
 日期：2026-10-29（Asia/Shanghai）  
 状态：**维护者已审的设计真源（已入库）**；**尚未接入** runtime（不 import、不翻转 `DISTILLER_STORE_WRITE_ENABLED`，写库开关保持 `False`）  

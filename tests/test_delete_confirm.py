@@ -72,7 +72,7 @@ def test_stop_and_rollback_ask_before_they_post():
             "id": 7,
             "change": "删去了北城。",
             "created_at": "2026-11-08T01:02:03+00:00",
-            "actor": "蒸馏",
+            "actor": "萃取",
             "scope": "正文",
         },
         name="云岚甲",

@@ -16,6 +16,7 @@ need ``scripts/wipe_thick_blobs.sql``.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,9 @@ EVENT_KINDS = frozenset(
         "match",
         "integrate",
         "gate_drop",
+        "full_body_write_sectioned",
+        "merge_partial",
+        "page_folded",
         "apply_op",
         "defer",
         "promote_new",
@@ -51,6 +55,21 @@ DEFERRED_RETRY_LIMIT = 3
 # Typed envelope slots. keys.* and any other simple identifier sink into ThinCrystal.keys.
 # This is apply dispatch, not a closed field-name allowlist.
 ENVELOPE_FIELDS = frozenset({"summary", "aliases", "owner_relation"})
+# 并页增量合并的两条段级护栏（见 apply_ops）：
+# ① 段级字符上限：settings 键 section_char_limit，0 = 关闭；>0 时单段超限拒绝落库。
+# ② 未命中段不变校验：settings 键 section_isolation_guard，默认开（"0" 关闭）；
+#    只改命中段，其余段必须字节不变，否则拒绝落库（故障隔离）。
+SECTION_CHAR_LIMIT_KEY = "section_char_limit"
+SECTION_ISOLATION_KEY = "section_isolation_guard"
+
+
+class SectionIsolationViolation(ValueError):
+    """段级写入改动了未命中段。拒绝落库，保证其余段落字节不变。"""
+
+
+class SectionTooLong(ValueError):
+    """某段超过段级字符上限。拒绝落库，防止单段无限膨胀。"""
+
 
 StorageKind = Literal["thin", "thick"]
 CrystalStatus = Literal["draft", "deferred", "active", "merged", "rejected"]
@@ -363,6 +382,19 @@ def migrate_crystal_store(con: sqlite3.Connection) -> None:
              purpose TEXT NOT NULL DEFAULT 'integrate'
            )"""
     )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS crystal_sections(
+             crystal_id TEXT NOT NULL,
+             ord INTEGER NOT NULL,
+             heading TEXT NOT NULL,
+             tokens TEXT NOT NULL,
+             chars INTEGER NOT NULL,
+             hash TEXT NOT NULL
+           )"""
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS crystal_sections_crystal ON crystal_sections(crystal_id, ord)"
+    )
 
 
 def assert_distiller_write_not_flipped() -> None:
@@ -553,6 +585,7 @@ class CrystalStore:
                 ),
             )
         from rogmem.crystal_index import sync_crystal
+        from rogmem.section_index import sync_sections
         from rogmem.wikilink import sync_wikilinks
 
         repo = ""
@@ -561,6 +594,10 @@ class CrystalStore:
         self.con.execute("UPDATE crystal_openings SET repo=? WHERE id=?", (repo, crystal.id))
         sync_wikilinks(self.con, crystal.id, crystal.body_md, active=crystal.status == "active")
         sync_crystal(self.con, crystal.id, crystal.name, crystal.body_md, crystal.sketch_md, crystal.status)
+        # 段落引只在正文真变了才重建：否则每次落库（含状态流转）都要切段+逐段分词，属效率倒退。
+        old_body = _row_get(row, "body_md") if row is not None else None
+        if old_body != crystal.body_md:
+            sync_sections(self.con, crystal.id, crystal.body_md)
         if commit:
             self.con.commit()
         loaded = self.get(crystal.id)
@@ -609,9 +646,21 @@ class CrystalStore:
         require_thin_write()
         crystal = self._locked(crystal_id, expected_revision)
         self.require_lease(crystal_id, holder)
+        targeted = _targeted_sections(ops)
+        # 只有「显式命中若干段、且未整篇重写 body_md」时才做不变校验。
+        preserve_guard = bool(targeted) and not any(
+            str(op.get("path") or "").strip() == "body_md" for op in ops
+        )
+        before_body = crystal.body_md or ""
         working = crystal
         for op in ops:
             working = _apply_one(working, op)
+        after_body = working.body_md or ""
+        if preserve_guard and _setting_on(self.con, SECTION_ISOLATION_KEY, True):
+            _assert_section_isolation(before_body, after_body, targeted)
+        limit = _setting_int(self.con, SECTION_CHAR_LIMIT_KEY, 0)
+        if limit > 0:
+            _assert_section_cap(after_body, limit)
         working.revision = expected_revision
         try:
             result = self.put(working, holder=holder, commit=False)
@@ -815,6 +864,84 @@ class CrystalStore:
                 f"{crystal_id}: expected revision {crystal.revision}, got {expected_revision}"
             )
         return crystal
+
+
+def _setting_str(con: sqlite3.Connection, key: str) -> str | None:
+    try:
+        row = con.execute("SELECT v FROM settings WHERE k=?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return None if row is None else str(row[0])
+
+
+def _setting_int(con: sqlite3.Connection, key: str, default: int) -> int:
+    raw = _setting_str(con, key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
+def _setting_on(con: sqlite3.Connection, key: str, default: bool) -> bool:
+    raw = _setting_str(con, key)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _body_sections(body: str) -> list[tuple[str, str]]:
+    """按 ``## 标题`` 切段，返回 [(标题, 整块文本)]；首个标题之前的内容标题为 ""。
+
+    切段只有一份实现（``section_index.split_sections``）：隔离校验、段级上限、落 op
+    都按同一把尺子，避免两份正则各切各的。这里延迟导入，别把 jieba 拉进模块加载。
+    """
+    from rogmem.section_index import split_sections
+
+    return split_sections(body)
+
+
+def _targeted_sections(ops: list[dict]) -> set[str]:
+    """本次 ops 显式命中的段标题。"""
+    targeted: set[str] = set()
+    for op in ops:
+        path = str(op.get("path") or "").strip()
+        if path.startswith("body_md##"):
+            targeted.add(path[9:].strip())
+    return targeted
+
+
+def _assert_section_isolation(before: str, after: str, targeted: set[str]) -> None:
+    """除命中段外，其余段必须逐块一致；顺序也不得变。"""
+    def kept(body: str) -> list[tuple[str, str]]:
+        # 空前言（无标题、无内容）不算一段：_body_sections 对空正文会给出 ("", "")，
+        # 而「正文从第一个 ## 开始」则没有前言块。不归一化这个不对称，就会把
+        # 「往还没有正文的页里写第一段」这种正当写入误判成改动了未命中段而拒绝落库。
+        return [
+            (h, b.strip())
+            for h, b in _body_sections(body)
+            if h not in targeted and (h or b.strip())
+        ]
+
+    left, right = kept(before), kept(after)
+    if left != right:
+        changed = sorted(
+            {h for h, _ in left} ^ {h for h, _ in right}
+        ) or sorted(targeted)
+        raise SectionIsolationViolation(
+            "未命中段被改动，拒绝落库；命中段="
+            + "、".join(sorted(targeted) or ["(无)"])
+            + "；波及=" + "、".join(changed or ["(内容变化)"])
+        )
+
+
+def _assert_section_cap(body: str, limit: int) -> None:
+    for heading, block in _body_sections(body):
+        if len(block) > limit:
+            raise SectionTooLong(
+                f"段「{heading or '(前言)'}」{len(block)} 字超过上限 {limit}，拒绝落库"
+            )
 
 
 def _apply_body_section(body: str, heading: str, value: str) -> str:

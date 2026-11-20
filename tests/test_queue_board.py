@@ -23,7 +23,7 @@ def _open(tmp_path: Path, monkeypatch):
 def _put(engine, sid: str, *, kind: str, lane: str, state: str, ingested_at: str, attempts: int = 0, filename: str = "", body: str = "一句正文"):
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename,pipeline)
-           VALUES(?,?,?,?,?,'已向量化待蒸馏',?,1,?, '解析:ok~向量:ok')""",
+           VALUES(?,?,?,?,?,'已向量化待萃取',?,1,?, '解析:ok~向量:ok')""",
         (sid, kind, ingested_at, sid, body, lane, filename),
     )
     engine.db().execute(

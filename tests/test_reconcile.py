@@ -224,10 +224,10 @@ def test_pipeline_page_holds_workers_and_schedules():
     assert "header .brand svg" in html
     assert "管线设置" in html
     assert "工人设置" in html and "定时任务" in html
-    assert "初始蒸馏" in html and "身份合并" in html
+    assert "草稿" in html and "身份合并" in html
     assert "结晶润色" not in html
     assert "冲突裁决" not in html
-    distill = html.split("初始蒸馏", 1)[1].split("身份合并", 1)[0]
+    distill = html.split("草稿", 1)[1].split("身份合并", 1)[0]
     assert "模型选择" in distill and "推理强度" in distill and "class='worker-controls'" in distill
     embed = html.split("向量嵌入", 1)[1].split("定时任务", 1)[0]
     assert "模型选择" in embed and "推理强度" not in embed

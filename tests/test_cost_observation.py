@@ -229,7 +229,7 @@ def test_switch_response_waits_until_that_view_is_gathered(tmp_path, monkeypatch
     moment = datetime.now(timezone.utc)
     cost.record(
         at=(moment - timedelta(hours=1)).isoformat(),
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(2_500_000, 0, 0),
@@ -306,7 +306,7 @@ def test_switch_then_reread_shows_each_view(tmp_path, monkeypatch):
     moment = datetime(2026, 11, 12, 3, 0, tzinfo=timezone.utc)
     cost.record(
         at="2026-11-12T02:00:00+00:00",
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(2_500_000, 0, 0),
@@ -315,7 +315,7 @@ def test_switch_then_reread_shows_each_view(tmp_path, monkeypatch):
     )
     cost.record(
         at="2026-11-01T02:00:00+00:00",
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(5_000_000, 0, 0),

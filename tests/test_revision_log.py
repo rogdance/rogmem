@@ -25,7 +25,7 @@ def _source(engine, filename: str):
             "2026-11-06T12:00:00+00:00",
             "h",
             "他在南港写编辑器。后来去了北城。",
-            "蒸馏中",
+            "萃取中",
             "fast",
             filename,
             "2026-11-06T12:00:00+00:00",
@@ -54,7 +54,7 @@ def test_a_page_revision_records_the_words_the_writer_and_the_material(tmp_path,
     ).fetchone()
     first = engine.revisions(row["id"])
     assert len(first) == 1
-    assert first[0]["actor"] == "蒸馏"
+    assert first[0]["actor"] == "萃取"
     assert "他在南港写编辑器" in first[0]["change"]
     assert "南港简历.md" in first[0]["basis"]
     assert "他在南港写编辑器。" in first[0]["basis"]
@@ -66,7 +66,7 @@ def test_a_page_revision_records_the_words_the_writer_and_the_material(tmp_path,
         "active",
         "log",
     )
-    assert "修订人" in page and "rev-who'>蒸馏" in page
+    assert "修订人" in page and "rev-who'>萃取" in page
     assert "修订范围" in page and "正文" in page
     assert "撤销修订" in page
     assert "确定撤销「云岚甲」" in page
@@ -250,8 +250,8 @@ def test_the_log_puts_the_newest_revision_first():
             "chapters": {},
         },
         [
-            {"id": 1, "note": "开篇", "change": "最早的一笔", "actor": "蒸馏", "basis": "第一份"},
-            {"id": 2, "note": "正文", "change": "最新的一笔", "actor": "蒸馏", "basis": "第二份"},
+            {"id": 1, "note": "开篇", "change": "最早的一笔", "actor": "萃取", "basis": "第一份"},
+            {"id": 2, "note": "正文", "change": "最新的一笔", "actor": "萃取", "basis": "第二份"},
         ],
         [],
         "",
@@ -286,7 +286,7 @@ def test_an_old_body_line_still_names_the_file(tmp_path, monkeypatch):
     )
     engine.db().commit()
     item = engine.revisions("c-old")[-1]
-    assert item["actor"] == "蒸馏"
+    assert item["actor"] == "萃取"
     assert "旧简历.md" in item["basis"]
     assert "没有留下改了哪些字" in item["change"]
     assert item["scope"] == ""
@@ -437,7 +437,7 @@ def test_a_revision_card_previews_the_words_and_the_detail_keeps_them():
         "gist": "因更新，所在地改成了南港。",
         "created_at": "2026-11-08T01:02:03+00:00",
         "event_at": "2026-11-08T01:00:00+00:00",
-        "actor": "蒸馏",
+        "actor": "萃取",
         "scope": "正文",
         "source_id": "src-1",
         "source_href": "/admin/sources/src-1",
@@ -470,7 +470,7 @@ def test_a_revision_card_previews_the_words_and_the_detail_keeps_them():
             "change": "删去了北城。",
             "basis": "材料写了这一处。",
             "created_at": "2026-11-08T01:02:03+00:00",
-            "actor": "蒸馏",
+            "actor": "萃取",
             "scope": "正文",
         },
         name="云岚甲",
@@ -496,7 +496,7 @@ def test_opening_a_revision_returns_the_reading_the_page_only_starts(tmp_path, m
     basis = "据" * 2500
     engine.db().execute(
         """INSERT INTO revisions(crystal_id,created_at,note,actor,change,basis,scope)
-           VALUES('c-read','2026-11-06T12:00:00+00:00','正文','蒸馏',?,?,'正文')""",
+           VALUES('c-read','2026-11-06T12:00:00+00:00','正文','萃取',?,?,'正文')""",
         (change, basis),
     )
     engine.db().commit()
@@ -522,7 +522,7 @@ def test_the_revision_log_opens_one_detail_dialog():
     item = {
         "id": 3,
         "created_at": "2026-11-06T12:00:00+00:00",
-        "actor": "蒸馏",
+        "actor": "萃取",
         "scope": "正文",
         "note": "正文",
         "change": "写入了一句。",
@@ -552,7 +552,7 @@ def test_each_revision_has_a_tick_and_the_hover_wave_falls_off_by_the_fourth():
         {
             "id": index + 1,
             "created_at": "2026-11-06T12:00:00+00:00",
-            "actor": "蒸馏",
+            "actor": "萃取",
             "scope": "正文",
             "note": "正文",
             "change": f"改了第{index}处。",
@@ -627,7 +627,7 @@ def test_a_log_page_projects_the_claim_and_leaves_the_stored_corpus(tmp_path, mo
     )
     engine.db().execute(
         """INSERT INTO revisions(crystal_id,created_at,note,actor,change,basis,source_id,scope)
-           VALUES('c-log','2026-11-06T12:00:00+00:00','正文','蒸馏','写入了一句。',?,'src-resume','正文')""",
+           VALUES('c-log','2026-11-06T12:00:00+00:00','正文','萃取','写入了一句。',?,'src-resume','正文')""",
         (corpus,),
     )
     engine.db().commit()
@@ -664,7 +664,7 @@ def test_a_log_page_projects_the_claim_and_leaves_the_stored_corpus(tmp_path, mo
                 "id": 1,
                 "created_at": "2026-11-06T12:00:00+00:00",
                 "note": "正文",
-                "actor": "蒸馏",
+                "actor": "萃取",
                 "change": "写入了一句。",
                 "basis": "文件「南港简历.md」。",
                 "source_id": "src-resume",

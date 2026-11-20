@@ -70,7 +70,7 @@ def test_resume_lands_on_its_subject_and_products_keep_their_purpose(tmp_path, m
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('resume','file','qa','qa',?,'resume','h',?,'蒸馏中','slow',1,'简历.docx')""",
+           VALUES('resume','file','qa','qa',?,'resume','h',?,'萃取中','slow',1,'简历.docx')""",
         (now, body),
     )
     engine.db().commit()
@@ -110,7 +110,7 @@ def test_an_existing_product_page_receives_the_sentence_that_names_it(tmp_path, 
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready)
-           VALUES('known','file','qa','qa',?,'known','h',?,'蒸馏中','slow',1)""",
+           VALUES('known','file','qa','qa',?,'known','h',?,'萃取中','slow',1)""",
         (now, body),
     )
     engine.db().commit()
@@ -130,7 +130,7 @@ def test_a_missing_side_sheet_does_not_drop_the_subject(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready)
-           VALUES('side','file','qa','qa',?,'side','h',?,'蒸馏中','slow',1)""",
+           VALUES('side','file','qa','qa',?,'side','h',?,'萃取中','slow',1)""",
         (now, body),
     )
     engine.db().commit()
@@ -153,7 +153,7 @@ def test_a_sheet_that_says_none_still_keeps_landed_career(tmp_path, monkeypatch)
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready)
-           VALUES('none-sheet','file','qa','qa',?,'none-sheet','h',?,'蒸馏中','slow',1)""",
+           VALUES('none-sheet','file','qa','qa',?,'none-sheet','h',?,'萃取中','slow',1)""",
         (now, body),
     )
     engine.db().commit()
@@ -204,7 +204,7 @@ def test_encyclopedic_lead_lands_when_model_returns_nothing(tmp_path, monkeypatc
         now = engine.utcnow()
         engine.db().execute(
             """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-               VALUES(?,'file','qa','qa',?,?,?,?,'蒸馏中','slow',1,?)""",
+               VALUES(?,'file','qa','qa',?,?,?,?,'萃取中','slow',1,?)""",
             (sid, now, sid, f"h{index}", body, f"{sid}.txt"),
         )
         engine.db().commit()
@@ -227,7 +227,7 @@ def test_a_conflicting_sheet_does_not_drop_landed_subject(tmp_path, monkeypatch)
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('conflict','file','qa','qa',?,'conflict','h',?,'蒸馏中','slow',1,'协会.txt')""",
+           VALUES('conflict','file','qa','qa',?,'conflict','h',?,'萃取中','slow',1,'协会.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -263,7 +263,7 @@ def test_a_bare_thumb_line_is_not_the_subject(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('crumb','file','qa','qa',?,'crumb','h',?,'蒸馏中','slow',1,'会址.txt')""",
+           VALUES('crumb','file','qa','qa',?,'crumb','h',?,'萃取中','slow',1,'会址.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -286,7 +286,7 @@ def test_landed_lead_survives_when_the_current_unit_is_only_a_crumb(tmp_path, mo
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('unit','file','qa','qa',?,'unit','h',?,'蒸馏中','slow',1,'纸笺.txt')""",
+           VALUES('unit','file','qa','qa',?,'unit','h',?,'萃取中','slow',1,'纸笺.txt')""",
         (now, full),
     )
     engine.db().commit()
@@ -308,7 +308,7 @@ def test_bare_statute_title_without_bookquotes_still_opens(tmp_path, monkeypatch
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('law','file','qa','qa',?,'law','h',?,'蒸馏中','slow',1,'保管法.txt')""",
+           VALUES('law','file','qa','qa',?,'law','h',?,'萃取中','slow',1,'保管法.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -330,7 +330,7 @@ def test_short_name_empty_paren_and_career_title_is_a_person(tmp_path, monkeypat
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('bio','file','qa','qa',?,'bio','h',?,'蒸馏中','slow',1,'作坊主.txt')""",
+           VALUES('bio','file','qa','qa',?,'bio','h',?,'萃取中','slow',1,'作坊主.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -352,7 +352,7 @@ def test_landed_open_cites_the_lead_sentence_not_just_the_name(tmp_path, monkeyp
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('leadq','file','qa','qa',?,'leadq','h',?,'蒸馏中','slow',1,'纸社.txt')""",
+           VALUES('leadq','file','qa','qa',?,'leadq','h',?,'萃取中','slow',1,'纸社.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -371,7 +371,7 @@ def test_narrative_topic_lead_without_a_copula_still_opens(tmp_path, monkeypatch
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('topic','file','qa','qa',?,'topic','h',?,'蒸馏中','slow',1,'旗.txt')""",
+           VALUES('topic','file','qa','qa',?,'topic','h',?,'萃取中','slow',1,'旗.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -398,7 +398,7 @@ def test_folded_spelling_still_writes_the_opening_sentence(tmp_path, monkeypatch
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('foldsrc','file','qa','qa',?,'foldsrc','h',?,'蒸馏中','slow',1,'纸匠.txt')""",
+           VALUES('foldsrc','file','qa','qa',?,'foldsrc','h',?,'萃取中','slow',1,'纸匠.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -427,7 +427,7 @@ def test_trailing_quoted_title_still_lands_on_the_subject(tmp_path, monkeypatch)
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('titleq','file','qa','qa',?,'titleq','h',?,'蒸馏中','slow',1,'称号.txt')""",
+           VALUES('titleq','file','qa','qa',?,'titleq','h',?,'萃取中','slow',1,'称号.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -446,7 +446,7 @@ def test_missing_sheet_keys_are_filled_as_none(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('gate-miss','file','qa','qa',?,'gate-miss','h',?,'蒸馏中','slow',1,'纸会.txt')""",
+           VALUES('gate-miss','file','qa','qa',?,'gate-miss','h',?,'萃取中','slow',1,'纸会.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -481,7 +481,7 @@ def test_missing_product_sheet_keys_are_filled_as_none(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('gate-prod','file','qa','qa',?,'gate-prod','h',?,'蒸馏中','slow',1,'笺筒.txt')""",
+           VALUES('gate-prod','file','qa','qa',?,'gate-prod','h',?,'萃取中','slow',1,'笺筒.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -516,7 +516,7 @@ def test_incomplete_sheet_still_keeps_the_landed_lead(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('missheet','file','qa','qa',?,'missheet','h',?,'蒸馏中','slow',1,'纸会.txt')""",
+           VALUES('missheet','file','qa','qa',?,'missheet','h',?,'萃取中','slow',1,'纸会.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -547,7 +547,7 @@ def test_incomplete_sheet_still_keeps_a_product_lead(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('missprod','file','qa','qa',?,'missprod','h',?,'蒸馏中','slow',1,'笺筒.txt')""",
+           VALUES('missprod','file','qa','qa',?,'missprod','h',?,'萃取中','slow',1,'笺筒.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -572,7 +572,7 @@ def test_empty_write_quote_still_keeps_the_landed_name(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('emptyq','file','qa','qa',?,'emptyq','h',?,'蒸馏中','slow',1,'砚匣.txt')""",
+           VALUES('emptyq','file','qa','qa',?,'emptyq','h',?,'萃取中','slow',1,'砚匣.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -607,7 +607,7 @@ def test_empty_write_quote_still_keeps_an_org_lead(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('emptyorg','file','qa','qa',?,'emptyorg','h',?,'蒸馏中','slow',1,'砚社.txt')""",
+           VALUES('emptyorg','file','qa','qa',?,'emptyorg','h',?,'萃取中','slow',1,'砚社.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -638,7 +638,7 @@ def test_first_encyclopedic_lead_after_opening_chrome_still_lands(tmp_path, monk
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('laterlead','file','qa','qa',?,'laterlead','h',?,'蒸馏中','slow',1,'册坊.txt')""",
+           VALUES('laterlead','file','qa','qa',?,'laterlead','h',?,'萃取中','slow',1,'册坊.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -666,7 +666,7 @@ def test_first_encyclopedic_lead_after_opening_chrome_still_lands_an_org(tmp_pat
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('laterorg','file','qa','qa',?,'laterorg','h',?,'蒸馏中','slow',1,'帛社.txt')""",
+           VALUES('laterorg','file','qa','qa',?,'laterorg','h',?,'萃取中','slow',1,'帛社.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -694,7 +694,7 @@ def test_later_section_after_heading_is_not_the_opening_subject(tmp_path, monkey
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('headcut','file','qa','qa',?,'headcut','h',?,'蒸馏中','slow',1,'邻坊.txt')""",
+           VALUES('headcut','file','qa','qa',?,'headcut','h',?,'萃取中','slow',1,'邻坊.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -718,7 +718,7 @@ def test_alias_line_still_lands_on_the_recognized_subject(tmp_path, monkeypatch)
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('aliasprod','file','qa','qa',?,'aliasprod','h',?,'蒸馏中','slow',1,'册铺.txt')""",
+           VALUES('aliasprod','file','qa','qa',?,'aliasprod','h',?,'萃取中','slow',1,'册铺.txt')""",
         (now, body),
     )
     engine.db().commit()
@@ -744,7 +744,7 @@ def test_alias_line_still_lands_on_a_recognized_org(tmp_path, monkeypatch):
     now = engine.utcnow()
     engine.db().execute(
         """INSERT INTO sources(id,kind,device_name,agent_name,ingested_at,idempotency_key,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('aliasorg','file','qa','qa',?,'aliasorg','h',?,'蒸馏中','slow',1,'帛馆.txt')""",
+           VALUES('aliasorg','file','qa','qa',?,'aliasorg','h',?,'萃取中','slow',1,'帛馆.txt')""",
         (now, body),
     )
     engine.db().commit()

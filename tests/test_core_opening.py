@@ -38,7 +38,7 @@ def _turn(engine, sid, kind, body, event_at, project=REPO, device="dev-a"):
     engine.db().execute(
         """INSERT INTO sources(
              id,kind,device_id,project_ref,event_at,ingested_at,content_hash,body,status,lane,pair_ready
-           ) VALUES(?,?,?,?,?,?,?,?,'已蒸馏','fast',1)""",
+           ) VALUES(?,?,?,?,?,?,?,?,'已萃取','fast',1)""",
         (sid, kind, device, project, event_at, event_at, f"hash-{sid}", body),
     )
 

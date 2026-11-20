@@ -32,7 +32,7 @@ def test_sources_turn_fifty_at_a_time(tmp_path, monkeypatch):
     for index in range(55):
         engine.db().execute(
             """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-               VALUES(?,?,?,'h',?,'已蒸馏','fast',1)""",
+               VALUES(?,?,?,'h',?,'已萃取','fast',1)""",
             (f"s{index}", "user", f"2026-01-01T00:{index:02d}:00+00:00", f"句子{index}"),
         )
     engine.db().commit()
@@ -58,7 +58,7 @@ def test_sources_turn_fifty_at_a_time(tmp_path, monkeypatch):
     )
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES(?,?,?,'h',?,'已蒸馏','fast',1)""",
+           VALUES(?,?,?,'h',?,'已萃取','fast',1)""",
         file_row,
     )
     engine.db().commit()

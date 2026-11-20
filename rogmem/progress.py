@@ -14,15 +14,18 @@ ACTIVE = ("run", "retry", "fail")
 
 ST_PARSED = "已解析待向量化"
 ST_PARSE_FAIL = "解析失败"
-ST_VEC_READY = "已向量化待蒸馏"
+ST_VEC_READY = "已向量化待萃取"
 ST_VEC_FAIL = "向量化失败"
-ST_DISTILLING = "蒸馏中"
-ST_CRYSTAL = "蒸馏已结晶"
-ST_NO_CRYSTAL = "蒸馏无结晶"
-ST_DISTILL_FAIL = "蒸馏失败"
+ST_DISTILLING = "萃取中"
+ST_CRYSTAL = "萃取已结晶"
+ST_NO_CRYSTAL = "萃取无结晶"
+ST_DISTILL_FAIL = "萃取失败"
 ST_NO_BODY = "无正文"
+# 导入先收条、后读文：文件已在扫描目录，行已建好，读文在后台。这两句是那段时间的读数。
+ST_QUEUED = "排队中"
+ST_PARSING = "解析中"
 
-WAIT_DRAFT = "待蒸馏"
+WAIT_DRAFT = "待萃取"
 DONE = "完成"
 
 _STORED_LAMP = {"ok", "run", "fail", "retry", "wait"}
@@ -31,7 +34,13 @@ _LEGACY_STATUS = {
     "向量未就绪": ST_VEC_FAIL,
     "覆盖完成": ST_CRYSTAL,
     "队列中": ST_VEC_READY,
+    # 旧字：库里存过「蒸馏」，界面上现在叫「萃取」。
     "蒸馏队列中": ST_VEC_READY,
+    "已向量化待蒸馏": ST_VEC_READY,
+    "蒸馏中": ST_DISTILLING,
+    "蒸馏已结晶": ST_CRYSTAL,
+    "蒸馏无结晶": ST_NO_CRYSTAL,
+    "蒸馏失败": ST_DISTILL_FAIL,
     "已解析": ST_PARSED,
 }
 
@@ -280,8 +289,8 @@ def matches(pipeline: str, status: str, selected: str) -> bool:
     """True when the selected lamp question is true of this row.
 
     An active lamp matches on its own, so draft and vector can both hit. Old
-    status words ask the same questions: 蒸馏已结晶 means every distill lamp
-    passed, 蒸馏中 means one of them is still going.
+    status words ask the same questions: 萃取已结晶 means every distill lamp
+    passed, 萃取中 means one of them is still going.
     """
     chosen = (selected or "").strip()
     if not chosen:
@@ -293,3 +302,34 @@ def matches(pipeline: str, status: str, selected: str) -> bool:
     if word == ST_DISTILL_FAIL:
         return bool(found & _FAILED)
     return _ALIAS.get(word, word) in found
+
+
+def is_active(pipeline: str, status: str) -> bool:
+    """True while this row can still move on its own.
+
+    The file list subscribes to the rows that answer yes and drops them as they
+    go quiet. A failed or finished row never comes back without a reader.
+    """
+    if canonical_status(status) in {ST_QUEUED, ST_PARSING}:
+        return True
+    return any(state in {"run", "retry"} for state in lamp_board(pipeline, status).values())
+
+
+def stage_note(pipeline: str, status: str, *, done: int = 0, total: int = 0) -> str:
+    """The one stage this row is on, in words. Empty when the row is not moving.
+
+    ``done``/``total`` are only meaningful for 向量化, the one stage that can count
+    its units. Everything else is a single call and has no honest fraction.
+    """
+    word = canonical_status(status)
+    if word == ST_QUEUED:
+        return ST_QUEUED
+    board = lamp_board(pipeline, status)
+    moving = [name for name, state in board.items() if state in {"run", "retry"}]
+    if not moving:
+        return ST_PARSING if word == ST_PARSING else ""
+    name = moving[0]
+    if name == VECTOR:
+        return f"{name} {done}/{total}" if total else name
+    return f"{name}中"
+

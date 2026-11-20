@@ -83,9 +83,9 @@ EN_FILENAME = _IDENTITY.get("en_filename", "Han Paopao (1).docx")
 CN_FILENAME = _IDENTITY.get("cn_filename", "中文简历2026.pdf")
 
 LIVE_RESIM_TIMEOUT_SEC = 180
-# M3.1 的输出上限。思考也算在里面，不能再人为收成一万多。
+# M3.1 的输出上限。思考也算在里面，不能再人为收成一万多。真机实测有效上限是 262144。
 LIVE_RESIM_MAX_TOKENS = 8192
-LIVE_RESIM_MAX_TOKENS_MINIMAX = 524288
+LIVE_RESIM_MAX_TOKENS_MINIMAX = 262144
 
 # True MiniMax live (flip-switch hard card). Names only; never invent keys.
 TRUE_LIVE_FLAG = "ROGMEM_LIVE_LLM"

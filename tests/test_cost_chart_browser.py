@@ -365,7 +365,7 @@ def test_chart_speaks_millions_while_table_keeps_exact_figures(browser):
     board["rows"] = [
         {
             "at": "2026-11-11 11:00",
-            "worker": "初始蒸馏",
+            "worker": "草稿",
             "model": "演示",
             "prompt": "问",
             "answer": "答",

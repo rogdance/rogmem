@@ -15,6 +15,6 @@
 
 `channel` 把这份中枢 forward 到本机 `127.0.0.1:18780`。没有身份时，它仍用 find_rogmem() 在本机找一个 rogmem。有身份时，它只接身份相同的那一扇门。配置写 `http://127.0.0.1:18780/mcp`。
 
-`python -m rogmem hosts connect --dry-run` 列出将要改的文件，确认后再加 `--confirm --grant`。历史先 `history preview` 看条数，同意后再 `history upload --confirm`。不要把原文贴进对话。确认之前不导入。不要在本机蒸馏，不要写 crystal。
+`python -m rogmem hosts connect --dry-run` 列出将要改的文件，确认后再加 `--confirm --grant`。历史先 `history preview` 看条数，同意后再 `history upload --confirm`。不要把原文贴进对话。确认之前不导入。不要在本机萃取，不要写 crystal。
 
 Windows 上 Cursor 常见在 `%USERPROFILE%\AppData\Roaming\Cursor`，Linux 在 `~/.config/Cursor`，只有配置目录时在 `~/.cursor`。配置仍写用户目录下的 `.cursor/mcp.json`。

@@ -56,7 +56,7 @@ def _seed_realistic_calls(provider="p"):
     for i, at in enumerate(moments):
         cost.record(
             at=at,
-            worker="初始蒸馏" if i % 2 else "并页",
+            worker="草稿" if i % 2 else "并页",
             provider_id=provider,
             model="paid" if i < 4 else "unpaid",
             usage=(1_000 + i * 123, 400 + i * 71, 50 * (i % 3)),
@@ -152,8 +152,8 @@ def test_mixed_single_bucket_preserves_known_money(engine):
     桶级 money=None（_public_sum 口径），但 money_known 必须保留已计价金额；前端 payload 原样透传。"""
 
     # 冻结到 2026-11-11 03:37:42.123Z；两条调用都落到 03:00Z 整点桶（Shanghai 11:00 整点桶）。
-    cost.record(at="2026-11-11T03:10:00+00:00", worker="初始蒸馏", provider_id="p", model="paid", usage=(1_000_000, 500_000, 0), prompt="已计价", answer="")
-    cost.record(at="2026-11-11T03:20:00+00:00", worker="初始蒸馏", provider_id="p", model="unpaid", usage=(100_000, 50_000, 0), prompt="未计价", answer="")
+    cost.record(at="2026-11-11T03:10:00+00:00", worker="草稿", provider_id="p", model="paid", usage=(1_000_000, 500_000, 0), prompt="已计价", answer="")
+    cost.record(at="2026-11-11T03:20:00+00:00", worker="草稿", provider_id="p", model="unpaid", usage=(100_000, 50_000, 0), prompt="未计价", answer="")
     _price_only_paid()
     board = cost.overview(now=NOW, span="24h")
     # 找到含两条 call 的那一桶
@@ -190,7 +190,7 @@ def test_series_bare_is_transported_to_payload(engine):
     # bare 字段（没有 usage 返回的调用）必须随 payload 透传，否则合并桶 bare 会丢。
     cost.record(
         at="2026-11-11T02:50:00+00:00",
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="bare-model",
         usage=None,

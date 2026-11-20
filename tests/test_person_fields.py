@@ -60,7 +60,7 @@ def test_current_post_write_is_dropped(tmp_path, monkeypatch):
     if source is None:
         engine.db().execute(
             """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,event_at)
-               VALUES('job','user','2026-10-27T00:00:00+00:00','job',?,'已蒸馏','fast','2026-10-27T00:00:00+00:00')""",
+               VALUES('job','user','2026-10-27T00:00:00+00:00','job',?,'已萃取','fast','2026-10-27T00:00:00+00:00')""",
             (body,),
         )
         engine.db().commit()

@@ -23,7 +23,7 @@ from rogmem.closed_span import closed_hour_keys, hour_bounds, hour_slot_sql, ope
 SHANGHAI = timezone(timedelta(hours=8))
 PER_MILLION = 1_000_000
 PAGE = 20
-WORKERS = ("初始蒸馏", "并页", "速写", "专名核对", "身份合并", "向量嵌入")
+WORKERS = ("草稿", "并页", "速写", "专名核对", "身份合并", "向量嵌入")
 SPANS = {"all", "24h", "7d", "30d"}
 DETAIL_SPANS = {"all", "24h", "30d"}
 _WORKER: contextvars.ContextVar[str] = contextvars.ContextVar("rogmem_cost_worker", default="")
@@ -424,8 +424,42 @@ def migrate_call_clock(con: sqlite3.Connection) -> None:
     )
     con.execute("CREATE INDEX IF NOT EXISTS model_calls_jd ON model_calls(at_jd)")
     _ensure_call_seals(con)
+    migrate_worker_names(con)
     _CLOCK_READY = True
     _CLOCK_PATH = path
+
+
+def migrate_worker_names(con: sqlite3.Connection) -> None:
+    """「初始蒸馏」这个工人在成本账里改叫「草稿」。旧行按新名并回去。"""
+
+    tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "model_calls" not in tables:
+        return
+    con.execute("UPDATE model_calls SET worker='草稿' WHERE worker='初始蒸馏'")
+    if "call_bucket" not in tables:
+        return
+    legacy = con.execute(
+        """SELECT bucket, provider_id, model, bare, input_tokens, output_tokens,
+                  cache_tokens, fresh, cache_billed, metered
+             FROM call_bucket WHERE worker='初始蒸馏'"""
+    ).fetchall()
+    for row in legacy:
+        con.execute(
+            """INSERT INTO call_bucket
+                   (bucket, worker, provider_id, model, bare, input_tokens, output_tokens,
+                    cache_tokens, fresh, cache_billed, metered)
+               VALUES (?, '草稿', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(bucket, worker, provider_id, model) DO UPDATE SET
+                   bare = bare + excluded.bare,
+                   input_tokens = input_tokens + excluded.input_tokens,
+                   output_tokens = output_tokens + excluded.output_tokens,
+                   cache_tokens = cache_tokens + excluded.cache_tokens,
+                   fresh = fresh + excluded.fresh,
+                   cache_billed = cache_billed + excluded.cache_billed,
+                   metered = metered + excluded.metered""",
+            tuple(str(value) if index in (0, 1, 2) else int(value or 0) for index, value in enumerate(row)),
+        )
+    con.execute("DELETE FROM call_bucket WHERE worker='初始蒸馏'")
 
 
 def _ensure_schema(con: sqlite3.Connection, *, write: bool = False) -> None:

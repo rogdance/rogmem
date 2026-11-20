@@ -172,7 +172,7 @@ def test_forget_span_keeps_the_unnamed_sentence(tmp_path, monkeypatch):
     now = engine.utcnow()
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('keep','user',?,'k','北窗社在深圳。另一句留下。','已蒸馏','fast',1)""",
+           VALUES('keep','user',?,'k','北窗社在深圳。另一句留下。','已萃取','fast',1)""",
         (now,),
     )
     con.execute(
@@ -344,7 +344,7 @@ def test_named_chain_and_sentence_fate(tmp_path, monkeypatch):
     )
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('s','user',?,'h','周生生先写短句。这句没有写进结晶。','已蒸馏','fast',1)""",
+           VALUES('s','user',?,'h','周生生先写短句。这句没有写进结晶。','已萃取','fast',1)""",
         (now,),
     )
     con.execute(

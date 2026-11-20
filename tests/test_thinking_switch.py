@@ -73,7 +73,7 @@ def test_pipeline_page_offers_a_level_for_each_worker():
     assert "thinking_prose" not in page
     assert "推理强度" in page
     assert ".worker-field.think select { width: auto; }" in page
-    distill = page.split("初始蒸馏", 1)[1].split("身份合并", 1)[0]
+    distill = page.split("草稿", 1)[1].split("身份合并", 1)[0]
     assert "class='worker-controls'" in distill
     assert "name='model_distill'" in distill and "name='thinking_distill'" in distill
     assert "<option value='medium'>中</option>" in page

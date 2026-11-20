@@ -197,7 +197,7 @@ def test_a_reset_lamp_does_not_redraft_a_landed_checkpoint(tmp_path, monkeypatch
     pipeline = engine._begin_attempt("解析:ok,草稿:ok,并页:ok,速写:run")
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pipeline,stage_json,pair_ready)
-           VALUES('src-kept','file','2026-11-11T00:00:00+00:00','h','甲在南港。','蒸馏中','fast',?, ?,1)""",
+           VALUES('src-kept','file','2026-11-11T00:00:00+00:00','h','甲在南港。','萃取中','fast',?, ?,1)""",
         (pipeline, payload),
     )
     engine.db().commit()

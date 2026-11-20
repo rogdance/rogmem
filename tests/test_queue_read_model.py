@@ -62,7 +62,7 @@ def _insert(engine, rows: list[dict]) -> None:
     for row in rows:
         con.execute(
             """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename,pipeline)
-               VALUES(?,?,?,?,?,'已向量化待蒸馏',?,1,?,?)""",
+               VALUES(?,?,?,?,?,'已向量化待萃取',?,1,?,?)""",
             (
                 row["sid"],
                 row.get("kind", "file"),
@@ -443,7 +443,7 @@ def test_state_moves_are_separate_snapshots(tmp_path, monkeypatch):
     )
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,pipeline)
-           VALUES('born','file',?,'born','生','已向量化待蒸馏','p1',1,'解析:ok~向量:ok')""",
+           VALUES('born','file',?,'born','生','已向量化待萃取','p1',1,'解析:ok~向量:ok')""",
         (recent,),
     )
     con.execute(

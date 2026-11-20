@@ -96,7 +96,7 @@ def test_retry_waits_out_another_writers_lock(tmp_path, monkeypatch):
             "2026-11-10T04:28:11+00:00",
             "h",
             "简历正文",
-            "蒸馏失败",
+            "萃取失败",
             "p3",
             "中文简历2026.docx",
             "并页|解析:ok,草稿:ok,并页:fail~向量:ok",
@@ -156,7 +156,7 @@ def test_provider_backpressure_never_retires_the_file(tmp_path, monkeypatch):
     ).fetchone()
     source = engine.db().execute("SELECT status, last_error FROM sources WHERE id=?", (opened["id"],)).fetchone()
     assert queued["state"] == "queued"
-    assert source["status"] != "蒸馏失败"
+    assert source["status"] != "萃取失败"
     assert str(source["last_error"]).startswith("HTTP 429")
 
 
@@ -224,7 +224,7 @@ def test_a_call_the_provider_did_not_finish_stays_on_the_line(tmp_path, monkeypa
     source = engine.db().execute("SELECT status FROM sources WHERE id=?", (opened["id"],)).fetchone()
     assert queued["state"] == "queued"
     assert queued["attempts"] == 5
-    assert source["status"] != "蒸馏失败"
+    assert source["status"] != "萃取失败"
 
 
 def test_a_verdict_stops_after_five_and_comes_back_after_the_backoff(tmp_path, monkeypatch):
@@ -269,7 +269,7 @@ def test_manual_retry_keeps_the_failed_stage(tmp_path, monkeypatch):
             "2026-11-10T04:28:11+00:00",
             "h",
             "甲在南港。",
-            "蒸馏失败",
+            "萃取失败",
             "p3",
             pipeline,
             stage,
@@ -309,7 +309,7 @@ def _distill_failed(engine, sid: str) -> None:
             "2026-11-10T04:28:11+00:00",
             "h",
             "简历正文",
-            "蒸馏失败",
+            "萃取失败",
             "p3",
             "中文简历2026.docx",
             "并页|解析:ok,草稿:ok,并页:fail~向量:ok",
@@ -356,7 +356,7 @@ def test_retry_commit_runtime_error_rolls_the_write_back(tmp_path, monkeypatch):
     assert engine.db().in_transaction is False
     source = engine.db().execute("SELECT status FROM sources WHERE id=?", (sid,)).fetchone()
     queued = engine.db().execute("SELECT state FROM queue WHERE source_id=?", (sid,)).fetchone()
-    assert source["status"] == "蒸馏失败"
+    assert source["status"] == "萃取失败"
     assert queued["state"] == "failed"
     other = sqlite3.connect(tmp_path / "rogmem.sqlite")
     try:
@@ -381,14 +381,14 @@ def test_retry_commit_integrity_error_rolls_the_write_back(tmp_path, monkeypatch
         _restore_commit(engine, original)
     assert engine.db().in_transaction is False
     assert engine.db().execute("SELECT state FROM queue WHERE source_id=?", (sid,)).fetchone()["state"] == "failed"
-    assert engine.db().execute("SELECT status FROM sources WHERE id=?", (sid,)).fetchone()["status"] == "蒸馏失败"
+    assert engine.db().execute("SELECT status FROM sources WHERE id=?", (sid,)).fetchone()["status"] == "萃取失败"
 
 
 def _bench_source(engine, sid: str) -> None:
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename)
            VALUES(?,?,?,?,?,?,?,1,?)""",
-        (sid, "file", "2026-11-10T04:28:11+00:00", sid, "已提交正文", "蒸馏失败", "p3", "wiki-bench-a.md"),
+        (sid, "file", "2026-11-10T04:28:11+00:00", sid, "已提交正文", "萃取失败", "p3", "wiki-bench-a.md"),
     )
     engine.db().execute(
         "INSERT INTO queue(source_id,lane,state,attempts,last_error) VALUES(?,?, 'failed', 2, ?)",
@@ -439,7 +439,7 @@ def test_rebench_reopen_failure_keeps_the_original_error(tmp_path, monkeypatch):
     fresh = engine.db()
     assert fresh is not dirty
     assert fresh is not inner
-    assert fresh.execute("SELECT status, body FROM sources WHERE id=?", (sid,)).fetchone()["status"] == "蒸馏失败"
+    assert fresh.execute("SELECT status, body FROM sources WHERE id=?", (sid,)).fetchone()["status"] == "萃取失败"
     assert fresh.execute("SELECT body FROM sources WHERE id=?", (sid,)).fetchone()["body"] == "已提交正文"
     assert fresh.execute("SELECT state FROM queue WHERE source_id=?", (sid,)).fetchone()["state"] == "failed"
     fresh.execute("UPDATE sources SET last_error=? WHERE id=?", ("下一请求", sid))
@@ -477,7 +477,7 @@ def test_worker_rollback_failure_keeps_the_original_error(tmp_path, monkeypatch)
     assert str(box["exc"]) == "commit blew up"
     assert box["cached"] is not box["dirty"]
     assert box["fresh"] is not box["dirty"]
-    assert box["status"] == "蒸馏失败"
+    assert box["status"] == "萃取失败"
     assert box["state"] == "failed"
     assert engine.db() is main
     assert engine.db().execute("SELECT body FROM sources WHERE id=?", (sid,)).fetchone()["body"] == "已提交正文"
@@ -489,7 +489,7 @@ def test_rebench_commit_runtime_error_rolls_the_write_back(tmp_path, monkeypatch
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename)
            VALUES(?,?,?,?,?,?,?,1,?)""",
-        (sid, "file", "2026-11-10T04:28:11+00:00", "h", "评测正文", "已向量化待蒸馏", "p3", "wiki-bench-a.md"),
+        (sid, "file", "2026-11-10T04:28:11+00:00", "h", "评测正文", "已向量化待萃取", "p3", "wiki-bench-a.md"),
     )
     engine.db().execute(
         "INSERT INTO queue(source_id,lane,state,attempts,last_error) VALUES(?,?, 'failed', 2, ?)",
@@ -675,7 +675,7 @@ def test_rebuild_does_not_hold_a_write_across_embeds(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     engine.set_embed_mode("hash")
     engine.db().execute(
-        "INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready) VALUES('s','file',?,'h','甲','已向量化待蒸馏','p3',1)",
+        "INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready) VALUES('s','file',?,'h','甲','已向量化待萃取','p3',1)",
         ("2026-11-10T00:00:00+00:00",),
     )
     engine.db().execute("INSERT INTO chunks(source_id,seq,text) VALUES('s',0,'甲在南港')")
@@ -710,7 +710,7 @@ def test_retry_reads_a_picture_only_body_from_the_file(tmp_path, monkeypatch):
             "2026-11-13T09:14:45+00:00",
             "h",
             picture,
-            "蒸馏已结晶",
+            "萃取已结晶",
             "p3",
             name,
             "完成:ok~向量:ok",
@@ -750,7 +750,7 @@ def test_retry_reads_a_picture_only_body_from_the_file(tmp_path, monkeypatch):
     ).fetchone()
     assert "甲在南港记下了三笔账" in row["body"]
     assert "![" not in (row["body"] or "")
-    assert row["status"] == "已向量化待蒸馏"
+    assert row["status"] == "已向量化待萃取"
     assert not row["last_error"]
     assert row["coverage"] in {None, ""}
     assert chunks and all("![" not in text for text in chunks)
@@ -776,7 +776,7 @@ def test_retry_keeps_a_body_that_already_has_words(tmp_path, monkeypatch):
             "2026-11-13T09:14:45+00:00",
             "h",
             "乙在北港值了夜班。",
-            "蒸馏失败",
+            "萃取失败",
             "p3",
             "夜班.md",
         ),
@@ -786,4 +786,4 @@ def test_retry_keeps_a_body_that_already_has_words(tmp_path, monkeypatch):
     row = engine.db().execute("SELECT body, status FROM sources WHERE id=?", (sid,)).fetchone()
     assert row["body"] == "乙在北港值了夜班。"
     assert "磁盘上是另一句" not in row["body"]
-    assert row["status"] == "蒸馏中"
+    assert row["status"] == "萃取中"

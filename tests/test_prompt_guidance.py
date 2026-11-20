@@ -30,12 +30,12 @@ def test_model_page_names_the_workers():
         {"source": "none"},
         {"scan_interval": "60", "probe_interval": "300", "reconcile_hours": "3", "sweep_at": "03:00"},
     )
-    assert "初始蒸馏" in html
+    assert "草稿" in html
     assert "身份合并" in html and "向量嵌入" in html
     assert "结晶润色" not in html
     assert "词条整合" in html
     assert "结晶行文" not in html
-    assert ">蒸馏<" not in html and "当前蒸馏" not in html
+    assert ">萃取<" not in html and "当前萃取" not in html
 
 
 def test_the_pipeline_page_carries_the_gate_knobs():
@@ -60,7 +60,7 @@ def test_the_pipeline_page_carries_the_gate_knobs():
         ("限流等待", "gate_throttle_seconds", "60"),
         ("探活后限流条数", "gate_probation_units", "2"),
         ("探活后限流时长", "gate_probation_seconds", "300"),
-        ("蒸馏并发", "distill_concurrency", "3"),
+        ("萃取并发", "distill_concurrency", "3"),
     ):
         assert label in html
         assert f'name="{name}" value="{value}"' in html
@@ -228,7 +228,7 @@ def test_owner_sketch_replaces_the_yield_lines_and_other_sketches_keep_theirs():
 
 
 def test_owner_sketch_call_keeps_a_synthetic_body_and_only_checks_length(tmp_path, monkeypatch):
-    """程序不改材料、不按栏目筛。虚构句与蒸馏语料无连续八字重叠。"""
+    """程序不改材料、不按栏目筛。虚构句与萃取语料无连续八字重叠。"""
     monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
     monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
     monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
@@ -251,7 +251,7 @@ def test_owner_sketch_call_keeps_a_synthetic_body_and_only_checks_length(tmp_pat
             return "眼下他在等一盏灯自己亮。", "stop"
         return "北岸纸店等墨干透。", "stop"
 
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
     monkeypatch.setattr(engine, "_complete_chat", fake_complete)
     owner_sketch = engine._ask_sketch(owner_body, "人物", owner=True)
     project_sketch = engine._ask_sketch(project_body, "工程", owner=False)
@@ -281,7 +281,7 @@ def test_header_names_the_owner_and_the_source_even_when_the_model_cannot_know(t
         seen[speaker] = payload["messages"][1]["content"]
         return "# 云岚甲\n类型：人物\n\n他在。\n", "stop"
 
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
     monkeypatch.setattr(engine, "_complete_chat", fake_complete)
     engine._llm_draft("我喜欢爵士。", "file", filename="档案.md", source_id="src-file")
     engine._llm_draft("我喜欢爵士。", "user", owner_real_name="云岚甲", owner_aliases="甲", source_id="src-user")
@@ -536,3 +536,84 @@ def test_filename_is_shown_and_its_facts_can_land(tmp_path, monkeypatch):
         assert not any(item.startswith("SOURCE\n") for item in LAST_SOURCES)
     finally:
         server.shutdown()
+
+
+def test_an_over_length_sketch_is_never_cut(tmp_path, monkeypatch):
+    """速写不剪尾：改写压不下去时保留完整原文，绝不落半截。"""
+    monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
+    monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    monkeypatch.setenv("ROGMEM_EMBED", "off")
+    from rogmem import engine
+
+    engine.connect(tmp_path, tmp_path / "scan")
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
+    monkeypatch.setattr(engine, "_complete_chat", lambda *a, **k: ("", "stop"))
+
+    text = "甲" * 3600 + "。"
+    out = engine._fit_or_compress(text, "http://stub/v1", "k", "m", limit=3500)
+    assert out == text
+    assert "已截断" not in out
+
+
+def test_an_over_length_sketch_is_rewritten_not_sliced(tmp_path, monkeypatch):
+    """超上限先让模型压回去，只交回完整正文；压不动才保留原草稿——两条路都不剪尾。"""
+    monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
+    monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    monkeypatch.setenv("ROGMEM_EMBED", "off")
+    from rogmem import engine
+
+    engine.connect(tmp_path, tmp_path / "scan")
+    seen: list[str] = []
+
+    def fake_complete(_base, _key, payload, **_kwargs):
+        seen.append(payload["messages"][0]["content"])
+        if len(seen) == 1:
+            return "甲" * 3600 + "。", "stop"
+        return "压回上限的正文。", "stop"
+
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
+    monkeypatch.setattr(engine, "_complete_chat", fake_complete)
+    out = engine._ask_sketch("正文", "人物", owner=True)
+    assert out == "压回上限的正文。"
+    assert len(seen) == 2
+    assert "超出" in seen[1]
+
+
+def test_a_compression_that_does_not_shrink_keeps_the_whole_sketch(tmp_path, monkeypatch):
+    """压缩没变短（模型跑偏）时不能顶替原草稿，也不剪尾——保留完整的原草稿。"""
+    monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
+    monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    monkeypatch.setenv("ROGMEM_EMBED", "off")
+    from rogmem import engine
+
+    engine.connect(tmp_path, tmp_path / "scan")
+    seen: list[str] = []
+
+    def fake_complete(_base, _key, payload, **_kwargs):
+        seen.append(payload["messages"][0]["content"])
+        if len(seen) == 1:
+            return "甲" * 3600 + "。", "stop"
+        return "乙" * 3600 + "。", "stop"
+
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
+    monkeypatch.setattr(engine, "_complete_chat", fake_complete)
+    out = engine._ask_sketch("正文", "人物", owner=True)
+    assert out == "甲" * 3600 + "。"
+    assert "已截断" not in out
+
+
+def test_a_sketch_reply_that_stopped_for_room_is_not_a_sketch(tmp_path, monkeypatch):
+    """没写完的回复不是速写：再要的仍没写完就返回空，交上层留待办——不落半截。"""
+    monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
+    monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    monkeypatch.setenv("ROGMEM_EMBED", "off")
+    from rogmem import engine
+
+    engine.connect(tmp_path, tmp_path / "scan")
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
+    monkeypatch.setattr(engine, "_complete_chat", lambda *a, **k: ("写了半句就停住", "length"))
+    assert engine._ask_sketch("正文" * 60, "人物", owner=False) == ""

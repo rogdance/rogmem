@@ -8,7 +8,7 @@
 
 | 做什么 | 看哪里 |
 | --- | --- |
-| 蒸馏、并页、速写、专名、身份的提示 | `rogmem/prompts.py` |
+| 萃取、并页、速写、专名、身份的提示 | `rogmem/prompts.py` |
 | 页面类型和正文怎么写 | `rogmem/pages_md.py` |
 | 给外部代理的工具 | `rogmem/app.py` |
 | 合版、部署、发布 | `skills/rogmem-ship/SKILL.md`、`skills/zspace-release/SKILL.md` |
@@ -20,7 +20,7 @@
 
 这些文件描述的是旧方案：固定章节、槽位、默认补「暂无来源」、D5 演变链。不要用它们判断现在的页面、检索或工具。
 
-- `docs/prompts/wiki-distill-draft-prompt-v5.md`（文末 §D，含 D5）。模拟程序仍会读取其中 A/B 段，线上蒸馏不读这份。
+- `docs/prompts/wiki-distill-draft-prompt-v5.md`（文末 §D，含 D5）。模拟程序仍会读取其中 A/B 段，线上萃取不读这份。
 - `docs/prompts/wiki-integrate-adjudicate-prompt-v1.md`（见上：只剩抽出的提示还在跑）
 - `docs/prompts/README.md`
 - `docs/rogmem-tech-architecture-v3.md`
