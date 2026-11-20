@@ -10110,7 +10110,10 @@ def _write_field(source: sqlite3.Row, item: dict, rank: str, body: str, *, store
             ]
             summary[key] = "；".join([*kept, value])
         elif current and current["text"] == value:
-            pass
+            # Repeat of the same field value: do not rewrite the page, but record
+            # another supporting source so proof_count rises for recall.
+            planned_link = (current["id"], source["id"], quote or value)
+            statement_id = current["id"]
         elif current and current["text"] != value:
             if _event_cannot_reopen(source, current):
                 return
@@ -10372,7 +10375,10 @@ def _add_statement(con, crystal_id, field, chapter, text, quote, source_id, rank
             (crystal_id, text, *place_args),
         ).fetchone()
         if same:
+            # Same wording again: keep one statement, accumulate supporting sources
+            # (Hindsight proof_count). Search ranks by this evidence strength.
             con.execute("UPDATE statements SET valid_until=? WHERE id=?", (until, same["id"]))
+            _link_statement_source(con, same["id"], source_id, quote)
             return same["id"]
         con.execute(
             f"""UPDATE statements SET invalid_at=?
@@ -11111,20 +11117,77 @@ def _pages_opened_by(query: str, limit: int) -> list[tuple[str, dict]]:
     return hits
 
 
-def search(query: str, limit: int = 5) -> dict:
+def _statement_proof_count(con: sqlite3.Connection, statement_id: str) -> int:
+    """Supporting-source count for one statement (Hindsight proof_count).
+
+    Prefer ``statement_sources``; fall back to the primary ``source_id`` so
+    legacy rows that predate multi-source links still count as one proof.
+    """
+    sid = str(statement_id or "").strip()
+    if not sid or sid.startswith("page:"):
+        return 0
+    row = con.execute(
+        "SELECT COUNT(*) AS n FROM statement_sources WHERE statement_id=?",
+        (sid,),
+    ).fetchone()
+    n = int(row["n"] or 0) if row else 0
+    if n > 0:
+        return n
+    st = con.execute("SELECT source_id FROM statements WHERE id=?", (sid,)).fetchone()
+    return 1 if st and str(st["source_id"] or "").strip() else 0
+
+
+def _lane_trace(name: str, ranking: list[tuple[str, dict]], *, capped_from: int, cap: int) -> dict:
+    hits = []
+    for rank, (key, item) in enumerate(ranking, start=1):
+        hits.append(
+            {
+                "rank": rank,
+                "key": key,
+                "crystal": item.get("crystal") or "",
+                "field": item.get("field") or "",
+                "match": item.get("match") or "",
+                "text": (item.get("text") or "")[:160],
+            }
+        )
+    return {
+        "name": name,
+        "count": capped_from,
+        "capped_to": len(ranking),
+        "cap": cap,
+        "truncated": capped_from > len(ranking),
+        "hits": hits,
+    }
+
+
+def search(query: str, limit: int = 5, *, trace: bool = False) -> dict:
     """Hybrid recall: identity + FTS + graph + temporal (+ chunk FTS/vector for raw).
 
     Crystal lanes are capped per source then fused with RRF (k=60), matching
     Hindsight's four-arm recall without cross-encoder rerank. Graph and
     temporal only feed ranking — they never enter name uniqueness.
+
+    After RRF, statement hits get a small proof_count multiplicative boost
+    (Hindsight ``_PROOF_COUNT_ALPHA``). Pass ``trace=True`` to attach a
+    per-lane recall diagnostic (counts, cap, RRF, proof).
     """
-    from rogmem.retrieve import DEFAULT_LANE_CAP, cap_per_source, rrf_fuse
+    from rogmem.retrieve import (
+        DEFAULT_LANE_CAP,
+        apply_proof_boost,
+        cap_per_source,
+        rrf_fuse,
+        rrf_fuse_scored,
+    )
     from rogmem.search_lanes import graph_lane, temporal_lane
+    from rogmem.temporal_query import extract_temporal_window
 
     limit = max(int(limit), 0)
     prefer_raw = _prefer_raw_query(query)
     if limit == 0:
-        return {"crystals": [], "raw": [], "prefer_raw": prefer_raw, "embed": _EMBED}
+        out = {"crystals": [], "raw": [], "prefer_raw": prefer_raw, "embed": _EMBED}
+        if trace:
+            out["trace"] = {"lanes": [], "rrf": [], "temporal_window": None}
+        return out
     pool = _candidate_pool(limit)
     lane_cap = max(pool, DEFAULT_LANE_CAP)
     mq = _match_query(query)
@@ -11215,13 +11278,37 @@ def search(query: str, limit: int = 5) -> dict:
             budget=lane_cap,
             parse_event=_parse_event,
         )
+    raw_identity, raw_statements, raw_graph, raw_temporal = (
+        len(identity),
+        len(statements),
+        len(graph),
+        len(temporal),
+    )
     crystal_lanes = [
         cap_per_source(identity, lane_cap),
         cap_per_source(statements, lane_cap),
         cap_per_source(graph, lane_cap),
         cap_per_source(temporal, lane_cap),
     ]
-    crystals = [] if prefer_raw else rrf_fuse(crystal_lanes)[:limit]
+    crystals: list[dict] = []
+    rrf_rows: list[dict] = []
+    if not prefer_raw:
+        scored = rrf_fuse_scored(crystal_lanes)
+        proof_counts = {key: _statement_proof_count(db(), key) for key, _item, _s, _r in scored}
+        boosted = apply_proof_boost(scored, proof_counts)
+        for key, item, _final, meta in boosted[:limit]:
+            crystals.append(item)
+            rrf_rows.append(
+                {
+                    "key": key,
+                    "crystal": item.get("crystal") or "",
+                    "rrf_score": meta["rrf_score"],
+                    "proof_count": meta["proof_count"],
+                    "proof_boost": meta["proof_boost"],
+                    "final_score": meta["final_score"],
+                    "source_ranks": meta["source_ranks"],
+                }
+            )
     raw = []
     seen: set[str] = set()
     for item in rrf_fuse(
@@ -11236,12 +11323,40 @@ def search(query: str, limit: int = 5) -> dict:
         raw.append(item)
         if len(raw) >= limit:
             break
-    return {
+    out = {
         "crystals": crystals,
         "raw": raw,
         "prefer_raw": prefer_raw,
         "embed": _EMBED,
     }
+    if trace:
+        window = extract_temporal_window(query)
+        out["trace"] = {
+            "lane_cap": lane_cap,
+            "temporal_window": (
+                [window[0].isoformat(), window[1].isoformat()] if window else None
+            ),
+            "lanes": [
+                _lane_trace("identity", crystal_lanes[0], capped_from=raw_identity, cap=lane_cap),
+                _lane_trace("fts", crystal_lanes[1], capped_from=raw_statements, cap=lane_cap),
+                _lane_trace("graph", crystal_lanes[2], capped_from=raw_graph, cap=lane_cap),
+                _lane_trace("temporal", crystal_lanes[3], capped_from=raw_temporal, cap=lane_cap),
+                _lane_trace(
+                    "chunks",
+                    cap_per_source(chunks, lane_cap),
+                    capped_from=len(chunks),
+                    cap=lane_cap,
+                ),
+                _lane_trace(
+                    "vectors",
+                    cap_per_source(vectors, lane_cap),
+                    capped_from=len(vectors),
+                    cap=lane_cap,
+                ),
+            ],
+            "rrf": rrf_rows,
+        }
+    return out
 
 
 def _split_addresses(text: str) -> list[str]:
