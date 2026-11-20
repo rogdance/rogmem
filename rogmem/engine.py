@@ -963,12 +963,25 @@ class _RogmemConnection(sqlite3.Connection):
             raise self._settle(exc)
 
 
+_WAL_WARNED = False
+
+
 def _open_connection(path: Path) -> sqlite3.Connection:
     """One connection per thread. Sharing one connection across threads is what made the admin wait and the distill raise SQLITE_MISUSE."""
+    global _WAL_WARNED
     con = sqlite3.connect(path, check_same_thread=False, factory=_RogmemConnection)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=5000")
-    con.execute("PRAGMA journal_mode=WAL")
+    try:
+        row = con.execute("PRAGMA journal_mode=WAL").fetchone()
+        mode = str(row[0]).strip().lower() if row else ""
+    except sqlite3.Error as exc:
+        mode = f"error:{type(exc).__name__}"
+    if mode != "wal" and not _WAL_WARNED:
+        # 卷拒绝 WAL（个别网络卷会静默退回回滚日志），就只剩一把锁：读写互相排队，
+        # 管线一忙，core 的读也会被 "database is locked" 拒掉。喊一次就够，别刷屏。
+        _WAL_WARNED = True
+        print(f"ROGMEM_WAL_FALLBACK journal_mode={mode or 'unknown'} path={path}", flush=True)
     con.execute("PRAGMA foreign_keys=ON")
     return con
 
@@ -3673,14 +3686,16 @@ def _lease_members(exchange: Exchange | None, picked: QueueCandidate) -> list[tu
 
 def lease_next() -> dict | None:
     """Lease one distill unit. A session run leases every row in that run."""
+    if distill_paused():
+        # 操作员按了暂停：一个单位都不锁，连向量补齐都不跑——暂停就该是真空闲。
+        # 放在最前。放后面的话，空转的 worker 每轮仍会跑 ensure_pending_vectors()，
+        # 每 0.2 秒一轮、三个 worker 一起，把库的锁位占满，core 的读会被
+        # "database is locked" 全数拒掉。队列与租约原样留着，抬起开关就从这里继续。
+        return None
     ensure_pending_vectors()
     now = utcnow()
     with LOCK:
         con = db()
-        if distill_paused():
-            # 操作员按了暂停：一个单位都不锁。队列与租约原样留着，抬起开关就从这里继续，
-            # 不是重新开始。放在最前面，暂停时连告警/闸门都不用判。
-            return None
         if con.execute(
             """SELECT 1 FROM alerts WHERE open=1 AND (
                  message LIKE '外部模型鉴权失败%' OR message=? OR message=?
@@ -4399,9 +4414,33 @@ def _source_landed(source_id: str) -> bool:
     )
 
 
+# 草稿页远大于它材料时，这一页不是材料写出来的，是模型跑飞了：真机上出现过材料 3.6k 字、
+# 草稿页 87 万字（同一个 ``### 其他持续事项`` 重复 32 次、358 个整段重复）。这种页并页永远
+# 写不完，只能反复烧额度，所以它不算一份可用的 checkpoint —— 退回草稿重萃，不要拿它去并页。
+# 两个条件同时成立才算：绝对量够大，并且远超材料。正常页一律照旧。
+DRAFT_RUNAWAY_MIN_CHARS = 80_000
+DRAFT_RUNAWAY_FACTOR = 20
+
+
+def _stage_has_runaway_page(source, cache: dict | None) -> bool:
+    """A staged draft page far bigger than its material is a runaway, not a page."""
+    if not cache:
+        return False
+    material = len(_source_column(source, "body"))
+    for page in cache.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+        size = len(str(page.get("body") or ""))
+        if size > DRAFT_RUNAWAY_MIN_CHARS and size > DRAFT_RUNAWAY_FACTOR * max(material, 1):
+            return True
+    return False
+
+
 def _checkpoint_usable(source, cache: dict | None) -> bool:
     """A checkpoint belongs to this source text. A missing hash is an older row and still counts."""
     if not cache:
+        return False
+    if _stage_has_runaway_page(source, cache):
         return False
     stored = str(cache.get("source_hash") or "")
     if not stored:
@@ -8518,6 +8557,17 @@ def _merge_needs_partial(old: str, new: str) -> bool:
     return len(old or "") + len(new or "") > MERGE_SINGLE_CALL_CHARS
 
 
+def _merge_reply_over_cap(old: str, new: str, page: str) -> bool:
+    """并页整页交回远超「旧页 + 草稿」的规模，就是把一次过程整段搬进页的爆炸。
+
+    与 apply_integrate 的整篇重写上限同一口径（FULL_REWRITE_FACTOR／FULL_REWRITE_SLACK）：
+    一次并页至多写回（旧页 + 草稿）的 1.5 倍再加两千字。正常并页远低于此——真机见过一次
+    并页把一趟执行逐条搬进页，落成 40 万字一节——命中即改走段级装配，不落爆炸页。
+    """
+    cap = int(FULL_REWRITE_FACTOR * (len(old or "") + len(new or ""))) + FULL_REWRITE_SLACK
+    return len(page or "") > cap
+
+
 @charging("并页")
 def _merge_existing_page(
     old: str,
@@ -8573,9 +8623,28 @@ def _merge_existing_page(
     content, reason = _complete_chat(base, key, payload, role="page", shape=shape)
     if reason == "length":
         # A reply that stopped for room is not a page. Writing it would drop whatever it
-        # never reached, and the guard no longer pastes the missing paragraphs back. The
-        # room above is already the page's own room, so there is no fuller room to try:
-        # hand the unit back to the queue, which runs this merge again.
+        # never reached, and the guard no longer pastes the missing paragraphs back.
+        # 但原样重发同一份整页请求只会一模一样地再炸一次，一路把额度烧到 attempts 上限。
+        # 于是分两级退让：整页写不下，先降一级问「只交回改动的小节」；段级仍写不下，就不再
+        # 靠模型，按段级装配兜底——旧页整段留在前，草稿新出现的段落接在后，页面照样更新、
+        # 不丢内容，这个单元也就收敛了。
+        if not partial:
+            if source is not None:
+                _touch_lease(source["id"])
+            return _merge_existing_page(
+                old, new, material, source, page_event_at, page_name, page_type, partial=True
+            )
+        page = _keep_both_pages(old, new)
+        if page.strip():
+            return (
+                _keep_unnamed_relations(page, "", old, new, hang_unmatched=False),
+                [],
+                "",
+                "",
+                False,
+                "",
+                "",
+            )
         # 记下这一笔额度被思考吃掉了多少，否则"思考挤满"与"页面太大"看起来一模一样。
         raise ModelCallFailed(
             "并页没有写完这一页（思考 {} 字 / 正文 {} 字 / 额度 {}）".format(
@@ -9206,6 +9275,18 @@ def _merge_one_page(source, page: dict, prior: dict) -> None:
         if prior["id"] and not page.get("separate"):
             page["id"] = prior["id"]
         return
+    if len(old) > MERGE_SINGLE_CALL_CHARS and _keep_both_pages(old, bound) == old:
+        # 这一页已经超过一次写回得下的规模，而这份草稿没有它还没有的东西：不必再花一次并页
+        # 调用——超页并页每次都得把整页旧文整段送进 prompt，是这条链路上最贵的一次调用。
+        # 没有新材料可并，程序按字节保留旧页，不丢内容，也不改写法。
+        page["body"] = old
+        page["conflicts"] = []
+        page["merge_note"] = ""
+        page["gist"] = ""
+        page["merge_skipped"] = True
+        if prior["id"] and not page.get("separate"):
+            page["id"] = prior["id"]
+        return
     partial = _merge_needs_partial(old, bound)
     try:
         _touch_lease(source["id"])
@@ -9228,6 +9309,11 @@ def _merge_one_page(source, page: dict, prior: dict) -> None:
     page["conflicts"] = conflicts
     page["merge_note"] = note
     page["gist"] = gist
+    if _merge_reply_over_cap("" if separate else old, bound, page["body"]):
+        # 整页交回跑飞（把一趟执行逐条搬进页）：不落爆炸页，改走段级装配——旧页未交回的
+        # 小节按字节保留，只按草稿改写，facts 两边都在。见 _merge_reply_over_cap。
+        page["body"] = bound if separate else _shape_merged_page(old, bound, keep_missing=True)
+        page["merge_over_cap"] = True
     if separate:
         page["separate"] = True
         page.pop("id", None)
@@ -9375,6 +9461,12 @@ def _deliver_page(source, catalog: list[dict], page: dict) -> None:
                         crystal.id,
                         "page_folded",
                         {"dropped_chars": int(page["folded_chars"]), "after": len(incoming or "")},
+                    )
+                if page.get("merge_over_cap"):
+                    CrystalStore(con).record_event(
+                        crystal.id,
+                        "page_merge_over_cap",
+                        {"before": len(before or ""), "after": len(incoming or "")},
                     )
                 parts: list[str] = []
                 judged = ""
@@ -11014,18 +11106,31 @@ def _pages_opened_by(query: str, limit: int) -> list[tuple[str, dict]]:
 
 
 def search(query: str, limit: int = 5) -> dict:
-    from rogmem.retrieve import rrf_fuse
+    """Hybrid recall: identity + FTS + graph + temporal (+ chunk FTS/vector for raw).
+
+    Crystal lanes are capped per source then fused with RRF (k=60), matching
+    Hindsight's four-arm recall without cross-encoder rerank. Graph and
+    temporal only feed ranking — they never enter name uniqueness.
+    """
+    from rogmem.retrieve import DEFAULT_LANE_CAP, cap_per_source, rrf_fuse
+    from rogmem.search_lanes import graph_lane, temporal_lane
 
     limit = max(int(limit), 0)
     prefer_raw = _prefer_raw_query(query)
     if limit == 0:
         return {"crystals": [], "raw": [], "prefer_raw": prefer_raw, "embed": _EMBED}
     pool = _candidate_pool(limit)
+    lane_cap = max(pool, DEFAULT_LANE_CAP)
     mq = _match_query(query)
     identity: list[tuple[str, dict]] = []
+    identity_crystal_ids: list[str] = []
     if not prefer_raw:
         identity = _pages_opened_by(query, pool)
+        for key, _item in identity:
+            if key.startswith("page:"):
+                identity_crystal_ids.append(key[5:])
     statements: list[tuple[str, dict]] = []
+    statement_crystal_ids: list[str] = []
     chunks: list[tuple[str, dict]] = []
     if mq:
         for row in _fts_top("fts_stmt", "stmt_id", mq, pool):
@@ -11036,6 +11141,7 @@ def search(query: str, limit: int = 5) -> dict:
             if not st:
                 continue
             crystal = db().execute("SELECT name FROM crystallizations WHERE id=?", (st["crystal_id"],)).fetchone()
+            statement_crystal_ids.append(st["crystal_id"])
             statements.append(
                 (
                     st["id"],
@@ -11056,6 +11162,7 @@ def search(query: str, limit: int = 5) -> dict:
             ).fetchone()
             if not page or page["status"] != "active":
                 continue
+            statement_crystal_ids.append(page["id"])
             shown = readable_text(page["name"] or "", page["body_md"] or "", page["sketch_md"] or "")
             statements.append(
                 (
@@ -11086,10 +11193,37 @@ def search(query: str, limit: int = 5) -> dict:
                 if ch["cited"] and not prefer_raw:
                     continue
                 vectors.append((str(ch["id"]), _search_chunk(ch, semantic=True, prefer_raw=prefer_raw)))
-    crystals = [] if prefer_raw else rrf_fuse([identity, statements])[:limit]
+    graph: list[tuple[str, dict]] = []
+    temporal: list[tuple[str, dict]] = []
+    if not prefer_raw:
+        graph = graph_lane(
+            db(),
+            query,
+            identity_crystal_ids=identity_crystal_ids,
+            statement_crystal_ids=statement_crystal_ids,
+            budget=lane_cap,
+        )
+        temporal = temporal_lane(
+            db(),
+            query,
+            budget=lane_cap,
+            parse_event=_parse_event,
+        )
+    crystal_lanes = [
+        cap_per_source(identity, lane_cap),
+        cap_per_source(statements, lane_cap),
+        cap_per_source(graph, lane_cap),
+        cap_per_source(temporal, lane_cap),
+    ]
+    crystals = [] if prefer_raw else rrf_fuse(crystal_lanes)[:limit]
     raw = []
     seen: set[str] = set()
-    for item in rrf_fuse([chunks, vectors]):
+    for item in rrf_fuse(
+        [
+            cap_per_source(chunks, lane_cap),
+            cap_per_source(vectors, lane_cap),
+        ]
+    ):
         if item["text"] in seen:
             continue
         seen.add(item["text"])
