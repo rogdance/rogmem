@@ -157,11 +157,13 @@ def test_both_graphs_ship_the_same_three_d_body(tmp_path, monkeypatch):
     assert draw in memory
     assert "var selfId" in association
     assert "var selfId" not in memory
-    assert _without_neighborhood(_mount(association)) == _mount(memory)
+    # 记忆图谱把活跃结晶计数叠进 #graph；关联图谱没有。比三维脚本时先去掉它。
+    memory_mount = _mount(memory).replace("<p class='graph-count' id='graph-count'></p>", "")
+    assert _without_neighborhood(_mount(association)) == memory_mount
 
 
 def test_three_d_canvas_follows_the_container_not_the_window():
-    """画布尺寸必须跟容器走。容器在页面里只占剩余高度（顶部还有标题与说明），
+    """画布尺寸必须跟容器走。容器在页面里占导航以下全部高度，
     用窗口高度会把渲染中心推到可见区下方：球心看着偏下、拖拽像没绕球心转，球还会被裁掉一截。"""
     from rogmem.ui import graph_page
 

@@ -7,7 +7,7 @@
   不被改写。
 - GET 请求全程不触发服务端写（无任何 settings.* 被改动）。
 - 无循环：GET `/admin` → `/admin/graph` → 200（不再 302）。
-- 这些入口测试开着临时目录的 `ROGMEM_NO_PASSWORD=1`，所以仍能直接看到图谱。正式数据目录的口令门在 `tests/test_auth_boundary.py`。
+- 鉴权边界不变：当前 `_admin_ok` 永远放行（匿名可访问），本修改不改这条。
 """
 
 from __future__ import annotations
@@ -87,7 +87,9 @@ def test_remote_open_is_the_graph(tmp_path, monkeypatch):
     for path in ("/", "/index.html"):
         resp = client.get(path, follow_redirects=False)
         assert resp.status_code == 200, path
-        assert "<h1>记忆图谱</h1>" in resp.text
+        assert "记忆图谱" in resp.text
+        assert "<h1>记忆图谱</h1>" not in resp.text
+        assert "id='graph-count'" in resp.text
         assert "为保障记忆服务通畅，请务必保持本窗口开启或最小化" in resp.text
         assert "rogmem_channel=1" in resp.headers.get("set-cookie", "")
 
@@ -153,13 +155,15 @@ def test_default_entry_chain_through_build_app(tmp_path, monkeypatch):
     assert r1.status_code == 302 and r1.headers["location"] == "/admin/graph", (r1.status_code, r1.headers)
     r2 = client.get("/admin/login", follow_redirects=False)
     assert r2.status_code == 302 and r2.headers["location"] == "/admin/graph", (r2.status_code, r2.headers)
-    # follow 到 /admin/graph：200 + 含"记忆图谱"
+    # follow 到 /admin/graph：200 + 含"记忆图谱"（沉浸式，无页头 h1）
     r3 = client.get("/admin", follow_redirects=True)
     assert r3.status_code == 200
-    assert "<h1>记忆图谱</h1>" in r3.text
+    assert "记忆图谱" in r3.text
+    assert "<h1>记忆图谱</h1>" not in r3.text
     opened = client.get("/", follow_redirects=False)
     assert opened.status_code == 200
-    assert "<h1>记忆图谱</h1>" in opened.text
+    assert "记忆图谱" in opened.text
+    assert "<h1>记忆图谱</h1>" not in opened.text
     assert "rogmem_channel=1" in opened.headers.get("set-cookie", "")
 
 

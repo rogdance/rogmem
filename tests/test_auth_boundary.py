@@ -287,7 +287,9 @@ def test_first_visit_opens_without_a_password(tmp_path, monkeypatch):
         assert engine.admin_password_required() is False
         status, body, headers = hub.req("GET", "/")
         assert status == 200, body[:200]
-        assert "<h1>记忆图谱</h1>" in body
+        assert "记忆图谱" in body
+        assert "<h1>记忆图谱</h1>" not in body
+        assert "id='graph-count'" in body
         assert "/admin/login" not in headers.get("Location", "")
         login, _page, login_headers = hub.req("GET", "/admin/login")
         assert login == 302
@@ -436,7 +438,9 @@ def test_admin_writes_require_the_password_session(tmp_path, monkeypatch):
         assert saved[0] == 200, saved[1]
         home, body, home_headers = hub.req("GET", "/", headers={"Cookie": cookie})
         assert home == 200
-        assert "<h1>记忆图谱</h1>" in body
+        assert "记忆图谱" in body
+        assert "<h1>记忆图谱</h1>" not in body
+        assert "id='graph-count'" in body
         assert "rogmem_channel=1" in home_headers.get("Set-Cookie", "")
     finally:
         hub.close()
@@ -477,7 +481,9 @@ def test_passwordless_defaults_open_and_can_close(tmp_path, monkeypatch):
         assert "checked" in tag
         home, body, _headers = hub.req("GET", "/")
         assert home == 200
-        assert "<h1>记忆图谱</h1>" in body
+        assert "记忆图谱" in body
+        assert "<h1>记忆图谱</h1>" not in body
+        assert "id='graph-count'" in body
         closed = hub.req("POST", "/admin/api/settings/basic", {"passwordless": "0"})
         assert closed[0] == 200, closed[1]
         assert engine.passwordless_enabled() is False
@@ -553,7 +559,9 @@ def test_turning_passwordless_off_retires_existing_sessions(tmp_path, monkeypatc
         cookie = hub.login("Rogmem@2026")
         home, body, _headers = hub.req("GET", "/", headers={"Cookie": cookie})
         assert home == 200
-        assert "<h1>记忆图谱</h1>" in body
+        assert "记忆图谱" in body
+        assert "<h1>记忆图谱</h1>" not in body
+        assert "id='graph-count'" in body
         mismatched = json.loads(
             hub.req(
                 "POST",
@@ -584,7 +592,9 @@ def test_turning_passwordless_off_retires_existing_sessions(tmp_path, monkeypatc
         assert fresh != cookie
         back, back_body, _headers = hub.req("GET", "/", headers={"Cookie": fresh})
         assert back == 200
-        assert "<h1>记忆图谱</h1>" in back_body
+        assert "记忆图谱" in back_body
+        assert "<h1>记忆图谱</h1>" not in back_body
+        assert "id='graph-count'" in back_body
     finally:
         hub.close()
 
