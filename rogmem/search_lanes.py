@@ -140,6 +140,7 @@ def _neighbours(
         ).fetchall()
         # Group undirected neighbours per frontier node, then cap fan-out so one
         # hub crystal cannot explode the expansion (Hindsight per-entity LATERAL cap).
+        # Preserve multi-edge multiplicity while still capping unique neighbours.
         by_node: dict[str, list[str]] = {node: [] for node in frontier}
         for row in rows:
             for node, other in ((row["src"], row["dst"]), (row["dst"], row["src"])):
@@ -151,17 +152,21 @@ def _neighbours(
         nxt: set[str] = set()
         for node, others in by_node.items():
             # Stable order keeps the cap deterministic across SQLite builds.
-            capped = sorted(set(others))[: max(0, per_seed_limit)]
+            counts: dict[str, int] = {}
+            for other in others:
+                counts[other] = counts.get(other, 0) + 1
+            capped = sorted(counts)[: max(0, per_seed_limit)]
             for other in capped:
+                add = counts[other]
                 if other in visited and other not in reached:
                     continue
                 prev = reached.get(other)
                 if prev is None:
-                    reached[other] = (hop, 1)
+                    reached[other] = (hop, add)
                     nxt.add(other)
                     visited.add(other)
                 else:
-                    reached[other] = (min(prev[0], hop), prev[1] + 1)
+                    reached[other] = (min(prev[0], hop), prev[1] + add)
         frontier = nxt
     return reached
 
@@ -224,7 +229,7 @@ def graph_lane(
     statement_crystal_ids: list[str],
     budget: int,
 ) -> list[tuple[str, dict]]:
-    """Return ranked (key, payload) hits from edge expansion."""
+    """Return (ranked hits, pre-budget count) from edge expansion."""
     seeds = graph_seed_ids(
         con,
         query,
@@ -232,10 +237,10 @@ def graph_lane(
         statement_crystal_ids=statement_crystal_ids,
     )
     if not seeds:
-        return []
+        return [], 0
     neighbours = _neighbours(con, seeds, hops=GRAPH_HOPS)
     if not neighbours:
-        return []
+        return [], 0
     scored: list[tuple[float, str, dict]] = []
     for cid, (hop, edges) in neighbours.items():
         # tanh(edge_count * 0.5) mirrors Hindsight entity-link saturation;
@@ -254,9 +259,7 @@ def graph_lane(
             continue
         seen.add(key)
         out.append((key, payload))
-        if len(out) >= budget:
-            break
-    return out
+    return out[:budget], len(out)
 
 
 def temporal_lane(
@@ -267,10 +270,10 @@ def temporal_lane(
     reference_date: datetime | None = None,
     parse_event: Callable[[object], datetime | None] | None = None,
 ) -> list[tuple[str, dict]]:
-    """Return ranked hits whose ``event_at`` falls inside the query window."""
+    """Return (ranked hits, pre-budget count) whose ``event_at`` is in-window."""
     window = extract_temporal_window(query, reference_date)
     if window is None:
-        return []
+        return [], 0
     start, end = window
     residual = strip_temporal_phrases(query)
     parse = parse_event or _parse_event_at
@@ -335,11 +338,12 @@ def temporal_lane(
             }
         )
     if not pool:
-        return []
-    # Coverage across the window, then keep entry points for the lane budget.
+        return [], 0
+    # Similarity-first pool (Hindsight temporal arm), then coverage buckets.
+    pool.sort(key=lambda r: float(r["similarity"]), reverse=True)
     entry_limit = max(budget, TEMPORAL_ENTRY_POINTS)
     selected = select_with_temporal_coverage(
-        pool[:TEMPORAL_POOL] if len(pool) > TEMPORAL_POOL else pool,
+        pool[:TEMPORAL_POOL],
         start,
         end,
         limit=min(entry_limit, len(pool)),
@@ -347,4 +351,5 @@ def temporal_lane(
     )
     # Re-sort selected by similarity for RRF rank positions.
     selected.sort(key=lambda r: float(r["similarity"]), reverse=True)
-    return [(row["id"], row["payload"]) for row in selected[:budget]]
+    hits = [(row["id"], row["payload"]) for row in selected]
+    return hits[:budget], len(hits)
