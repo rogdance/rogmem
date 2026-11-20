@@ -1892,8 +1892,12 @@ table.sources {{ width: max-content; min-width: 100%; }}
 table.sources th.fit, table.sources td.fit {{ white-space: nowrap; }}
 table.sources th.name, table.sources td.name {{ min-width: 10em; max-width: 18em; }}
 table.sources th.note, table.sources td.note {{ min-width: 14em; max-width: 28em; }}
+table.sources th.num, table.sources td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
 table.sources span.clip {{ cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }}
 table.sources a.clip {{ text-decoration: underline dotted; text-underline-offset: 3px; }}
+.source-cost {{ display: flex; flex-wrap: wrap; gap: 18px 28px; margin: 0 0 16px; padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-base); }}
+.source-cost .k {{ display: block; margin: 0 0 2px; font-size: 12px; color: var(--text-secondary); }}
+.source-cost strong {{ font-size: 22px; line-height: 1.3; font-weight: 600; letter-spacing: -0.3px; font-variant-numeric: tabular-nums; }}
 .clip-pop {{ position: fixed; z-index: 41; left: 0; top: 0; box-sizing: border-box; max-width: min(360px, calc(100vw - 16px)); max-height: min(40vh, 280px); overflow: auto; padding: 8px 10px; font-size: 13px; line-height: 1.5; font-weight: 400; text-align: left; color: var(--text-primary); background: var(--surface-popover); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-menu); white-space: pre-wrap; overflow-wrap: anywhere; }}
 .clip-pop[hidden] {{ display: none; }}
 table.sources td.ops a, table.sources td.ops button.link {{ color: var(--link-color); background: none; border: 0; min-height: 0; padding: 0; font: inherit; font-weight: 500; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; box-shadow: none; }}
@@ -3227,6 +3231,46 @@ def clip_html(text: str, link: str = "") -> str:
     return f"<span class='clip' tabindex='0'>{inner}</span>"
 
 
+def _source_cost_cells(row: dict) -> str:
+    """Token and money cells. Same naming as the cost overview card."""
+    tokens = row.get("cost_tokens")
+    if tokens is None and isinstance(row.get("cost"), dict):
+        tokens = row["cost"].get("tokens")
+    money = row.get("cost_money")
+    if money is None and "cost_money" not in row and isinstance(row.get("cost"), dict):
+        money = row["cost"].get("money")
+    unpriced = int(row.get("cost_unpriced") or 0)
+    if money is None and unpriced:
+        money_text = "未计入"
+    else:
+        money_text = _yuan(money or 0)
+    return (
+        f"<td class='fit num'>{esc(_grouped(tokens or 0))}</td>"
+        f"<td class='fit num'>{esc(money_text)}</td>"
+    )
+
+
+def _source_cost_banner(row: dict) -> str:
+    """Clear numbers in the detail header: real tokens, money at current prices."""
+    tokens = row.get("cost_tokens")
+    if tokens is None and isinstance(row.get("cost"), dict):
+        tokens = row["cost"].get("tokens")
+    money = row.get("cost_money")
+    if money is None and "cost_money" not in row and isinstance(row.get("cost"), dict):
+        money = row["cost"].get("money")
+    unpriced = int(row.get("cost_unpriced") or 0)
+    if money is None and unpriced:
+        money_text = "未计入"
+    else:
+        money_text = _yuan(money or 0)
+    return (
+        "<div class='source-cost' aria-label='萃取成本'>"
+        f"<span><span class='k'>Token</span> <strong>{esc(_grouped(tokens or 0))}</strong></span>"
+        f"<span><span class='k'>金额</span> <strong>{esc(money_text)}</strong></span>"
+        "</div>"
+    )
+
+
 def source_row_html(row: dict, origin: str) -> str:
     """One source in the list. An import receipt returns this same row."""
     file_row = origin == "file"
@@ -3252,6 +3296,7 @@ def source_row_html(row: dict, origin: str) -> str:
         f"<td class='fit'>{when(row.get('ingested_at'))}</td>"
         f"<td class='fit'>{flow_html(row.get('pipeline') or '', row.get('status') or '', row.get('note') or row.get('last_error') or '')}"
         f"{_progress_span(row)}</td>"
+        f"{_source_cost_cells(row)}"
         f"<td class='fit ops'>{view}{retry}</td><td class='note'>{clip_html(row.get('note') or '')}</td>"
         "</tr>"
     )
@@ -3612,6 +3657,8 @@ function pendingRow(file) {
     blankCell('fit source-id'),
     blankCell('fit when'),
     status,
+    blankCell('fit num'),
+    blankCell('fit num'),
     blankCell('fit ops'),
     blankCell('note')
   );
@@ -4380,12 +4427,13 @@ document.addEventListener('click', function (event) {
     form += "</form>" + _SOURCE_PICK
     name_head = "文件名" if tab == "file" else "原文"
     device_head = "<th class='fit'>设备名称</th>" if tab == "file" else ""
-    columns = 10 if tab == "file" else 9
+    columns = 12 if tab == "file" else 11
     head = (
         "<tr><th class='fit'>类别</th>"
         f"<th class='name'>{name_head}</th>"
         f"{device_head}<th class='fit'>智能体</th><th class='fit'>关联工程</th>"
         "<th class='fit'>来源编号</th><th class='fit'>更新时间</th><th class='fit'>处理状态</th>"
+        "<th class='fit num'>Token</th><th class='fit num'>金额</th>"
         "<th class='fit'>操作</th><th class='note'>备注</th></tr>"
     )
     moving = ",".join(str(row.get("id")) for row in rows if row.get("active"))
@@ -4536,6 +4584,7 @@ def source_detail(row: dict, statements: list[dict], mate: dict | None, origin: 
     section_tabs = f"{piece('text', '原文解析')}{piece('crystals', '关联结晶')}"
     body = f"""<h1>{title}</h1>
 <div class='page-head'><a href='/admin/sources?tab={esc(origin)}'>返回列表</a><button type='button' onclick='post("/admin/api/sources/{esc(row['id'])}/retry")'>重试</button></div>
+{_source_cost_banner(row)}
 <div class='panel'>
 {_meta_table(pairs)}
 {clock}

@@ -27,6 +27,7 @@ WORKERS = ("草稿", "并页", "速写", "专名核对", "身份合并", "向量
 SPANS = {"all", "24h", "7d", "30d"}
 DETAIL_SPANS = {"all", "24h", "30d"}
 _WORKER: contextvars.ContextVar[str] = contextvars.ContextVar("rogmem_cost_worker", default="")
+_SOURCE: contextvars.ContextVar[str] = contextvars.ContextVar("rogmem_cost_source", default="")
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_READY = False
 _SCHEMA_PATH: Path | None = None
@@ -34,6 +35,8 @@ _SEAL_READY = False
 _SEAL_PATH: Path | None = None
 _CLOCK_READY = False
 _CLOCK_PATH: Path | None = None
+_SOURCE_COL_READY = False
+_SOURCE_COL_PATH: Path | None = None
 
 
 class BadBook(ValueError):
@@ -65,6 +68,10 @@ def current_worker() -> str:
     return _WORKER.get()
 
 
+def current_source() -> str:
+    return _SOURCE.get()
+
+
 @contextmanager
 def bind_worker(name: str):
     token = _WORKER.set(name)
@@ -72,6 +79,17 @@ def bind_worker(name: str):
         yield
     finally:
         _WORKER.reset(token)
+
+
+@contextmanager
+def bind_source(source_id: str):
+    """Mark every model call made while this source is being distilled."""
+
+    token = _SOURCE.set(str(source_id or ""))
+    try:
+        yield
+    finally:
+        _SOURCE.reset(token)
 
 
 def charging(worker: str):
@@ -326,8 +344,10 @@ CREATE TABLE IF NOT EXISTS model_calls (
   cache_tokens INTEGER,
   prompt TEXT NOT NULL DEFAULT '',
   answer TEXT NOT NULL DEFAULT '',
-  at_jd REAL
+  at_jd REAL,
+  source_id TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS model_calls_source ON model_calls(source_id);
 CREATE INDEX IF NOT EXISTS model_calls_at ON model_calls(at);
 CREATE INDEX IF NOT EXISTS model_calls_jd ON model_calls(at_jd);
 CREATE TABLE IF NOT EXISTS call_bucket (
@@ -425,8 +445,30 @@ def migrate_call_clock(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS model_calls_jd ON model_calls(at_jd)")
     _ensure_call_seals(con)
     migrate_worker_names(con)
+    migrate_call_source(con)
     _CLOCK_READY = True
     _CLOCK_PATH = path
+
+
+def migrate_call_source(con: sqlite3.Connection) -> None:
+    """Older ledgers lack source_id. New calls write it; old rows stay blank."""
+
+    global _SOURCE_COL_READY, _SOURCE_COL_PATH
+    path = _store_path()
+    if _SOURCE_COL_READY and _SOURCE_COL_PATH == path:
+        return
+    if not _tables_ready(con):
+        return
+    columns = {row[1] for row in con.execute("PRAGMA table_info(model_calls)")}
+    changed = False
+    if "source_id" not in columns:
+        con.execute("ALTER TABLE model_calls ADD COLUMN source_id TEXT NOT NULL DEFAULT ''")
+        changed = True
+    con.execute("CREATE INDEX IF NOT EXISTS model_calls_source ON model_calls(source_id)")
+    if changed:
+        con.commit()
+    _SOURCE_COL_READY = True
+    _SOURCE_COL_PATH = path
 
 
 def migrate_worker_names(con: sqlite3.Connection) -> None:
@@ -505,7 +547,17 @@ def _store(*, write: bool = False):
         con.close()
 
 
-def note_response(*, at: str, worker: str, provider_id: str, model: str, body: dict, prompt: str, answer: str) -> None:
+def note_response(
+    *,
+    at: str,
+    worker: str,
+    provider_id: str,
+    model: str,
+    body: dict,
+    prompt: str,
+    answer: str,
+    source_id: str = "",
+) -> None:
     """Append one finished call. This commit cannot see the caller's transaction."""
 
     if _store_path() is None:
@@ -520,6 +572,7 @@ def note_response(*, at: str, worker: str, provider_id: str, model: str, body: d
             usage=read_usage(body),
             prompt=prompt,
             answer=answer,
+            source_id=source_id or current_source(),
         )
         con.commit()
     _bump_inputs()
@@ -534,6 +587,7 @@ def record(
     usage: tuple[int, int, int] | None,
     prompt: str = "",
     answer: str = "",
+    source_id: str = "",
 ) -> None:
     with _store(write=True) as con:
         remember(
@@ -545,6 +599,7 @@ def record(
             usage=usage,
             prompt=prompt,
             answer=answer,
+            source_id=source_id or current_source(),
         )
         con.commit()
     _bump_inputs()
@@ -560,12 +615,25 @@ def remember(
     usage: tuple[int, int, int] | None,
     prompt: str,
     answer: str,
+    source_id: str = "",
 ) -> None:
+    migrate_call_source(con)
     tokens = usage if usage is not None else (None, None, None)
     con.execute(
-        """INSERT INTO model_calls(at, worker, provider_id, model, input_tokens, output_tokens, cache_tokens, prompt, answer)
-           VALUES(?,?,?,?,?,?,?,?,?)""",
-        (at, worker or "模型调用", provider_id or "", model or "", tokens[0], tokens[1], tokens[2], clip(prompt), clip(answer)),
+        """INSERT INTO model_calls(at, worker, provider_id, model, input_tokens, output_tokens, cache_tokens, prompt, answer, source_id)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            at,
+            worker or "模型调用",
+            provider_id or "",
+            model or "",
+            tokens[0],
+            tokens[1],
+            tokens[2],
+            clip(prompt),
+            clip(answer),
+            str(source_id or ""),
+        ),
     )
 
 
@@ -1162,6 +1230,87 @@ def _public_sum(total: dict) -> dict:
         "unpriced": total["unpriced"],
         "bare": total["bare"],
     }
+
+
+def _empty_public() -> dict:
+    return _public_sum(_empty())
+
+
+def totals_for(source_ids: list[str]) -> dict[str, dict]:
+    """Token and money totals keyed by the source_id written on each call.
+
+    Money is priced with the current book, same as the overview card. Every call
+    tagged to an id counts — success, failure, and retry alike. The caller
+    decides which ids belong to one display row (a session turn may share).
+    """
+
+    wanted = [str(item or "") for item in source_ids if str(item or "").strip()]
+    if not wanted:
+        return {}
+    if _store_path() is None:
+        return {item: _empty_public() for item in wanted}
+    unique = list(dict.fromkeys(wanted))
+    folded: dict[str, dict] = {item: _empty() for item in unique}
+    marks = ",".join("?" for _ in unique)
+    with _store() as con:
+        migrate_call_source(con)
+        prices = _prices(con)
+        rate = _rate_of(con)
+        rows = con.execute(
+            f"""SELECT source_id, provider_id, model, input_tokens, output_tokens, cache_tokens
+                  FROM model_calls WHERE source_id IN ({marks})""",
+            unique,
+        ).fetchall()
+    for row in rows:
+        sid = str(row["source_id"] or "")
+        into = folded.get(sid)
+        if into is None:
+            continue
+        _add(
+            Call(
+                at=datetime.now(timezone.utc),
+                worker="",
+                provider_id=str(row["provider_id"] or ""),
+                model=str(row["model"] or ""),
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                cache_tokens=row["cache_tokens"],
+                prompt="",
+                answer="",
+            ),
+            prices,
+            rate,
+            into,
+        )
+    return {item: _public_sum(folded[item]) for item in unique}
+
+
+def merge_totals(parts: list[dict]) -> dict:
+    """Fold several source totals into one display total."""
+
+    into = _empty()
+    for part in parts or []:
+        into["input"] += int(part.get("input") or 0)
+        into["output"] += int(part.get("output") or 0)
+        into["cache"] += int(part.get("cache") or 0)
+        into["unpriced"] += int(part.get("unpriced") or 0)
+        into["bare"] += int(part.get("bare") or 0)
+        known = part.get("money_known")
+        if known is None and part.get("money") is not None:
+            known = part.get("money")
+        if known is not None:
+            into["money"] += float(known)
+            into["priced"] = True
+    return _public_sum(into)
+
+
+def total_for_group(source_ids: list[str]) -> dict:
+    """One total for a set of source ids (for example every side of a turn)."""
+
+    parts = totals_for(source_ids)
+    if not parts:
+        return _empty_public()
+    return merge_totals(list(parts.values()))
 
 
 def _overview(

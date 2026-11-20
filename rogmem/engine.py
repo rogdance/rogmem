@@ -27,7 +27,7 @@ import jieba
 import numpy as np
 
 from rogmem import crypto
-from rogmem.cost import charging
+from rogmem.cost import bind_source, charging
 from rogmem.exchange import (
     Exchange,
     Side,
@@ -2991,12 +2991,13 @@ def _fill_missing_vectors(con: sqlite3.Connection, source_id: str) -> None:
         "SELECT id, text, vec_json FROM chunks WHERE source_id=? AND role!='parent'",
         (source_id,),
     ).fetchall()
-    for row in rows:
-        if row["vec_json"] or not (row["text"] or "").strip():
-            continue
-        vec = _embed_one(row["text"])
-        if vec:
-            con.execute("UPDATE chunks SET vec_json=? WHERE id=?", (json.dumps(vec), row["id"]))
+    with bind_source(source_id):
+        for row in rows:
+            if row["vec_json"] or not (row["text"] or "").strip():
+                continue
+            vec = _embed_one(row["text"])
+            if vec:
+                con.execute("UPDATE chunks SET vec_json=? WHERE id=?", (json.dumps(vec), row["id"]))
 
 
 def _vector_outcome(con: sqlite3.Connection, source_id: str) -> str:
@@ -3144,20 +3145,18 @@ def ensure_pending_vectors() -> int:
                     ]
                     waiting.append({"id": row["id"], "lane": row["lane"] or "slow", "missing": missing})
             con.commit()
-        texts: list[str] = []
-        owners: list[tuple[dict, int]] = []
         for item in waiting:
             if item.get("thin") or "body" in item:
                 continue
-            start = len(texts)
-            for _cid, text in item.get("missing") or []:
-                texts.append(text)
-            owners.append((item, start))
-        vectors = _embed_many(texts) if texts else []
-        for item, start in owners:
             missing = item.get("missing") or []
+            if not missing:
+                item["vectors"] = []
+                continue
+            # One source at a time so the embedding call lands on that source's ledger.
+            with bind_source(item["id"]):
+                vectors = _embed_many([text for _cid, text in missing])
             item["vectors"] = [
-                (cid, vectors[start + index] if start + index < len(vectors) else None)
+                (cid, vectors[index] if index < len(vectors) else None)
                 for index, (cid, _text) in enumerate(missing)
             ]
         for item in waiting:
@@ -3751,7 +3750,8 @@ def pump_one() -> str | None:
     token = _ATTEMPT.set(qid)
     exchange = _EXCHANGE.set(members)
     try:
-        return _pump_leased(qid, source_id, source)
+        with bind_source(source_id):
+            return _pump_leased(qid, source_id, source)
     finally:
         _ATTEMPT.reset(token)
         _EXCHANGE.reset(exchange)
@@ -12415,7 +12415,8 @@ def list_sources(
     columns = (
         f"s.id,s.kind,{held} AS preview,{_SHOWN_DEVICE} AS device_name,"
         f"{_SHOWN_AGENT} AS agent_name,s.status,s.coverage,s.ingested_at,"
-        "s.project_ref,s.filename,s.last_error,s.redacted,s.pipeline"
+        "s.project_ref,s.filename,s.last_error,s.redacted,s.pipeline,"
+        "IFNULL(s.turn_id,'') AS turn_id"
     )
     if status:
         narrow = db().execute(
@@ -12449,6 +12450,7 @@ def list_sources(
         vec_done, vec_total = counts.get(item["id"], (0, 0))
         item["progress"] = source_stage_note(item.get("pipeline") or "", item.get("status") or "", done=vec_done, total=vec_total)
         item["active"] = source_is_active(item.get("pipeline") or "", item.get("status") or "")
+    attach_distill_costs(out)
     return {"rows": out, "total": total, "page": current, "pages": pages, "page_size": LIST_PAGE}
 
 
@@ -12486,6 +12488,59 @@ def list_note(row: dict) -> str:
     if row.get("status") == ST_CRYSTAL and row.get("coverage") == "partial" and not row.get("last_error"):
         return "覆盖未齐"
     return row.get("last_error") or ""
+
+
+def _cost_group_ids(source_id: str, turn_id: str = "") -> list[str]:
+    """Ledger ids that count toward one source's distill cost.
+
+    A session turn is one distill unit: calls are tagged to the primary, and every
+    side of the turn shows the same accumulated total.
+    """
+    sid = str(source_id or "").strip()
+    if not sid:
+        return []
+    turn = str(turn_id or "").strip()
+    if not turn:
+        row = db().execute("SELECT turn_id FROM sources WHERE id=?", (sid,)).fetchone()
+        turn = str((row["turn_id"] if row else "") or "").strip()
+    if not turn:
+        return [sid]
+    mates = [
+        str(item["id"])
+        for item in db().execute("SELECT id FROM sources WHERE turn_id=?", (turn,)).fetchall()
+        if item["id"]
+    ]
+    return mates or [sid]
+
+
+def distill_cost_for(source_id: str, *, turn_id: str = "") -> dict:
+    """All token and money spent distilling this source, retries included."""
+    from rogmem import cost as cost_mod
+
+    return cost_mod.total_for_group(_cost_group_ids(source_id, turn_id))
+
+
+def attach_distill_costs(rows: list[dict]) -> None:
+    """Fill cost_tokens / cost_money on list rows from the ledger."""
+    from rogmem import cost as cost_mod
+
+    if not rows:
+        return
+    groups: dict[str, list[str]] = {}
+    ledger_ids: list[str] = []
+    for row in rows:
+        sid = str(row.get("id") or "")
+        group = _cost_group_ids(sid, str(row.get("turn_id") or ""))
+        groups[sid] = group
+        ledger_ids.extend(group)
+    parts = cost_mod.totals_for(ledger_ids)
+    for row in rows:
+        sid = str(row.get("id") or "")
+        total = cost_mod.merge_totals([parts[item] for item in groups.get(sid, []) if item in parts])
+        row["cost_tokens"] = int(total.get("tokens") or 0)
+        row["cost_money"] = total.get("money")
+        row["cost_unpriced"] = int(total.get("unpriced") or 0)
+        row["cost"] = total
 
 
 def source_facets(tab: str) -> dict:
@@ -12675,6 +12730,11 @@ def source_detail(source_id: str) -> dict | None:
         row["status"] in {ST_CRYSTAL, ST_NO_CRYSTAL, "已蒸馏", "已萃取", "覆盖完成"},
     )
     source["_origin"] = resolve_source_origin(source_id)
+    cost = distill_cost_for(source_id, turn_id=str(source.get("turn_id") or ""))
+    source["cost"] = cost
+    source["cost_tokens"] = int(cost.get("tokens") or 0)
+    source["cost_money"] = cost.get("money")
+    source["cost_unpriced"] = int(cost.get("unpriced") or 0)
     return {"source": source, "statements": statements, "mate": mate}
 
 
