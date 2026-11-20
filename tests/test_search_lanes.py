@@ -197,6 +197,30 @@ def test_graph_per_seed_fanout_cap():
     assert len(reached) == 200
 
 
+def test_graph_fanout_prefers_dense_edges_not_id_order():
+    """Fan-out budget is structural strength, not alphabetical crystal id."""
+    from rogmem.search_lanes import _neighbours
+
+    class _Row(dict):
+        def __getitem__(self, key):
+            return dict.__getitem__(self, key)
+
+    class FakeCon:
+        def execute(self, sql, params=()):
+            rows = [_Row({"src": "hub", "dst": f"aaa{i:02d}"}) for i in range(30)]
+            rows.extend(_Row({"src": "hub", "dst": "zzz-strong"}) for _ in range(50))
+
+            class Result:
+                def fetchall(self_inner):
+                    return rows
+
+            return Result()
+
+    reached = _neighbours(FakeCon(), ["hub"], hops=1, per_seed_limit=10)
+    assert "zzz-strong" in reached
+    assert reached["zzz-strong"][1] == 50
+
+
 def test_temporal_pool_prefers_similarity_not_ingest_order(tmp_path, monkeypatch):
     """In-window hits must be similarity-ranked before TEMPORAL_POOL truncation."""
     engine = _open(tmp_path, monkeypatch)
@@ -231,3 +255,89 @@ def test_temporal_pool_prefers_similarity_not_ingest_order(tmp_path, monkeypatch
     found = engine.search("去年春天雾季课题故障", limit=5)
     texts = [item.get("text", "") for item in found.get("crystals", [])]
     assert any("春季故障" in text for text in texts), texts
+
+
+def test_temporal_lane_not_drowned_by_out_of_window_recent(tmp_path, monkeypatch):
+    """Window membership is the SQL predicate — ingest-order LIMIT must not hide it."""
+    engine = _open(tmp_path, monkeypatch)
+    con = engine.db()
+    con.execute(
+        "INSERT INTO crystallizations(id,type,name,status,summary_json,chapters_json) VALUES('topic','概念','雾季课题','active','{}','{}')"
+    )
+    for i in range(400):
+        src = f"s{i}"
+        con.execute(
+            """INSERT INTO sources(id,kind,event_at,event_basis,ingested_at,content_hash,body,status,lane)
+               VALUES(?,?, '2025-08-01T00:00:00+00:00','utterance','2026-11-01T00:00:00+00:00',?, 'x','已萃取','fast')""",
+            (src, "user", f"h{i}"),
+        )
+        con.execute(
+            """INSERT INTO statements(id,crystal_id,field,text,quote,source_id,trust,rank,event_at,created_at)
+               VALUES(?,?, '概述',?,?,?,'written','user','2025-08-01T00:00:00+00:00','2026-11-02T00:00:00+00:00')""",
+            (f"o{i}", "topic", f"夏季絮语{i}", f"夏季絮语{i}", src),
+        )
+    con.execute(
+        """INSERT INTO sources(id,kind,event_at,event_basis,ingested_at,content_hash,body,status,lane)
+           VALUES('src-spring','user','2025-02-01T00:00:00+00:00','utterance','2026-10-01T00:00:00+00:00','hs','强','已萃取','fast')"""
+    )
+    con.execute(
+        """INSERT INTO statements(id,crystal_id,field,text,quote,source_id,trust,rank,event_at,created_at)
+           VALUES('spring','topic','概述','雾季课题春季故障复盘','雾季课题春季故障复盘','src-spring','written','user',
+                  '2025-02-01T00:00:00+00:00','2026-10-01T00:00:00+00:00')"""
+    )
+    con.commit()
+    found = engine.search("去年春天雾季课题故障", limit=5, trace=True)
+    texts = [item.get("text", "") for item in found.get("crystals", [])]
+    temporal = next(lane for lane in found["trace"]["lanes"] if lane["name"] == "temporal")
+    assert any("春季故障" in text for text in texts), texts
+    assert temporal["count"] >= 1
+
+
+def test_graph_statement_hits_prefer_query_overlap():
+    from rogmem.search_lanes import _statement_hits
+
+    class _Row(dict):
+        def __getitem__(self, key):
+            return dict.__getitem__(self, key)
+
+    class FakeCon:
+        def execute(self, sql, params=()):
+            rows = [
+                _Row(
+                    {
+                        "id": "old",
+                        "field": "概述",
+                        "text": "昨日闲聊天气",
+                        "source_id": "s1",
+                        "crystal": "灯塔",
+                    }
+                ),
+                _Row(
+                    {
+                        "id": "hit",
+                        "field": "概述",
+                        "text": "灯塔计划雾季断电",
+                        "source_id": "s2",
+                        "crystal": "灯塔",
+                    }
+                ),
+            ]
+
+            class Result:
+                def fetchall(self_inner):
+                    return rows
+
+            return Result()
+
+    hits = _statement_hits(FakeCon(), "proj", "雾季断电", limit=1)
+    assert hits and hits[0][0] == "hit"
+
+
+def test_rrf_raw_lanes_use_explicit_names():
+    from rogmem.retrieve import DEFAULT_RAW_LANE_NAMES, rrf_fuse_scored
+
+    scored = rrf_fuse_scored(
+        [[("c1", {"text": "a"})], [("c1", {"text": "a"})]],
+        lane_names=DEFAULT_RAW_LANE_NAMES,
+    )
+    assert scored[0][3] == {"chunks": 1, "vectors": 1}

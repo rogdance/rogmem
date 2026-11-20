@@ -41,10 +41,18 @@ def cap_per_source(results: list, cap: int) -> list:
     return results[:cap]
 
 
+# Positional defaults only for the crystal four-arm call. Callers that fuse a
+# different set (e.g. chunks+vectors) must pass ``lane_names`` explicitly —
+# lane identity is part of the fusion contract, not an index into a global list.
+DEFAULT_CRYSTAL_LANE_NAMES = ("identity", "fts", "graph", "temporal")
+DEFAULT_RAW_LANE_NAMES = ("chunks", "vectors")
+
+
 def rrf_fuse_scored(
     rankings: list[list[tuple[str, dict]]],
     *,
     k: int = RRF_K,
+    lane_names: list[str] | tuple[str, ...] | None = None,
 ) -> list[tuple[str, dict, float, dict[str, int]]]:
     """Fuse ranked lanes and keep RRF scores plus per-lane ranks.
 
@@ -53,13 +61,13 @@ def rrf_fuse_scored(
     """
     if k < 1:
         raise ValueError("k 必须是正整数")
-    lane_names = ["identity", "fts", "graph", "temporal", "chunks", "vectors"]
+    names = list(lane_names) if lane_names is not None else list(DEFAULT_CRYSTAL_LANE_NAMES)
     scores: dict[str, float] = {}
     payload: dict[str, dict] = {}
     origin: dict[str, tuple[int, int]] = {}
     source_ranks: dict[str, dict[str, int]] = {}
     for lane, ranking in enumerate(rankings):
-        name = lane_names[lane] if lane < len(lane_names) else f"lane_{lane}"
+        name = names[lane] if lane < len(names) else f"lane_{lane}"
         for rank, (key, item) in enumerate(ranking, start=1):
             if not key:
                 continue
@@ -71,13 +79,23 @@ def rrf_fuse_scored(
     return [(key, payload[key], scores[key], source_ranks[key]) for key in order]
 
 
-def rrf_fuse(rankings: list[list[tuple[str, dict]]], *, k: int = RRF_K) -> list[dict]:
+def rrf_fuse(
+    rankings: list[list[tuple[str, dict]]],
+    *,
+    k: int = RRF_K,
+    lane_names: list[str] | tuple[str, ...] | None = None,
+) -> list[dict]:
     """Fuse ranked lanes. Rank 1 is the best hit in that lane. k=60.
 
     A hit that shows up in more than one lane keeps the payload from the
     earlier lane and adds the later lane's score.
     """
-    return [item for _key, item, _score, _ranks in rrf_fuse_scored(rankings, k=k)]
+    return [
+        item
+        for _key, item, _score, _ranks in rrf_fuse_scored(
+            rankings, k=k, lane_names=lane_names
+        )
+    ]
 
 
 def proof_norm(proof_count: int | None) -> float:
