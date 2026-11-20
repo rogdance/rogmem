@@ -11264,26 +11264,23 @@ def search(query: str, limit: int = 5, *, trace: bool = False) -> dict:
                 vectors.append((str(ch["id"]), _search_chunk(ch, semantic=True, prefer_raw=prefer_raw)))
     graph: list[tuple[str, dict]] = []
     temporal: list[tuple[str, dict]] = []
+    raw_graph = 0
+    raw_temporal = 0
     if not prefer_raw:
-        graph = graph_lane(
+        graph, raw_graph = graph_lane(
             db(),
             query,
             identity_crystal_ids=identity_crystal_ids,
             statement_crystal_ids=statement_crystal_ids,
             budget=lane_cap,
         )
-        temporal = temporal_lane(
+        temporal, raw_temporal = temporal_lane(
             db(),
             query,
             budget=lane_cap,
             parse_event=_parse_event,
         )
-    raw_identity, raw_statements, raw_graph, raw_temporal = (
-        len(identity),
-        len(statements),
-        len(graph),
-        len(temporal),
-    )
+    raw_identity, raw_statements = len(identity), len(statements)
     crystal_lanes = [
         cap_per_source(identity, lane_cap),
         cap_per_source(statements, lane_cap),

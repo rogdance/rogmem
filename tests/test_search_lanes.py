@@ -195,3 +195,39 @@ def test_graph_per_seed_fanout_cap():
 
     reached = _neighbours(FakeCon(), ["hub"], hops=1, per_seed_limit=200)
     assert len(reached) == 200
+
+
+def test_temporal_pool_prefers_similarity_not_ingest_order(tmp_path, monkeypatch):
+    """In-window hits must be similarity-ranked before TEMPORAL_POOL truncation."""
+    engine = _open(tmp_path, monkeypatch)
+    con = engine.db()
+    con.execute(
+        "INSERT INTO crystallizations(id,type,name,status,summary_json,chapters_json) VALUES('topic','概念','雾季课题','active','{}','{}')"
+    )
+    # Many weak recent rows + one older strong match; all inside 去年春天.
+    for i in range(70):
+        sid = f"weak-{i:02d}"
+        src = f"src-w-{i:02d}"
+        con.execute(
+            """INSERT INTO sources(id,kind,event_at,event_basis,ingested_at,content_hash,body,status,lane)
+               VALUES(?,?, '2025-02-20T00:00:00+00:00','utterance','2026-11-01T00:00:00+00:00',?, '弱','已萃取','fast')""",
+            (src, "user", f"h-{src}"),
+        )
+        con.execute(
+            """INSERT INTO statements(id,crystal_id,field,text,quote,source_id,trust,rank,event_at,created_at)
+               VALUES(?,?, '概述',?,?,?,'written','user','2025-02-20T00:00:00+00:00','2026-11-02T00:00:00+00:00')""",
+            (sid, "topic", f"无关絮语 {i}", f"无关絮语 {i}", src),
+        )
+    con.execute(
+        """INSERT INTO sources(id,kind,event_at,event_basis,ingested_at,content_hash,body,status,lane)
+           VALUES('src-strong','user','2025-02-01T00:00:00+00:00','utterance','2026-10-01T00:00:00+00:00','h-strong','强','已萃取','fast')"""
+    )
+    con.execute(
+        """INSERT INTO statements(id,crystal_id,field,text,quote,source_id,trust,rank,event_at,created_at)
+           VALUES('strong','topic','概述','雾季课题春季故障复盘','雾季课题春季故障复盘','src-strong','written','user',
+                  '2025-02-01T00:00:00+00:00','2026-10-01T00:00:00+00:00')"""
+    )
+    con.commit()
+    found = engine.search("去年春天雾季课题故障", limit=5)
+    texts = [item.get("text", "") for item in found.get("crystals", [])]
+    assert any("春季故障" in text for text in texts), texts
