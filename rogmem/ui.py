@@ -4466,7 +4466,7 @@ document.addEventListener('click', function (event) {
         page_size=size,
     )
     fresh = _fresh_hint(tab, params, rows, total, page_no, chosen_status)
-    return page(title, tab, f"<h1>{title}</h1>{form}{fresh}{table}{pager_html}")
+    return page(title, tab, f"{form}{fresh}{table}{pager_html}")
 
 
 def _filled(value) -> str:
@@ -4583,8 +4583,7 @@ def source_detail(row: dict, statements: list[dict], mate: dict | None, origin: 
 
     switched = _marked_body(row, statements) if part == "text" else _cited_html(cited)
     section_tabs = f"{piece('text', '原文解析')}{piece('crystals', '关联结晶')}"
-    body = f"""<h1>{title}</h1>
-<div class='page-head'><a href='/admin/sources?tab={esc(origin)}'>返回列表</a><button type='button' onclick='post("/admin/api/sources/{esc(row['id'])}/retry")'>重试</button></div>
+    body = f"""<div class='page-head'><a href='/admin/sources?tab={esc(origin)}'>返回列表</a><button type='button' onclick='post("/admin/api/sources/{esc(row['id'])}/retry")'>重试</button></div>
 {_source_cost_banner(row)}
 <div class='panel'>
 {_meta_table(pairs)}

@@ -153,8 +153,8 @@ def test_session_list_hides_the_device_column_and_keeps_the_filter():
 def test_session_and_file_are_top_level_and_drop_the_old_name():
     session = sources_page([], "session", {}, {})
     files = sources_page([], "file", {}, {})
-    assert "<h1>情景会话</h1>" in session
-    assert "<h1>知识文件</h1>" in files
+    assert "<h1>情景会话</h1>" not in session
+    assert "<h1>知识文件</h1>" not in files
     assert "知识文件" in files.split("<nav>", 1)[1].split("</nav>", 1)[0]
     assert "原始记忆" not in session
     assert "原始记忆" not in files
@@ -191,6 +191,7 @@ def test_file_detail_is_the_text_and_the_crystals_that_cite_it():
     assert "写入内容" not in original
     assert "产出结晶" not in original
     assert "# 标题" in original
+    assert "<h1>知识文件</h1>" not in original
     assert "class='page-head'><a href='/admin/sources?tab=file'>返回列表</a><button" in original
     cited = source_detail({**row, "_part": "crystals"}, [], None, "file")
     assert "南港书院" in cited
@@ -202,6 +203,7 @@ def test_file_detail_is_the_text_and_the_crystals_that_cite_it():
     assert "原文解析" in session
     assert "关联结晶" in session
     assert "清洗文本" not in session
+    assert "<h1>情景会话</h1>" not in session
 
 
 def test_a_material_lists_every_crystal_that_used_it(tmp_path, monkeypatch):
