@@ -11172,7 +11172,9 @@ def search(query: str, limit: int = 5, *, trace: bool = False) -> dict:
     per-lane recall diagnostic (counts, cap, RRF, proof).
     """
     from rogmem.retrieve import (
+        DEFAULT_CRYSTAL_LANE_NAMES,
         DEFAULT_LANE_CAP,
+        DEFAULT_RAW_LANE_NAMES,
         apply_proof_boost,
         cap_per_source,
         rrf_fuse,
@@ -11290,7 +11292,7 @@ def search(query: str, limit: int = 5, *, trace: bool = False) -> dict:
     crystals: list[dict] = []
     rrf_rows: list[dict] = []
     if not prefer_raw:
-        scored = rrf_fuse_scored(crystal_lanes)
+        scored = rrf_fuse_scored(crystal_lanes, lane_names=DEFAULT_CRYSTAL_LANE_NAMES)
         proof_counts = {key: _statement_proof_count(db(), key) for key, _item, _s, _r in scored}
         boosted = apply_proof_boost(scored, proof_counts)
         for key, item, _final, meta in boosted[:limit]:
@@ -11312,7 +11314,8 @@ def search(query: str, limit: int = 5, *, trace: bool = False) -> dict:
         [
             cap_per_source(chunks, lane_cap),
             cap_per_source(vectors, lane_cap),
-        ]
+        ],
+        lane_names=DEFAULT_RAW_LANE_NAMES,
     ):
         if item["text"] in seen:
             continue

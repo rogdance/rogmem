@@ -29,9 +29,14 @@ GRAPH_SEED_LIMIT = 20
 # Hindsight caps entity expansion with link_expansion_per_entity_limit (default 200).
 # RogMem has no unit_entities table; cap live edges walked per frontier node instead.
 GRAPH_PER_SEED_LIMIT = 200
+# Fetch more statements per neighbour, then keep the ones that still match the query.
+GRAPH_STATEMENT_SCAN = 24
+GRAPH_STATEMENT_KEEP = 3
 TEMPORAL_POOL = 60
 TEMPORAL_ENTRY_POINTS = 10
 TEMPORAL_BUCKETS = 8
+# Window membership is the lane predicate — never sample by ingest order then hope.
+TEMPORAL_SQL_LIMIT = 800
 
 
 def _parse_event_at(value: str | None) -> datetime | None:
@@ -151,11 +156,17 @@ def _neighbours(
                 by_node[node].append(other)
         nxt: set[str] = set()
         for node, others in by_node.items():
-            # Stable order keeps the cap deterministic across SQLite builds.
+            # Spend the fan-out budget on denser links first; id breaks ties so the
+            # cap stays deterministic across SQLite builds (not alphabetical lottery).
             counts: dict[str, int] = {}
             for other in others:
                 counts[other] = counts.get(other, 0) + 1
-            capped = sorted(counts)[: max(0, per_seed_limit)]
+            capped = [
+                other
+                for other, _n in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[
+                    : max(0, per_seed_limit)
+                ]
+            ]
             for other in capped:
                 add = counts[other]
                 if other in visited and other not in reached:
@@ -194,7 +205,19 @@ def _page_hit(con: sqlite3.Connection, crystal_id: str, query: str) -> tuple[str
     )
 
 
-def _statement_hits(con: sqlite3.Connection, crystal_id: str, *, limit: int = 3) -> list[tuple[str, dict]]:
+def _statement_hits(
+    con: sqlite3.Connection,
+    crystal_id: str,
+    query: str = "",
+    *,
+    limit: int = GRAPH_STATEMENT_KEEP,
+    scan: int = GRAPH_STATEMENT_SCAN,
+) -> list[tuple[str, dict]]:
+    """Structure finds the neighbour; residual query relevance picks which evidence to show.
+
+    Recency alone is the wrong predicate here — a hub neighbour may have dozens of
+    statements, and the multi-hop question usually cares about the overlapping ones.
+    """
     rows = con.execute(
         """SELECT s.id, s.field, s.text, s.source_id, c.name AS crystal
            FROM statements s
@@ -202,23 +225,27 @@ def _statement_hits(con: sqlite3.Connection, crystal_id: str, *, limit: int = 3)
            WHERE s.crystal_id=? AND s.invalid_at IS NULL AND s.trust='written'
            ORDER BY s.created_at DESC
            LIMIT ?""",
-        (crystal_id, limit),
+        (crystal_id, max(limit, scan)),
     ).fetchall()
-    hits: list[tuple[str, dict]] = []
+    scored: list[tuple[float, str, dict]] = []
     for row in rows:
-        hits.append(
+        text = row["text"] or ""
+        rel = _token_overlap(query, text)
+        scored.append(
             (
+                rel,
                 row["id"],
                 {
                     "crystal": row["crystal"] or "",
                     "field": row["field"],
-                    "text": row["text"],
+                    "text": text,
                     "source_id": row["source_id"],
                     "match": "图谱",
                 },
             )
         )
-    return hits
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [(key, payload) for _rel, key, payload in scored[:limit]]
 
 
 def graph_lane(
@@ -249,8 +276,10 @@ def graph_lane(
         page = _page_hit(con, cid, query)
         if page is not None:
             scored.append((activation + 0.05, page[0], page[1]))
-        for key, payload in _statement_hits(con, cid):
-            scored.append((activation, key, payload))
+        for key, payload in _statement_hits(con, cid, query):
+            # Prefer neighbours whose evidence still overlaps the residual query.
+            overlap = _token_overlap(query, payload.get("text") or "")
+            scored.append((activation * (0.55 + 0.45 * overlap), key, payload))
     scored.sort(key=lambda item: (-item[0], item[1]))
     out: list[tuple[str, dict]] = []
     seen: set[str] = set()
@@ -281,7 +310,9 @@ def temporal_lane(
     start, end = window
     residual = strip_temporal_phrases(query)
     parse = parse_event or _parse_event_at
-    # Pull a pool of dated written statements; prefer speech/event clocks.
+    # Lane predicate = event clock inside the window. Never sample by created_at
+    # then hope the window rows survived LIMIT — that drowns older in-window hits.
+    start_iso, end_iso = start.isoformat(), end.isoformat()
     rows = con.execute(
         """SELECT s.id, s.crystal_id, s.field, s.text, s.source_id, s.event_at,
                   c.name AS crystal,
@@ -293,11 +324,19 @@ def temporal_lane(
            LEFT JOIN sources src ON src.id=s.source_id
            WHERE s.invalid_at IS NULL AND s.trust='written'
              AND (
-               (s.event_at IS NOT NULL AND s.event_at != '')
-               OR (src.event_at IS NOT NULL AND src.event_at != '')
+               (
+                 s.event_at IS NOT NULL AND s.event_at != ''
+                 AND s.event_at >= ? AND s.event_at <= ?
+               )
+               OR (
+                 (s.event_at IS NULL OR s.event_at = '')
+                 AND src.event_at IS NOT NULL AND src.event_at != ''
+                 AND IFNULL(src.event_basis, '') != 'file'
+                 AND src.event_at >= ? AND src.event_at <= ?
+               )
              )
-           ORDER BY s.created_at DESC
-           LIMIT 400"""
+           LIMIT ?""",
+        (start_iso, end_iso, start_iso, end_iso, TEMPORAL_SQL_LIMIT),
     ).fetchall()
     pool: list[dict] = []
     for row in rows:
