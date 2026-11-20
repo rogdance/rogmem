@@ -1885,10 +1885,7 @@ h3 {{ font-size: 16px; line-height: 1.5; font-weight: 600; margin: 22px 0 8px; }
 table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface-base); border: 1px solid var(--border); border-radius: 12px; }}
 .table-scroll {{ overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-base); }}
 .table-scroll table {{ border: 0; border-radius: 0; }}
-.fresh {{ display: flex; justify-content: center; margin: 0 0 12px; }}
 .fresh[hidden] {{ display: none; }}
-.fresh button.fresh-btn {{ width: auto; min-height: 32px; padding: 5px 14px; border: 1px solid var(--notice-border); border-radius: 999px; font-size: 13px; font-weight: 500; color: var(--notice-text); background: var(--notice-bg); cursor: pointer; }}
-.fresh button.fresh-btn:hover, .fresh button.fresh-btn:focus-visible {{ background: var(--surface-hover); }}
 table.sources {{ width: max-content; min-width: 100%; }}
 table.sources th.fit, table.sources td.fit {{ white-space: nowrap; }}
 table.sources th.name, table.sources td.name {{ min-width: 10em; max-width: 18em; }}
@@ -3479,38 +3476,36 @@ _FRESH_SCRIPT = """<script>
 (function () {
   var box = document.getElementById('sources-fresh');
   if (!box || !box.dataset.endpoint) return;
-  var button = box.querySelector('.fresh-btn');
-  var baseline = box.dataset.marker || '';
-  var baseTotal = parseInt(box.dataset.total || '0', 10) || 0;
-  var label = box.dataset.label || '内容';
   var url = box.dataset.endpoint + '?' + (box.dataset.query || '');
   var beat = 20000;
   var timer = 0;
+  var loading = false;
   function rest() { if (timer) { clearInterval(timer); timer = 0; } }
-  function raise(extra) {
-    button.textContent = extra > 0
-      ? '有 ' + extra + ' 条新的' + label + ' · 点击加载'
-      : label + '列表有更新 · 点击加载';
-    box.hidden = false;
+  function refresh() {
+    if (loading) return;
+    loading = true;
     rest();
+    location.reload();
   }
   function look() {
+    if (loading) return;
     fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (response) { return response.ok ? response.json() : null; })
       .then(function (data) {
         if (!data || typeof data.marker !== 'string') return;
-        // 净增才说「新的」；只是首行挪了位（多为删改）就说「有更新」，不冒认新内容。
-        var extra = (parseInt(data.total, 10) || 0) - baseTotal;
-        if (data.marker === baseline && extra <= 0) return;
-        raise(extra);
+        // 读当下 dataset：本页导入会经 rebaselineFresh 改基线，闭包里的旧值不能再当真。
+        var liveMarker = box.dataset.marker || '';
+        var liveTotal = parseInt(box.dataset.total || '0', 10) || 0;
+        var extra = (parseInt(data.total, 10) || 0) - liveTotal;
+        if (data.marker === liveMarker && extra <= 0) return;
+        refresh();
       })
       .catch(function () {});
   }
   function watch() { if (!timer) { timer = setInterval(look, beat); } }
-  button.addEventListener('click', function () { location.reload(); });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) rest();
-    else if (box.hidden) { look(); watch(); }
+    else { look(); watch(); }
   });
   watch();
 })();
@@ -3518,25 +3513,21 @@ _FRESH_SCRIPT = """<script>
 
 
 def _fresh_hint(tab: str, params: dict, rows: list[dict], total: int, page_no: int, status: str) -> str:
-    """A quiet probe above the table. It flags a newer top and lets the reader load it.
+    """Hidden probe above the table. Newer rows reload the list; no tip, no click.
 
     Page one only, and only with no status filter: a status filter narrows in Python,
-    and the probe reads columns, so it would flag rows the list itself would hide.
+    and the probe reads columns, so it would refresh for rows the list itself would hide.
     """
     if page_no != 1 or status:
         return ""
-    label = "情景会话" if tab != "file" else "知识文件"
     top = rows[0] if rows else {}
     marker = f"{top.get('ingested_at') or ''}|{top.get('id') or ''}"
     return (
-        "<div id='sources-fresh' class='fresh' hidden role='status'"
+        "<div id='sources-fresh' class='fresh' hidden aria-hidden='true'"
         " data-endpoint='/admin/api/sources/latest'"
         f" data-query='{esc(urlencode(params))}'"
         f" data-marker='{esc(marker)}'"
-        f" data-total='{int(total)}'"
-        f" data-label='{esc(label)}'>"
-        f"<button type='button' class='fresh-btn'>{esc(label)}列表有更新 · 点击加载</button>"
-        "</div>"
+        f" data-total='{int(total)}'></div>"
         f"{_FRESH_SCRIPT}"
     )
 
@@ -3971,8 +3962,8 @@ function seedSourceWatch() {
   kickSourcePoll();
 }
 function rebaselineFresh() {
-  // 探测条（sources-fresh）拿列表画好那一刻的顶部当基线。刚把新行画进列表的是我们自己，
-  // 基线要跟着走，否则过 20 秒它会把这条已经看得见的行报成「有新的」。
+  // 探测拿列表画好那一刻的顶部当基线。刚把新行画进列表的是我们自己，
+  // 基线要跟着走，否则过 20 秒它会把这条已经看得见的行当成「有新的」整页刷新。
   var box = document.getElementById('sources-fresh');
   if (!box || !box.dataset.endpoint) return;
   fetch(box.dataset.endpoint + '?' + (box.dataset.query || ''), { credentials: 'same-origin', cache: 'no-store' })
@@ -3981,7 +3972,6 @@ function rebaselineFresh() {
       if (!data || typeof data.marker !== 'string') return;
       box.dataset.marker = data.marker;
       box.dataset.total = String(parseInt(data.total, 10) || 0);
-      box.hidden = true;
     })
     .catch(function () {});
 }
