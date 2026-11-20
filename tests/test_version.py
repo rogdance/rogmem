@@ -69,19 +69,17 @@ def test_about_page_shows_the_single_version():
     assert "cosmos" not in html.lower()
 
 
-def test_nav_puts_the_version_left_of_the_theme_icon(monkeypatch):
-    """版本号靠右，主题切换是描边图标，贴在版本号右侧。"""
+def test_nav_puts_the_version_left_of_model_health(monkeypatch):
+    """版本号靠右，模型健康色块贴在版本号右侧。"""
     monkeypatch.setenv("ROGMEM_BUILD_STAMP", "2610271857")
     html = about_page("V1-2610271857")
     header = html.split("<main", 1)[0]
     assert '<span class="ver">V1-2610271857</span>' in header
-    assert header.index("</nav>") < header.index('class="ver"') < header.index('id="theme"')
+    assert header.index("</nav>") < header.index('class="ver"') < header.index('id="model-health"')
     assert 'savedTheme !== "light"' in header
     assert 'setAttribute("data-theme", "dark")' in header
-    assert 'aria-label="切换到日间"' in header
-    assert ">日间</button>" not in header
-    assert ">暗夜</button>" not in header
-    assert "theme-moon" in header and "theme-sun" in header
+    assert 'id="theme"' not in header
+    assert "theme-moon" not in header and "theme-sun" not in header
     style = " ".join(html.split("</style>", 1)[0].split())
     assert "header .ver { margin-left: auto;" in style
-    assert 'html[data-theme="dark"] header .theme .theme-sun { display: block; }' in style
+    assert "header .model-health {" in style

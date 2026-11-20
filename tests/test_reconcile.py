@@ -241,6 +241,8 @@ def test_pipeline_page_holds_workers_and_schedules():
     assert "name=\"scan_interval\"" not in basic
     assert "管线设置" in basic
     assert "采集管理" not in basic and "采集设置" not in basic
+    assert "<h2>配色模式</h2>" in basic
+    assert 'data-theme-pick="light"' in basic and 'data-theme-pick="dark"' in basic
     assert "<h2>自动采集方案</h2>" in basic
     assert "<h2>记忆预算上限</h2>" in basic
     assert "<h2>记忆图谱视效</h2>" in basic
