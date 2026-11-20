@@ -677,3 +677,118 @@ def test_a_log_page_projects_the_claim_and_leaves_the_stored_corpus(tmp_path, mo
         "log",
     )
     assert len(page) - len(short) < 200
+
+
+def test_revision_index_reads_thin_columns_without_source_roundtrips(tmp_path, monkeypatch):
+    """Log open path stays on the revision index. Thick change blobs and source joins wait for a reading."""
+    engine = _open(tmp_path, monkeypatch)
+    engine.db().execute(
+        """INSERT INTO crystallizations(id,type,name,status,summary_json,chapters_json)
+           VALUES('c-thin','人物','云岚甲','active','{}','{}')"""
+    )
+    engine.db().execute(
+        """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,filename)
+           VALUES('src-fat','file','2026-11-06T12:00:00+00:00','h','材料','萃取中','fast','南港简历.md')"""
+    )
+    fat_change = "改" * 5000
+    fat_basis = "据" * 5000
+    for i in range(3):
+        engine.db().execute(
+            """INSERT INTO revisions(crystal_id,created_at,note,actor,change,basis,source_id,scope,gist,page_json,snapshot)
+               VALUES('c-thin',?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"2026-11-06T12:0{i}:00+00:00",
+                "正文",
+                "萃取",
+                fat_change,
+                fat_basis,
+                "src-fat",
+                "正文",
+                f"第{i}笔摘要。",
+                '{"name":"云岚甲","body":"' + ("厚" * 2000) + '","sketch":""}',
+                "厚" * 2000,
+            ),
+        )
+    engine.db().commit()
+    seen: list[str] = []
+    engine.db().set_trace_callback(lambda sql: seen.append(" ".join(sql.split())))
+    items = engine.revision_index("c-thin")
+    engine.db().set_trace_callback(None)
+    joined = "\n".join(seen).lower()
+    assert len(items) == 3
+    assert all(len(item["change"]) < 500 for item in items)
+    assert all(len(item["basis"]) < 300 for item in items)
+    assert all(item["gist"].startswith("第") for item in items)
+    assert "page_json" not in joined
+    assert "snapshot" not in joined
+    assert " from sources " not in joined
+    assert " from statements " not in joined
+    full = engine.revisions("c-thin", items[-1]["id"])[0]
+    assert len(full["change"]) == 5000
+    assert "南港简历.md" in full["basis"] or full["source_href"]
+
+
+def test_revision_log_first_paint_keeps_all_ticks_but_pages_cards():
+    from rogmem import ui
+
+    revisions = [
+        {
+            "id": index + 1,
+            "created_at": "2026-11-06T12:00:00+00:00",
+            "actor": "萃取",
+            "scope": "正文",
+            "note": "正文",
+            "change": f"改了第{index}处。",
+            "basis": "材料写了这一处。",
+            "gist": f"第{index}笔。",
+        }
+        for index in range(ui.REVISION_LOG_PAGE + 12)
+    ]
+    page = crystal_page(
+        {"id": "c-page", "name": "云岚甲", "type": "人物", "status": "active", "status_label": "活跃", "summary": {}, "chapters": {}},
+        revisions,
+        [],
+        "",
+        "active",
+        "log",
+    )
+    assert page.count("class='rev-tick") == len(revisions)
+    assert page.count("class='rev'") == ui.REVISION_LOG_PAGE
+    assert "data-rev-offset=" in page
+    assert "/admin/api/crystals/" in page and "revision-cards" in page
+    assert "--rev-tick:" in page
+    assert "button.rev-tick" in page and "min-height: 5px" in page
+    assert "overflow-y: auto" in page
+
+
+def test_revision_cards_endpoint_returns_the_next_thin_page(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from rogmem.app import mcp
+    from rogmem import ui
+
+    engine = _open(tmp_path, monkeypatch)
+    engine.db().execute(
+        """INSERT INTO crystallizations(id,type,name,status,summary_json,chapters_json)
+           VALUES('c-more','人物','云岚甲','active','{}','{}')"""
+    )
+    for i in range(ui.REVISION_LOG_PAGE + 5):
+        engine.db().execute(
+            """INSERT INTO revisions(crystal_id,created_at,note,actor,change,basis,scope,gist)
+               VALUES('c-more',?,?,?,?,?,?,?)""",
+            (
+                f"2026-11-06T{12 + i // 60:02d}:{i % 60:02d}:00+00:00",
+                "正文",
+                "萃取",
+                f"改了第{i}处。",
+                "材料写了这一处。",
+                "正文",
+                f"第{i}笔。",
+            ),
+        )
+    engine.db().commit()
+    client = TestClient(mcp.streamable_http_app())
+    first = client.get(f"/admin/api/crystals/c-more/revision-cards?offset={ui.REVISION_LOG_PAGE}&limit=5")
+    assert first.status_code == 200
+    assert first.text.count("class='rev'") == 5
+    assert "第0笔。" in first.text or "改了第0处" in first.text

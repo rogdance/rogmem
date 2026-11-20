@@ -703,7 +703,7 @@ def _crystal_page(request: Request, cid: str) -> Response:
         )
     nav = decision["nav"]
     window = decision["window"]
-    revs = engine.revisions(detail["id"]) if view == "log" else []
+    revs = engine.revision_index(detail["id"]) if view == "log" else []
     auto_labels, label_budget = _graph_label_flags()
     return HTMLResponse(
         ui.crystal_page(
@@ -1201,7 +1201,33 @@ async def admin_revisions(request: Request) -> Response:
     denied = _guard(request)
     if denied:
         return denied
-    return JSONResponse(engine.revisions(request.path_params["cid"]))
+    # List endpoint stays on the thin index. One reading uses /revisions/{rid}.
+    return JSONResponse(engine.revision_index(request.path_params["cid"]))
+
+
+@mcp.custom_route("/admin/api/crystals/{cid}/revision-cards", methods=["GET"])
+async def admin_revision_cards(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    cid = request.path_params["cid"]
+    try:
+        offset = max(0, int(request.query_params.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(request.query_params.get("limit") or ui.REVISION_LOG_PAGE)
+    except (TypeError, ValueError):
+        limit = ui.REVISION_LOG_PAGE
+    limit = max(1, min(limit, 100))
+    detail = engine.crystal_detail(cid)
+    if not detail:
+        return HTMLResponse("没有这篇", status_code=404)
+    newest_first = list(reversed(engine.revision_index(cid)))
+    page = newest_first[offset : offset + limit]
+    return HTMLResponse(
+        ui.revision_cards_html(cid, page, name=detail.get("name") or "", start_index=offset)
+    )
 
 
 @mcp.custom_route("/admin/api/crystals/{cid}/revisions/{rid}", methods=["GET"])

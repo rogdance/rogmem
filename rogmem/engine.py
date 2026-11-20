@@ -14852,12 +14852,12 @@ def _crystal_by_ref(ref: str):
 
 
 def revisions_for_agent(ref: str) -> dict:
-    """The revision chain an agent can read. Snapshots stay in the library."""
+    """The revision chain an agent can read. Thick blobs stay on the reading path."""
     row = _crystal_by_ref(ref)
     if row is None:
         return {"ok": False, "error": "没有这篇"}
     items = []
-    for item in revisions(row["id"]):
+    for item in revision_index(row["id"]):
         items.append(
             {
                 "id": item.get("id"),
@@ -14949,7 +14949,88 @@ def _shown_gist(item: dict) -> str:
     return revision_gist_for(item)
 
 
+# Index path keeps only enough change/basis for the card preview and gist fallback.
+# Full blobs stay on the single-revision reading path.
+REVISION_INDEX_CHANGE_CHARS = 420
+REVISION_INDEX_BASIS_CHARS = 160
+
+
+def revision_index(crystal_id: str) -> list[dict]:
+    """Thin log rows for the revision page. No source joins; no page_json or snapshot."""
+    rows = db().execute(
+        """SELECT id, created_at, note, source_id, quote, event_at, statement_id, actor, scope, gist,
+                  substr(COALESCE(change, ''), 1, ?) AS change,
+                  substr(COALESCE(basis, ''), 1, ?) AS basis
+           FROM revisions WHERE crystal_id=? ORDER BY id""",
+        (REVISION_INDEX_CHANGE_CHARS, REVISION_INDEX_BASIS_CHARS, crystal_id),
+    ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["scope"] = item.get("scope") or ""
+        if item.get("note") == "正文" and not (item.get("change") or "").strip():
+            item["actor"] = item.get("actor") or "萃取"
+            item["change"] = "这一笔只记下写过正文，没有留下改了哪些字。"
+            item["basis"] = item.get("basis") or "没有记下是哪一份材料。"
+        item["gist"] = _shown_gist(item)
+        out.append(item)
+    return out
+
+
+def _hydrate_revision_row(crystal_id: str, item: dict) -> dict:
+    """Fill missing quote/actor/basis and attach source links for one reading."""
+    item["scope"] = item.get("scope") or ""
+    if item.get("quote") or not item.get("note"):
+        item["gist"] = _shown_gist(item)
+        return item
+    found = None
+    if item["note"] == "开篇":
+        found = db().execute(
+            """SELECT id, quote, source_id, event_at FROM statements
+               WHERE crystal_id=? AND field IN ('名称','姓名') AND quote IS NOT NULL AND quote != ''
+               ORDER BY created_at LIMIT 1""",
+            (crystal_id,),
+        ).fetchone()
+    elif ":" in item["note"] and not item["note"].startswith(("回滚", "撤回")):
+        label, _, value = item["note"].partition(":")
+        found = db().execute(
+            """SELECT id, quote, source_id, event_at FROM statements
+               WHERE crystal_id=? AND (field=? OR chapter=?) AND quote IS NOT NULL AND quote != ''
+                 AND (text=? OR text LIKE ?)
+               ORDER BY created_at DESC LIMIT 1""",
+            (crystal_id, label, label, value, value + "%"),
+        ).fetchone()
+    if found:
+        item["quote"] = item.get("quote") or found["quote"]
+        item["source_id"] = item.get("source_id") or found["source_id"]
+        item["statement_id"] = item.get("statement_id") or found["id"]
+        item["event_at"] = item.get("event_at") or found["event_at"]
+    if not (item.get("actor") or item.get("basis")) and item.get("source_id"):
+        who, why = _who_and_basis(db(), item["source_id"], item.get("quote") or "")
+        item["actor"] = item.get("actor") or who
+        item["basis"] = item.get("basis") or why
+    if item.get("note") == "正文" and not (item.get("change") or "").strip():
+        item["actor"] = item.get("actor") or "萃取"
+        item["change"] = "这一笔只记下写过正文，没有留下改了哪些字。"
+        item["basis"] = item.get("basis") or "没有记下是哪一份材料。"
+    origin = resolve_source_origin(item.get("source_id") or "")
+    if origin.get("ok"):
+        item["session_id"] = origin["session_id"]
+        item["turn_id"] = origin["turn_id"]
+        item["session_href"] = origin["session_href"]
+        item["source_href"] = origin_links(
+            origin["session_id"],
+            origin["turn_id"],
+            item.get("source_id") or "",
+            item.get("statement_id") or "",
+        )["source_href"]
+    item["scope"] = item.get("scope") or ""
+    item["gist"] = _shown_gist(item)
+    return item
+
+
 def revisions(crystal_id: str, revision_id: int | None = None) -> list[dict]:
+    """Full readings. Prefer revision_index for the log list; call this for one detail or agents."""
     sql = """SELECT id, created_at, note, source_id, quote, event_at, statement_id, actor, change, basis, scope, gist
              FROM revisions WHERE crystal_id=?"""
     params: list = [crystal_id]
@@ -14958,59 +15039,7 @@ def revisions(crystal_id: str, revision_id: int | None = None) -> list[dict]:
         params.append(revision_id)
     sql += " ORDER BY id"
     rows = db().execute(sql, params).fetchall()
-    out = []
-    for row in rows:
-        item = dict(row)
-        item["scope"] = item.get("scope") or ""
-        if item.get("quote") or not item.get("note"):
-            item["gist"] = _shown_gist(item)
-            out.append(item)
-            continue
-        found = None
-        if item["note"] == "开篇":
-            found = db().execute(
-                """SELECT id, quote, source_id, event_at FROM statements
-                   WHERE crystal_id=? AND field IN ('名称','姓名') AND quote IS NOT NULL AND quote != ''
-                   ORDER BY created_at LIMIT 1""",
-                (crystal_id,),
-            ).fetchone()
-        elif ":" in item["note"] and not item["note"].startswith(("回滚", "撤回")):
-            label, _, value = item["note"].partition(":")
-            found = db().execute(
-                """SELECT id, quote, source_id, event_at FROM statements
-                   WHERE crystal_id=? AND (field=? OR chapter=?) AND quote IS NOT NULL AND quote != ''
-                     AND (text=? OR text LIKE ?)
-                   ORDER BY created_at DESC LIMIT 1""",
-                (crystal_id, label, label, value, value + "%"),
-            ).fetchone()
-        if found:
-            item["quote"] = item.get("quote") or found["quote"]
-            item["source_id"] = item.get("source_id") or found["source_id"]
-            item["statement_id"] = item.get("statement_id") or found["id"]
-            item["event_at"] = item.get("event_at") or found["event_at"]
-        if not (item.get("actor") or item.get("basis")) and item.get("source_id"):
-            who, why = _who_and_basis(db(), item["source_id"], item.get("quote") or "")
-            item["actor"] = item.get("actor") or who
-            item["basis"] = item.get("basis") or why
-        if item.get("note") == "正文" and not (item.get("change") or "").strip():
-            item["actor"] = item.get("actor") or "萃取"
-            item["change"] = "这一笔只记下写过正文，没有留下改了哪些字。"
-            item["basis"] = item.get("basis") or "没有记下是哪一份材料。"
-        origin = resolve_source_origin(item.get("source_id") or "")
-        if origin.get("ok"):
-            item["session_id"] = origin["session_id"]
-            item["turn_id"] = origin["turn_id"]
-            item["session_href"] = origin["session_href"]
-            item["source_href"] = origin_links(
-                origin["session_id"],
-                origin["turn_id"],
-                item.get("source_id") or "",
-                item.get("statement_id") or "",
-            )["source_href"]
-        item["scope"] = item.get("scope") or ""
-        item["gist"] = _shown_gist(item)
-        out.append(item)
-    return out
+    return [_hydrate_revision_row(crystal_id, dict(row)) for row in rows]
 
 
 def rollback(crystal_id: str, revision_id: int | None = None) -> dict:
