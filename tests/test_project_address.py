@@ -33,7 +33,7 @@ def _ship(engine):
     engine.db().execute(
         """INSERT INTO sources(id,kind,event_at,ingested_at,event_basis,content_hash,body,status,lane,pair_ready)
            VALUES('src-dock','user','2026-11-09T03:00:00+00:00','2026-11-09T04:00:00+00:00','utterance','h',
-                  '船坞又被提到了一次。','蒸馏中','p1',1)"""
+                  '船坞又被提到了一次。','萃取中','p1',1)"""
     )
     engine.db().commit()
     return engine.db().execute("SELECT * FROM sources WHERE id='src-dock'").fetchone()

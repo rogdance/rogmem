@@ -1,4 +1,4 @@
-"""一组对话一次蒸馏，进行中的调用不被另一条工人重开。"""
+"""一组对话一次萃取，进行中的调用不被另一条工人重开。"""
 
 from __future__ import annotations
 
@@ -183,7 +183,7 @@ def test_history_round_is_one_distill(tmp_path, monkeypatch):
         [
             {
                 "role": "user",
-                "text": "合成句：用户把这一轮交给蒸馏。",
+                "text": "合成句：用户把这一轮交给萃取。",
                 "event_at": "2026-01-01T00:00:00+00:00",
                 "session_id": "sess",
                 "turn_id": "sess:user-only",
@@ -191,7 +191,7 @@ def test_history_round_is_one_distill(tmp_path, monkeypatch):
             },
             {
                 "role": "assistant",
-                "text": "合成句：助手把同一轮交给蒸馏。",
+                "text": "合成句：助手把同一轮交给萃取。",
                 "event_at": "2026-01-01T00:00:01+00:00",
                 "session_id": "sess",
                 "turn_id": "sess:agent-only",
@@ -248,7 +248,7 @@ def test_history_without_a_mate_is_not_leased_immediately(tmp_path, monkeypatch)
         [
             {
                 "role": "user",
-                "text": "合成句：这一边先到，先别送去蒸馏。",
+                "text": "合成句：这一边先到，先别送去萃取。",
                 "event_at": "2026-01-01T00:00:00+00:00",
                 "session_id": "alone",
                 "turn_id": "alone:1",
@@ -331,7 +331,7 @@ def test_a_running_distill_is_not_opened_again(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('solo','user',?,'h','合成句：这一条正在蒸馏。',?,'p0',1)""",
+           VALUES('solo','user',?,'h','合成句：这一条正在萃取。',?,'p0',1)""",
         (engine.utcnow(), engine.ST_VEC_READY),
     )
     engine.db().execute("INSERT INTO queue(source_id,lane,state) VALUES('solo','p0','queued')")

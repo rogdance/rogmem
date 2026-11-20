@@ -108,7 +108,7 @@ def test_waiting_vectors_are_filled_as_one_batch(tmp_path, monkeypatch):
     for source_id in ids:
         status = engine.db().execute("SELECT status FROM sources WHERE id=?", (source_id,)).fetchone()
         queued = engine.db().execute("SELECT id FROM queue WHERE source_id=?", (source_id,)).fetchone()
-        assert status["status"] == "已向量化待蒸馏"
+        assert status["status"] == "已向量化待萃取"
         assert queued is not None
 
 
@@ -118,9 +118,9 @@ def test_distill_keeps_going_while_vectors_finish(tmp_path, monkeypatch):
     engine._MODEL = None
     path = tmp_path / "scan" / "both.txt"
     path.parent.mkdir(exist_ok=True)
-    path.write_text("蒸馏先走，向量随后补上。", encoding="utf-8")
+    path.write_text("萃取先走，向量随后补上。", encoding="utf-8")
     source_id = engine.ingest_file(path)["id"]
-    engine.db().execute("UPDATE sources SET status=? WHERE id=?", ("蒸馏中", source_id))
+    engine.db().execute("UPDATE sources SET status=? WHERE id=?", ("萃取中", source_id))
     engine.db().commit()
 
     class _Batch:
@@ -138,7 +138,7 @@ def test_distill_keeps_going_while_vectors_finish(tmp_path, monkeypatch):
         (source_id,),
     ).fetchone()
     other.close()
-    assert row["status"] == "蒸馏中"
+    assert row["status"] == "萃取中"
     assert "向量:ok" in (row["pipeline"] or "")
     assert queued["n"] == 1
     assert vec["vec_json"]
@@ -170,7 +170,7 @@ def test_missing_vectors_do_not_enter_distill(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "_embed_one", lambda _text: None)
     path = tmp_path / "scan" / "plain.txt"
     path.parent.mkdir(exist_ok=True)
-    path.write_text("这段文字足够长，用来确认没有向量时蒸馏仍然先走。", encoding="utf-8")
+    path.write_text("这段文字足够长，用来确认没有向量时萃取仍然先走。", encoding="utf-8")
     result = engine.ingest_file(path)
     queued = engine.db().execute("SELECT id FROM queue WHERE source_id=?", (result["id"],)).fetchone()
     status = engine.db().execute("SELECT status, pipeline FROM sources WHERE id=?", (result["id"],)).fetchone()
@@ -243,7 +243,7 @@ def test_short_sentence_still_enters_distill(tmp_path, monkeypatch):
     queued = engine.db().execute("SELECT id FROM queue WHERE source_id=?", (result["id"],)).fetchone()
     status = engine.db().execute("SELECT status FROM sources WHERE id=?", (result["id"],)).fetchone()
     assert queued is not None
-    assert status["status"] == "已向量化待蒸馏"
+    assert status["status"] == "已向量化待萃取"
 
 
 def test_embed_switch_rejects_unknown_model(tmp_path, monkeypatch):
@@ -339,7 +339,7 @@ def test_revise_chunk_does_not_redistill(tmp_path, monkeypatch):
     engine = _engine(tmp_path, monkeypatch)
     path = tmp_path / "scan" / "note.txt"
     path.parent.mkdir(exist_ok=True)
-    path.write_text("这段文字足够长，用来确认修订单块时不会整篇重蒸馏。", encoding="utf-8")
+    path.write_text("这段文字足够长，用来确认修订单块时不会整篇重萃取。", encoding="utf-8")
     opened = engine.ingest_file(path)
     chunk = engine.db().execute(
         "SELECT id, text FROM chunks WHERE source_id=? AND role='child' ORDER BY seq LIMIT 1",

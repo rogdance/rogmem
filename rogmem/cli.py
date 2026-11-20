@@ -21,7 +21,7 @@ from urllib.request import Request
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rogmem",
-        description="本机 rogmem CLI。宿主配置、历史上传、材料信封进 Ingress。不在本机蒸馏，不写 crystal。",
+        description="本机 rogmem CLI。宿主配置、历史上传、材料信封进 Ingress。不在本机萃取，不写 crystal。",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -74,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingress = sub.add_parser("ingress", help="材料信封进入 Ingress")
     ingress_sub = ingress.add_subparsers(dest="ingress_command")
-    accept = ingress_sub.add_parser("accept", help="验收信封形状；默认 dry-run，不蒸馏、不写 crystal")
+    accept = ingress_sub.add_parser("accept", help="验收信封形状；默认 dry-run，不萃取、不写 crystal")
     _add_dry_run(accept)
     accept.add_argument("--file", type=Path, help="信封 JSON（对象或数组）")
     accept.add_argument("--stdin", action="store_true", help="从标准输入读信封 JSON")
@@ -1107,7 +1107,7 @@ def history_upload(args: argparse.Namespace) -> int:
         refused=refused,
         ingress=ingress if dry else {"posted": posted, "refused": refused, "distilled": False, "crystal_written": False},
         posted=posted,
-        text="确认之前不会导入。" if dry else ("原文已送到记忆中枢。蒸馏在中枢上进行。" if ok else "没有送完。"),
+        text="确认之前不会导入。" if dry else ("原文已送到记忆中枢。萃取在中枢上进行。" if ok else "没有送完。"),
     )
     if args.envelope and dry:
         payload["envelopes"] = envelopes

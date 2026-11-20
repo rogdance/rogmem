@@ -357,7 +357,7 @@ def test_ui_lists_distinguish_partial_and_complete_coverage():
         ],
         "session",
         {},
-        {"statuses": [DISTILLED, "蒸馏无结晶"]},
+        {"statuses": [DISTILLED, "萃取无结晶"]},
     )
     assert "字段已写" in html
     assert "简历已齐" in html

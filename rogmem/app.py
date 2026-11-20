@@ -394,6 +394,33 @@ def _sources_response(tab: str, filters: dict, page_no: int) -> HTMLResponse:
     return HTMLResponse(ui.sources_page(listed["rows"], tab, filters, engine.source_facets(tab), listed))
 
 
+@mcp.custom_route("/admin/api/sources/latest", methods=["GET"])
+async def sources_latest(request: Request) -> Response:
+    """Whether the top of the list moved. One marker on a slow beat, never a whole page.
+
+    The page keeps its own baseline and only raises a flag; it never redraws itself here.
+    """
+    denied = _guard(request)
+    if denied:
+        return denied
+    filters = {
+        key: request.query_params.get(key, "")
+        for key in ("q", "kind", "device", "agent", "project", "session", "turn")
+    }
+    probe = await asyncio.to_thread(
+        engine.source_latest_probe,
+        request.query_params.get("tab", "session"),
+        filters["q"],
+        filters["kind"],
+        filters["device"],
+        filters["agent"],
+        filters["project"],
+        filters["session"],
+        filters["turn"],
+    )
+    return JSONResponse(probe)
+
+
 def _import_receipt(item: dict) -> dict:
     """A committed import is a list row. A duplicate already has its row."""
     receipt = dict(item)
@@ -410,7 +437,10 @@ def _import_receipt(item: dict) -> dict:
         return receipt
     shown = dict(row)
     shown["note"] = engine.list_note(shown)
+    shown["progress"] = engine.source_stage_note(shown.get("pipeline") or "", shown.get("status") or "")
+    shown["active"] = engine.source_is_active(shown.get("pipeline") or "", shown.get("status") or "")
     receipt["row_html"] = ui.source_row_html(shown, "file")
+    receipt["active"] = shown["active"]
     return receipt
 
 
@@ -420,13 +450,21 @@ def _too_large_receipt() -> JSONResponse:
 
 
 def _land_upload(name: str, upload, label: str) -> dict:
-    """Write one upload onto disk, then read that file. Do not hold the whole body."""
+    """Put one upload on disk and make its row at once. The read waits for the reader thread.
+
+    The bytes are streamed to a hidden staged file, so a large document never lands in
+    memory and the request does not hold the read lock while it travels.
+    """
     safe = Path(name).name
+    suffix = Path(safe).suffix.lower().lstrip(".")
+    if not safe or suffix not in engine.accepted_suffixes():
+        return {"ok": False, "error": "不接受的文件类型", "filename": safe}
     root = engine.active_scan()
     if root is None:
         return {"ok": False, "error": "没有扫描目录", "filename": safe}
     root.mkdir(parents=True, exist_ok=True)
     staged = root / f".part-{secrets.token_hex(8)}"
+    digest = hashlib.sha256()
     try:
         handle = getattr(upload, "file", None)
         if handle is None:
@@ -441,8 +479,9 @@ def _land_upload(name: str, upload, label: str) -> dict:
                 total += len(chunk)
                 if total > engine.DOCUMENT_MAX_BYTES:
                     return {"ok": False, "error": "文件太大", "filename": safe}
+                digest.update(chunk)
                 out.write(chunk)
-        return _import_receipt(engine.ingest_saved(safe, staged, label))
+        return _import_receipt(engine.queue_staged(safe, staged, digest.hexdigest(), label))
     finally:
         staged.unlink(missing_ok=True)
 
@@ -514,6 +553,25 @@ async def import_from_nas(request: Request) -> Response:
             return JSONResponse({"ok": False, "error": "没有文件"}, status_code=400)
         result = await asyncio.to_thread(engine.import_nas_dir, folder, label)
     return _nas_http(result)
+
+
+@mcp.custom_route("/admin/api/sources/progress", methods=["GET"])
+async def sources_progress(request: Request) -> Response:
+    """The rows the file list is watching. One renderer paints both the list and this."""
+    denied = _guard(request)
+    if denied:
+        return denied
+    ids = [part for part in (request.query_params.get("ids") or "").split(",") if part]
+    rows = await asyncio.to_thread(engine.source_rows_by_ids, ids)
+    painted = []
+    for row in rows:
+        item = dict(row)
+        origin = "file" if item.get("kind") == "file" else "session"
+        item["row_html"] = ui.source_row_html(item, origin)
+        item["active"] = bool(row.get("active"))
+        item.pop("preview", None)
+        painted.append(item)
+    return JSONResponse({"rows": painted})
 
 
 @mcp.custom_route("/admin/sources/{sid}", methods=["GET"])
@@ -2040,10 +2098,37 @@ def start_reconcile_loop(stop: threading.Event | None = None) -> threading.Threa
         return thread
 
 
+def start_ingest_worker(stop: threading.Event | None = None) -> threading.Thread:
+    """One reader. Files taken in fast are read here, off the request thread."""
+    thread = threading.Thread(
+        target=_ingest_loop,
+        kwargs={"stop": stop},
+        daemon=True,
+        name="rogmem-ingest",
+    )
+    thread.start()
+    return thread
+
+
+_INGEST_IDLE = 1.0
+
+
+def _ingest_loop(stop: threading.Event | None = None) -> None:
+    """Read queued files in order. Reading is not dispatching: a paused line still reads."""
+    while stop is None or not stop.is_set():
+        try:
+            for source_id in engine.pending_ingests(2):
+                engine.ingest_queued(source_id)
+        except Exception as exc:
+            print("ROGMEM_INGEST " + type(exc).__name__, flush=True)
+        time.sleep(_INGEST_IDLE)
+
+
 def worker() -> None:
     n = engine.distill_concurrency()
     print("ROGMEM_DISTILL_CONCURRENCY " + str(n), flush=True)
     start_distill_workers(n)
+    start_ingest_worker()
     # Start probes before the first maintenance tick. A scan that never returns
     # must not be what keeps the first probe from running.
     start_probe_loop()

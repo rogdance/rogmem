@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 
 from rogmem.device_identity import display_device_name
 from rogmem.progress import LAMP_WORD as _LAMP_WORD
-from rogmem.progress import flow_states, processing_filters, vector_state
+from rogmem.progress import flow_states, processing_filters, stage_note as _stage_note, vector_state
 from rogmem.version import product_version
 
 CHANNEL = contextvars.ContextVar("rogmem_channel", default=False)
@@ -1736,6 +1736,7 @@ button.rev-tick:hover, button.rev-tick:focus-visible {{ background: transparent;
 .rev-change, .rev-basis {{ margin: 10px 0 0; white-space: pre-wrap; }}
 .rev-change {{ padding-top: 10px; border-top: 1px solid var(--border); }}
 .flow {{ display: inline-flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 999px; background: var(--surface-subtle); border: 1px solid var(--border); }}
+.flow-progress {{ margin-left: 6px; font-size: 12px; line-height: 1; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }}
 .flow .branch {{ display: inline-flex; flex-direction: column; align-items: center; gap: 3px; }}
 .flow button.lamp {{ width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; box-shadow: none; cursor: pointer; line-height: 0; transform: none; }}
 .flow button.lamp i {{ display: block; width: 10px; height: 10px; margin: 4px auto; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--text-muted); background: transparent; }}
@@ -1816,6 +1817,7 @@ h3 {{ font-size: 16px; line-height: 1.5; font-weight: 600; margin: 22px 0 8px; }
 .setting-line {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; }}
 .setting-line .job-field {{ display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text-secondary); font-size: 13px; white-space: nowrap; }}
 .setting-line .job-field input {{ display: inline-block; width: 6.5em; }}
+.setting-line .job-field.wide input {{ width: 22em; }}
 .setting-line .switch {{ margin: 0; max-width: none; }}
 .setting-fact {{ margin: 8px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }}
 .setting-foot {{
@@ -1881,6 +1883,9 @@ h3 {{ font-size: 16px; line-height: 1.5; font-weight: 600; margin: 22px 0 8px; }
 table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface-base); border: 1px solid var(--border); border-radius: 12px; }}
 .table-scroll {{ overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-base); }}
 .table-scroll table {{ border: 0; border-radius: 0; }}
+.fresh {{ display: flex; justify-content: center; margin: 0 0 12px; }}
+.fresh button.fresh-btn {{ width: auto; min-height: 32px; padding: 5px 14px; border: 1px solid var(--notice-border); border-radius: 999px; font-size: 13px; font-weight: 500; color: var(--notice-text); background: var(--notice-bg); cursor: pointer; }}
+.fresh button.fresh-btn:hover, .fresh button.fresh-btn:focus-visible {{ background: var(--surface-hover); }}
 table.sources {{ width: max-content; min-width: 100%; }}
 table.sources th.fit, table.sources td.fit {{ white-space: nowrap; }}
 table.sources th.name, table.sources td.name {{ min-width: 10em; max-width: 18em; }}
@@ -3111,16 +3116,32 @@ def source_row_html(row: dict, origin: str) -> str:
         f"<td class='fit'>{esc(display_device_name(row.get('device_name')))}</td>" if file_row else ""
     )
     return (
-        "<tr>"
+        f"<tr data-source-id='{esc(str(row['id']))}'>"
         f"<td class='fit'>{esc(KIND.get(row['kind'], row['kind']))}</td>"
         f"<td class='name'>{name}</td>"
         f"{device_cell}<td class='fit'>{esc(row.get('agent_name'))}</td>"
         f"<td class='fit'>{esc(row.get('project_ref'))}</td><td class='fit'>{esc(row['id'])}</td>"
         f"<td class='fit'>{when(row.get('ingested_at'))}</td>"
-        f"<td class='fit'>{flow_html(row.get('pipeline') or '', row.get('status') or '', row.get('note') or row.get('last_error') or '')}</td>"
+        f"<td class='fit'>{flow_html(row.get('pipeline') or '', row.get('status') or '', row.get('note') or row.get('last_error') or '')}"
+        f"{_progress_span(row)}</td>"
         f"<td class='fit ops'>{view}{retry}</td><td class='note'>{clip_html(row.get('note') or '')}</td>"
         "</tr>"
     )
+
+
+def _progress_span(row: dict) -> str:
+    """The stage a row is on, beside its lamps. Empty on a row that is not moving.
+
+    A caller that already counted a stage's units passes ``progress``. Everyone else
+    gets the same words from the two stored marks, so one renderer serves both.
+    """
+    label = row.get("progress")
+    if label is None:
+        label = _stage_note(row.get("pipeline") or "", row.get("status") or "")
+    label = (label or "").strip()
+    if not label:
+        return ""
+    return f"<span class='flow-progress'>{esc(label)}</span>"
 
 
 def _lamp_button(name: str, state: str, error: str = "") -> str:
@@ -3268,6 +3289,72 @@ _SOURCE_PICK = """<script>
   });
 })();
 </script>"""
+
+
+_FRESH_SCRIPT = """<script>
+(function () {
+  var box = document.getElementById('sources-fresh');
+  if (!box || !box.dataset.endpoint) return;
+  var button = box.querySelector('.fresh-btn');
+  var baseline = box.dataset.marker || '';
+  var baseTotal = parseInt(box.dataset.total || '0', 10) || 0;
+  var label = box.dataset.label || '内容';
+  var url = box.dataset.endpoint + '?' + (box.dataset.query || '');
+  var beat = 20000;
+  var timer = 0;
+  function rest() { if (timer) { clearInterval(timer); timer = 0; } }
+  function raise(extra) {
+    button.textContent = extra > 0
+      ? '有 ' + extra + ' 条新的' + label + ' · 点击加载'
+      : label + '列表有更新 · 点击加载';
+    box.hidden = false;
+    rest();
+  }
+  function look() {
+    fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (data) {
+        if (!data || typeof data.marker !== 'string') return;
+        // 净增才说「新的」；只是首行挪了位（多为删改）就说「有更新」，不冒认新内容。
+        var extra = (parseInt(data.total, 10) || 0) - baseTotal;
+        if (data.marker === baseline && extra <= 0) return;
+        raise(extra);
+      })
+      .catch(function () {});
+  }
+  function watch() { if (!timer) { timer = setInterval(look, beat); } }
+  button.addEventListener('click', function () { location.reload(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) rest();
+    else if (box.hidden) { look(); watch(); }
+  });
+  watch();
+})();
+</script>"""
+
+
+def _fresh_hint(tab: str, params: dict, rows: list[dict], total: int, page_no: int, status: str) -> str:
+    """A quiet probe above the table. It flags a newer top and lets the reader load it.
+
+    Page one only, and only with no status filter: a status filter narrows in Python,
+    and the probe reads columns, so it would flag rows the list itself would hide.
+    """
+    if page_no != 1 or status:
+        return ""
+    label = "情景会话" if tab != "file" else "知识文件"
+    top = rows[0] if rows else {}
+    marker = f"{top.get('ingested_at') or ''}|{top.get('id') or ''}"
+    return (
+        "<div id='sources-fresh' class='fresh' hidden role='status'"
+        " data-endpoint='/admin/api/sources/latest'"
+        f" data-query='{esc(urlencode(params))}'"
+        f" data-marker='{esc(marker)}'"
+        f" data-total='{int(total)}'"
+        f" data-label='{esc(label)}'>"
+        f"<button type='button' class='fresh-btn'>有新的{esc(label)}会在上面亮一下</button>"
+        "</div>"
+        f"{_FRESH_SCRIPT}"
+    )
 
 
 def sources_page(rows: list[dict], tab: str, filters: dict, facets: dict, pager: dict | None = None) -> str:
@@ -3559,6 +3646,7 @@ function uploadFile(file, row, dupes, done, outcome) {
     }
     else if (item.row_html) settleRow(row, item, outcome);
     else failRow(row, (item && item.error) || '没有导入');
+    if (item && item.id && item.row_html) { watchSource(item.id); rebaselineFresh(); }
     done();
   });
   xhr.addEventListener('error', function () {
@@ -3591,6 +3679,79 @@ function sendFiles(input) {
     showDuplicates(dupes, outcome.imported);
   }
   next();
+}
+</script>
+<script>
+var sourceWatch = new Set();
+var sourcePoll = 0;
+function sourceWatchRoot() {
+  return document.querySelector('.table-scroll[data-active]');
+}
+function sourceRowById(id) {
+  return document.querySelector("tr[data-source-id='" + id + "']");
+}
+function kickSourcePoll() {
+  if (sourcePoll || !sourceWatch.size) return;
+  sourcePoll = setInterval(pollSources, 1500);
+  pollSources();
+}
+function watchSource(id) {
+  if (!id) return;
+  sourceWatch.add(id);
+  kickSourcePoll();
+}
+function paintSourceRow(item) {
+  var row = sourceRowById(item.id);
+  if (!row) return;
+  var host = document.createElement('table');
+  host.innerHTML = item.row_html || '';
+  var next = host.querySelector('tr');
+  if (!next) return;
+  row.replaceWith(next);
+  if (typeof formatSourceClocks === 'function') formatSourceClocks(next);
+}
+function pollSources() {
+  if (!sourceWatch.size) { clearInterval(sourcePoll); sourcePoll = 0; return; }
+  var ids = Array.from(sourceWatch);
+  fetch('/admin/api/sources/progress?ids=' + encodeURIComponent(ids.join(',')))
+    .then(function (response) { return response.ok ? response.json() : null; })
+    .then(function (data) {
+      if (!data || !data.rows) return;
+      data.rows.forEach(function (item) {
+        paintSourceRow(item);
+        if (item.active) sourceWatch.add(item.id); else sourceWatch.delete(item.id);
+      });
+      if (!sourceWatch.size) { clearInterval(sourcePoll); sourcePoll = 0; }
+    })
+    .catch(function () {});
+}
+function seedSourceWatch() {
+  // 订阅只服务知识文件页。情景会话页没有导入入口，也就没有这一行要看的东西。
+  if (!document.getElementById('import-files')) return;
+  var root = sourceWatchRoot();
+  if (!root) return;
+  (root.getAttribute('data-active') || '').split(',').forEach(function (id) { if (id) sourceWatch.add(id); });
+  kickSourcePoll();
+}
+function rebaselineFresh() {
+  // 探测条（sources-fresh）拿列表画好那一刻的顶部当基线。刚把新行画进列表的是我们自己，
+  // 基线要跟着走，否则过 20 秒它会把这条已经看得见的行报成「有新的」。
+  var box = document.getElementById('sources-fresh');
+  if (!box || !box.dataset.endpoint) return;
+  fetch(box.dataset.endpoint + '?' + (box.dataset.query || ''), { credentials: 'same-origin', cache: 'no-store' })
+    .then(function (response) { return response.ok ? response.json() : null; })
+    .then(function (data) {
+      if (!data || typeof data.marker !== 'string') return;
+      box.dataset.marker = data.marker;
+      box.dataset.total = String(parseInt(data.total, 10) || 0);
+      box.hidden = true;
+    })
+    .catch(function () {});
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', seedSourceWatch);
+} else {
+  seedSourceWatch();
 }
 </script>
 <script>
@@ -4048,14 +4209,15 @@ document.addEventListener('click', function (event) {
         "<th class='fit'>来源编号</th><th class='fit'>更新时间</th><th class='fit'>处理状态</th>"
         "<th class='fit'>操作</th><th class='note'>备注</th></tr>"
     )
+    moving = ",".join(str(row.get("id")) for row in rows if row.get("active"))
     if not rows:
         empty = "这一栏还没有文件。" if tab == "file" else "这一栏还没有情景会话。"
-        table = f"<div class='table-scroll'><table class='sources'>{head}<tr><td colspan='{columns}' class='empty'>{empty}</td></tr></table></div>"
+        table = f"<div class='table-scroll' data-active='{esc(moving)}'><table class='sources'>{head}<tr><td colspan='{columns}' class='empty'>{empty}</td></tr></table></div>"
     else:
         body = []
         for row in rows:
             body.append(source_row_html(row, tab))
-        table = f"<div class='table-scroll'><table class='sources'>{head}{''.join(body)}</table></div>"
+        table = f"<div class='table-scroll' data-active='{esc(moving)}'><table class='sources'>{head}{''.join(body)}</table></div>"
     params = {"tab": tab}
     for key, value in filters.items():
         if value not in ("", None):
@@ -4075,7 +4237,8 @@ document.addEventListener('click', function (event) {
         page=page_no,
         page_size=size,
     )
-    return page(title, tab, f"<h1>{title}</h1>{form}{table}{pager_html}")
+    fresh = _fresh_hint(tab, params, rows, total, page_no, chosen_status)
+    return page(title, tab, f"<h1>{title}</h1>{form}{fresh}{table}{pager_html}")
 
 
 def _filled(value) -> str:
@@ -5596,7 +5759,7 @@ _HOST_TIPS = {
     "接入时间": "接入时间是该智能体第一次领取授权的时间。更早启用、当时没单独记下的，先显示申请时间。",
     "最近活跃": "最近一次带着授权和记忆中枢通信的时间。",
     "累计录入会话数": "累计录入会话数把该智能体的用户输入和回复各算 1 条，从已有记录累加；文件和主人摘要不算。",
-    "累计调用次数": "累计调用次数只计成功读取记忆的次数：核心记忆、检索、读章节、读原文，用来看它对记忆的依赖。提交会话和内部蒸馏不计。",
+    "累计调用次数": "累计调用次数只计成功读取记忆的次数：核心记忆、检索、读章节、读原文，用来看它对记忆的依赖。提交会话和内部萃取不计。",
     "待导入会话数": "这台电脑上已经扫到、还没有进入记忆中枢的历史会话条数。用户输入和回复各算 1 条。本地存量减去已经导入的，所以这个数会变少。还没扫到时显示 —；都导入完了显示 0。页面开着时会向本机通道重新要这个数。",
     "操作": "用来通过授权、停止授权，或让已经启用的宿主导入历史。启用中可以停止授权，停用后再通过仍用原来的密钥。待放行点通过授权后等待领取，没领到密钥不算连上。",
 }
@@ -8686,7 +8849,10 @@ def basic_page(cfg: dict) -> str:
 
 def pipeline_page(providers: list[dict], assigned: dict, effective: dict, schedule: dict) -> str:
     workers = (
-        ("model_distill", "初始蒸馏", "chat"),
+        ("model_distill", "草稿", "chat"),
+        ("model_page", "并页", "chat"),
+        ("model_sketch", "速写", "chat"),
+        ("model_proper", "专名核对", "chat"),
         ("model_merge", "身份合并", "chat"),
         ("model_embed", "向量嵌入", "embed"),
     )
@@ -8735,31 +8901,52 @@ def pipeline_page(providers: list[dict], assigned: dict, effective: dict, schedu
         ("限流等待", "gate_throttle_seconds", "秒", ""),
         ("探活后限流条数", "gate_probation_units", "条，同时最多几条在跑；0 表示关掉", ""),
         ("探活后限流时长", "gate_probation_seconds", "秒", ""),
-        ("蒸馏并发", "distill_concurrency", "个，调低立即生效，调高重启后生效", ""),
+        ("萃取并发", "distill_concurrency", "个，调低立即生效，调高重启后生效", ""),
     )
 
     def job_row(label: str, name: str, unit: str, placeholder: str) -> str:
         hold = f' placeholder="{placeholder}"' if placeholder else ""
+        # 额度阶梯是一串逗号值，默认给更宽的输入框，免得看不清里面写了什么。
+        wide = " wide" if name == "gate_quota_steps" else ""
         return (
             "<section class='setting-row setting-line'>"
             f"<h2>{label}</h2>"
-            f'<label class="job-field"><input name="{name}" value="{esc(schedule.get(name) or "")}"{hold} aria-label="{label}"> {unit}</label>'
+            f'<label class="job-field{wide}"><input name="{name}" value="{esc(schedule.get(name) or "")}"{hold} aria-label="{label}"> {unit}</label>'
             "</section>"
         )
 
     job_rows = "".join(job_row(*item) for item in jobs)
     gate_rows = "".join(job_row(*item) for item in gate)
+    # The switch stops the whole distill line without losing where it was: no lease is
+    # taken while it is on, so lifting it continues from the same queue position.
+    pause_checked = " checked" if schedule.get("distill_paused") else ""
+    pause_row = (
+        "<section class='setting-row setting-line'>"
+        "<h2>暂停萃取</h2>"
+        "<label class='job-field'>"
+        f"<input type='checkbox' name='distill_paused'{pause_checked}> "
+        "勾上立即停止派单；队列进度原地保留，取消勾选即从原处继续"
+        "</label>"
+        "</section>"
+    )
     gate_names = ", ".join(f"{name}:this.{name}.value" for _label, name, _unit, _hold in gate)
+    assign_pairs = ", ".join(f"{key}:this.{key}.value" for key, _label, _kind in workers)
+    think_pairs = ", ".join(
+        f"thinking_{role}:this.thinking_{role}.value"
+        for role in ("distill", "page", "sketch", "proper", "merge")
+    )
+    assign_payload = "{" + assign_pairs + ", " + think_pairs + "}"
     inner = f"""<div class="settings-stack">
-<form class="panel settings-form" onsubmit="event.preventDefault(); post('/admin/api/settings/assign', {{model_distill:this.model_distill.value, model_merge:this.model_merge.value, model_embed:this.model_embed.value, thinking_distill:this.thinking_distill.value, thinking_merge:this.thinking_merge.value}});">
+<form class="panel settings-form" onsubmit="event.preventDefault(); post('/admin/api/settings/assign', {assign_payload});">
 <header class="setting-head"><h2>工人设置</h2></header>
 <div class="workers">
 {rows}
 </div>
 <div class="setting-foot"><button type="submit">保存</button></div>
 </form>
-<form class="panel settings-form" onsubmit="event.preventDefault(); post('/admin/api/settings/pipeline', {{scan_interval:this.scan_interval.value, probe_interval:this.probe_interval.value, reconcile_hours:this.reconcile_hours.value, sweep_at:this.sweep_at.value, {gate_names}}});">
+<form class="panel settings-form" onsubmit="event.preventDefault(); post('/admin/api/settings/pipeline', {{scan_interval:this.scan_interval.value, probe_interval:this.probe_interval.value, reconcile_hours:this.reconcile_hours.value, sweep_at:this.sweep_at.value, distill_paused:this.distill_paused.checked, {gate_names}}});">
 <header class="setting-head"><h2>定时任务与闸门</h2></header>
+{pause_row}
 {job_rows}
 <p class="note">供应商报额度窗口时，阶梯决定派单停多久；探活不受它影响，一直按上面的探活间隔看一眼，一有回应就立刻开闸。开闸之后先按「探活后限流条数」放行，过了限流时长再完全放开——探活只花几个字，撑不住一整轮真实任务。</p>
 {gate_rows}
@@ -8853,7 +9040,7 @@ def logs_page(
 {_log_rows(entries)}
 </table></div>
 {foot}
-<p class='note'>最新的在最上面，保留最近 200 条。蒸馏只记没走完的那一步。页面上真正改过的字在修订里。</p>
+<p class='note'>最新的在最上面，保留最近 200 条。萃取只记没走完的那一步。页面上真正改过的字在修订里。</p>
 <h2>告警通知</h2>
 <form onsubmit="event.preventDefault(); post('/admin/api/settings/webhook', {{url:this.url.value}});">
 <label>Webhook 地址<br><input name="url" value="{esc(webhook)}" size="48" placeholder="https://example.com/hook"></label>
@@ -9527,7 +9714,7 @@ __AVAIL_JS__
     baseline.setAttribute("y2", chartBottom);
     svg.appendChild(baseline);
     paintAvail(svg, layout, chartBottom, availWho(QUEUE.availability));
-    svg.setAttribute("aria-label", "蒸馏完成走势，共 " + n + " 个时段");
+    svg.setAttribute("aria-label", "萃取完成走势，共 " + n + " 个时段");
     lastRenderWidth = w;
   }
   svg.addEventListener("pointermove", function (ev) {
@@ -9606,7 +9793,7 @@ def _avail_legend() -> str:
 def _queue_activity_note(reading: dict) -> str:
     """此刻有哪些模型调用在跑。
 
-    队列行只是蒸馏作业；向量补齐和词条整合不写队列，却同样在调模型。
+    队列行只是萃取作业；向量补齐和词条整合不写队列，却同样在调模型。
     这条读数出自模型的唯一收口，所以队列状态和成本明细不会再各说各话。
     """
 
@@ -9707,7 +9894,7 @@ def queue_page(board: dict) -> str:
 </div>
 <p class="ov-activity">{activity_note}</p>
 <figure class="ov-chart">
-<svg id="q-svg" role="img" aria-label="蒸馏完成走势" aria-describedby="q-caption" aria-roledescription="柱状图" tabindex="0"></svg>
+<svg id="q-svg" role="img" aria-label="萃取完成走势" aria-describedby="q-caption" aria-roledescription="柱状图" tabindex="0"></svg>
 <div id="q-tip" class="ov-tip" hidden role="status" aria-live="polite"></div>
 <figcaption id="q-caption" class="ov-caption">所选时段里完成的任务 · 北京时间 · 悬停或方向键查看。{untimed_note}此刻进行中 {int(summary.get('running') or 0)} 项，未跑完 {int(summary.get('stopped') or 0)} 项。</figcaption>
 {_avail_legend()}

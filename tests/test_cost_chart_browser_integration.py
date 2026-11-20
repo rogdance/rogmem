@@ -100,7 +100,7 @@ def engine_with_data(tmp_path, monkeypatch):
         ("2026-11-11T03:35:00+00:00", "paid", (2600, 1000, 40)),
     ]
     for at, model, usage in moments:
-        cost.record(at=at, worker="初始蒸馏", provider_id="p", model=model, usage=usage, prompt="材料", answer="回复")
+        cost.record(at=at, worker="草稿", provider_id="p", model=model, usage=usage, prompt="材料", answer="回复")
     cost.save_book(
         "7.2",
         [{"provider": "p", "model": "paid", "currency": "USD", "input": "2", "output": "3", "cache": "0.5"}],
@@ -331,7 +331,7 @@ def test_merge_matches_public_sum_with_mixed_unpriced(browser, html_server, engi
     for i in range(400):
         cost.record(
             at=(base + timedelta(days=i)).isoformat(),
-            worker="初始蒸馏",
+            worker="草稿",
             provider_id="p",
             model="paid" if i % 5 else "unpaid",
             usage=(10 + i, 5, 0),
@@ -381,8 +381,8 @@ def test_mixed_single_bucket_tooltip_shows_known_money(browser, html_server, eng
     """单桶混合（n<maxBars 不触发合并）：tooltip 不得丢已计价部分金额。"""
 
     # Overwrite：同小时内一条 paid + 一条 unpaid
-    cost.record(at="2026-11-11T03:10:00+00:00", worker="初始蒸馏", provider_id="p", model="paid", usage=(1_000_000, 500_000, 0), prompt="已计价", answer="")
-    cost.record(at="2026-11-11T03:20:00+00:00", worker="初始蒸馏", provider_id="p", model="unpaid", usage=(100_000, 50_000, 0), prompt="未计价", answer="")
+    cost.record(at="2026-11-11T03:10:00+00:00", worker="草稿", provider_id="p", model="paid", usage=(1_000_000, 500_000, 0), prompt="已计价", answer="")
+    cost.record(at="2026-11-11T03:20:00+00:00", worker="草稿", provider_id="p", model="unpaid", usage=(100_000, 50_000, 0), prompt="未计价", answer="")
     board = cost.overview(now=NOW, span="24h")
     html = cost_page(board, [], {})
     ctx = browser.new_context()
@@ -484,7 +484,7 @@ def test_large_amount_y_axis_labels_all_fit_real_bbox(browser, html_server, engi
     for i in range(5):
         cost.record(
             at=f"2026-11-11T0{i}:30:00+00:00",
-            worker="初始蒸馏", provider_id="p", model="paid",
+            worker="草稿", provider_id="p", model="paid",
             usage=(500_000_000 * (i + 1), 200_000_000 * (i + 1), 10_000_000),
             prompt="大", answer="大"
         )
@@ -530,7 +530,7 @@ def test_tiny_amount_axis_uses_millions_not_scientific(browser, html_server, eng
     for i in range(3):
         cost.record(
             at=f"2026-11-11T0{i}:30:00+00:00",
-            worker="初始蒸馏", provider_id="p", model="paid",
+            worker="草稿", provider_id="p", model="paid",
             usage=(10 + i, 0, 0), prompt="微粒", answer="t"
         )
     board = cost.overview(now=NOW, span="24h")

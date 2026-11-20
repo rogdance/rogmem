@@ -64,7 +64,7 @@ def _fragment(html: str, marker: str) -> str:
 def _seed_call(at: str = "2026-11-12T02:00:00+00:00", tokens: int = 2_500_000) -> None:
     cost.record(
         at=at,
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(tokens, 0, 0),

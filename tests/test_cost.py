@@ -79,7 +79,7 @@ def test_history_is_each_day_not_a_running_total(tmp_path, monkeypatch):
     now = datetime(2026, 11, 11, 4, 0, tzinfo=timezone.utc)
     cost.record(
         at="2026-11-01T04:00:00+00:00",
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(1000, 0, 0),
@@ -88,7 +88,7 @@ def test_history_is_each_day_not_a_running_total(tmp_path, monkeypatch):
     )
     cost.record(
         at="2026-11-02T04:00:00+00:00",
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(100, 0, 0),
@@ -130,7 +130,7 @@ def test_detail_filters_do_not_move_the_overview(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     now = datetime(2026, 11, 11, 4, 0, tzinfo=timezone.utc)
     for at, worker, usage in (
-        ("2026-10-01T04:00:00+00:00", "初始蒸馏", (1000, 0, 0)),
+        ("2026-10-01T04:00:00+00:00", "草稿", (1000, 0, 0)),
         ("2026-11-11T03:00:00+00:00", "并页", (10, 0, 0)),
     ):
         cost.record(
@@ -142,7 +142,7 @@ def test_detail_filters_do_not_move_the_overview(tmp_path, monkeypatch):
             prompt=worker,
             answer="",
         )
-    view = cost.overview( now=now, span="all", worker="初始蒸馏", detail="24h")
+    view = cost.overview( now=now, span="all", worker="草稿", detail="24h")
     assert view["summary"]["tokens"] == 1000
     assert view["count"] == 1
     assert view["rows"][0]["worker"] == "并页"
@@ -218,7 +218,7 @@ def test_an_unpriced_call_keeps_the_total_unknown(tmp_path, monkeypatch):
     now = datetime(2026, 11, 11, 4, 0, tzinfo=timezone.utc)
     cost.record(
         at="2026-11-11T02:00:00+00:00",
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="priced",
         usage=(1_000_000, 0, 0),
@@ -282,7 +282,7 @@ def test_overview_read_does_not_wait_behind_a_call_writer(tmp_path, monkeypatch)
     _open(tmp_path, monkeypatch)
     cost.record(
         at="2026-11-11T03:00:00+00:00",
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(10, 0, 0),
@@ -296,7 +296,7 @@ def test_overview_read_does_not_wait_behind_a_call_writer(tmp_path, monkeypatch)
         writer.execute("BEGIN IMMEDIATE")
         writer.execute(
             """INSERT INTO model_calls(at, worker, provider_id, model, input_tokens, output_tokens, cache_tokens, prompt, answer)
-               VALUES('2026-11-11T03:01:00+00:00','初始蒸馏','p','m',1,0,0,'占着写锁','')"""
+               VALUES('2026-11-11T03:01:00+00:00','草稿','p','m',1,0,0,'占着写锁','')"""
         )
         started = time.perf_counter()
         view = cost.overview(now=datetime(2026, 11, 11, 4, 0, tzinfo=timezone.utc), span="24h")
@@ -316,7 +316,7 @@ def test_overview_window_skips_older_ledger_rows(tmp_path, monkeypatch):
     ):
         cost.record(
             at=at,
-            worker="初始蒸馏",
+            worker="草稿",
             provider_id="p",
             model="m",
             usage=(tokens, 0, 0),

@@ -149,7 +149,7 @@ def test_a_diff_is_blocked_in_reading_order_and_the_card_shows_the_first():
         "basis": "潮信只在页尾那一行。",
         "gist": "铜铃改挂到第五格。",
         "created_at": "2026-11-13T00:00:00+00:00",
-        "actor": "蒸馏",
+        "actor": "萃取",
         "scope": "夜航、外海",
     }
     html = _revision_item("page-1", item, name="雾港铃")
@@ -218,10 +218,105 @@ def test_a_reply_that_stopped_for_room_is_not_written_as_the_page(tmp_path, monk
         engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
 
 
-def test_a_merge_asks_for_a_page_of_room_not_the_model_s_whole_ceiling(tmp_path, monkeypatch):
-    """A merge reply is one page. Handing the merge the model's own ceiling let thinking eat
-    the room and the answer come back as its opening line, which is the JSON error that kept
-    recurring on 2026-11-17 (95% of real merges finish inside 55k)."""
+def test_a_page_too_big_for_one_reply_is_merged_by_the_sections_it_changed():
+    """整页一次写不下（回复必然 finish=length），所以先问「只交回改动的小节」。"""
+    from rogmem.engine import MERGE_SINGLE_CALL_CHARS, _merge_needs_partial
+
+    assert not _merge_needs_partial("短页。", "新材料。")
+    assert _merge_needs_partial("甲" * (MERGE_SINGLE_CALL_CHARS + 1), "")
+    assert _merge_needs_partial("甲" * (MERGE_SINGLE_CALL_CHARS // 2), "乙" * (MERGE_SINGLE_CALL_CHARS // 2 + 1))
+
+
+def test_an_over_size_merge_keeps_the_sections_the_writer_did_not_return():
+    """没交回的小节按字节留着，不是删掉：超页并页靠这条才无损。"""
+    from rogmem.engine import _shape_merged_page
+
+    old = "## 夜航\n\n夜航员把铜铃留在第三格。\n\n## 外海\n\n航线改到雾港外侧。"
+    partial = "## 夜航\n\n铜铃改挂到第五格。"
+    page = _shape_merged_page(old, partial, keep_missing=True)
+    assert "铜铃改挂到第五格。" in page
+    assert "夜航员把铜铃留在第三格。" not in page
+    assert "航线改到雾港外侧。" in page
+    assert page.index("## 夜航") < page.index("## 外海")
+
+
+def test_a_normal_size_merge_still_drops_what_the_writer_left_out():
+    from rogmem.engine import _shape_merged_page
+
+    old = "## 夜航\n\n夜航员把铜铃留在第三格。\n\n## 外海\n\n航线改到雾港外侧。"
+    page = _shape_merged_page(old, "## 夜航\n\n铜铃改挂到第五格。")
+    assert "航线改到雾港外侧。" not in page
+
+
+def test_the_over_size_merge_asks_for_the_changed_sections_only(tmp_path, monkeypatch):
+    engine = _open(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
+    old = "## 夜航\n\n夜航员把铜铃留在第三格。\n\n## 外海\n\n航线改到雾港外侧。"
+    seen = {}
+
+    def fake(_base, _key, payload, **_kwargs):
+        seen.update(payload)
+        return (
+            json.dumps(
+                {"same": "是", "page": "## 夜航\n\n铜铃改挂到第五格。", "conflicts": [], "gist": ""},
+                ensure_ascii=False,
+            ),
+            "stop",
+        )
+
+    monkeypatch.setattr(engine, "_complete_chat", fake)
+    page, *_ = engine._merge_existing_page(old, "铜铃改挂到第五格。", "合成材料。", partial=True)
+    assert engine.MERGE_PARTIAL_NOTE in seen["messages"][1]["content"]
+    assert "铜铃改挂到第五格。" in page
+    assert "航线改到雾港外侧。" in page
+    assert "夜航员把铜铃留在第三格。" not in page
+
+
+def test_the_over_size_merge_event_is_recorded_not_swallowed():
+    from rogmem.crystal_store import EVENT_KINDS
+
+    assert "merge_partial" in EVENT_KINDS
+    assert "page_folded" in EVENT_KINDS
+
+
+def test_a_pathological_page_is_folded_to_one_of_each_section():
+    """真机出现过一页 87 万字、同一个 ### 小节出现 32 次。折收后只留首次出现。"""
+    from rogmem.engine import PAGE_FOLD_MIN_CHARS, _fold_repeated_page
+
+    head = "### 其他持续事项"
+    body = "青苔记下了第四次潮位。" * 200
+    page = "\n\n".join([head + "\n\n" + body] * 30)
+    assert len(page) > PAGE_FOLD_MIN_CHARS
+    folded = _fold_repeated_page(page)
+    assert folded.count(head) == 1
+    assert folded.count("青苔记下了第四次潮位。") == 200
+    assert len(folded) < len(page) // 10
+
+
+def test_a_normal_page_is_never_folded():
+    from rogmem.engine import _fold_repeated_page
+
+    page = "## 夜航\n\n夜航员把铜铃留在第三格。\n\n## 外海\n\n航线改到雾港外侧。"
+    assert _fold_repeated_page(page) == page
+
+
+def test_the_fold_keeps_a_section_the_page_carries_only_once():
+    from rogmem.engine import PAGE_FOLD_MIN_CHARS, _fold_repeated_page
+
+    head = "## 夜航"
+    page = "\n\n".join([head + "\n\n" + "青苔记下了第四次潮位。" * 200] * 30 + ["## 外海\n\n" + "外海多了一处浮标。" * 200])
+    assert len(page) > PAGE_FOLD_MIN_CHARS
+    folded = _fold_repeated_page(page)
+    assert folded.count(head) == 1
+    assert "外海多了一处浮标。" in folded
+    assert folded.index(head) < folded.index("## 外海")
+
+
+def test_a_merge_gets_the_same_ceiling_as_the_draft(tmp_path, monkeypatch):
+    """A merge reply is one whole page, and thinking rides inside max_tokens. 草稿 may
+    emit a page bigger than a smaller merge-only clamp allowed, which left 并页 unable to
+    ever write that page back: it stopped for room on every retry. 并页 and the draft share
+    one worker and one level, so they share one ceiling — the model's own."""
     engine = _open(tmp_path, monkeypatch)
     monkeypatch.setattr(engine, "llm_target", lambda role: ("https://api.minimax.chat/v1", "k", "MiniMax-M3.1-Flash"))
     seen = {}
@@ -235,13 +330,12 @@ def test_a_merge_asks_for_a_page_of_room_not_the_model_s_whole_ceiling(tmp_path,
 
     monkeypatch.setattr(engine, "_complete_chat", fake)
     engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
-    assert seen["max_tokens"] == engine.MERGE_MAX_COMPLETION
-    assert engine.MERGE_MAX_COMPLETION < engine._chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash")
+    assert seen["max_tokens"] == engine._chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash")
 
 
-def test_a_merge_that_stopped_for_room_is_not_asked_again_with_the_whole_ceiling(tmp_path, monkeypatch):
-    """The room a merge gets is already the page's room, so there is no roomier second try:
-    the unit goes back to the queue instead of spending the model's full ceiling again."""
+def test_a_merge_that_stopped_for_room_asks_once_at_the_model_ceiling(tmp_path, monkeypatch):
+    """One merge reply is one call at the model's own ceiling. A reply that still stopped
+    for room is not retried here with a bigger number: the unit goes back to the queue."""
     import pytest
 
     from rogmem.engine import ModelCallFailed
@@ -257,14 +351,14 @@ def test_a_merge_that_stopped_for_room_is_not_asked_again_with_the_whole_ceiling
     monkeypatch.setattr(engine, "_complete_chat", fake)
     with pytest.raises(ModelCallFailed):
         engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
-    assert calls == [engine.MERGE_MAX_COMPLETION]
+    assert calls == [engine._chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash")]
 
 
 def test_the_page_ceiling_never_raises_a_smaller_model_s_own_ceiling():
     from rogmem.engine import _chat_max_tokens, _merge_max_tokens
 
-    assert _merge_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash") == 131072
-    assert _chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash") == 524288
+    assert _merge_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash") == 262144
+    assert _chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash") == 262144
     assert _merge_max_tokens("https://api.other.example/v1", "small-model") == 4096
 
 

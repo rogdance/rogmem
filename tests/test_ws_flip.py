@@ -308,7 +308,7 @@ def test_ws_flip_lease_orphan_release_on_connect(tmp_path, monkeypatch):
 
 
 def test_ws_flip_envelope_spy_ingress_does_not_write_crystal(tmp_path, monkeypatch):
-    """材料信封经 ingress.accept：dry-run 不蒸馏、不写 crystal，间谍能看到信封。"""
+    """材料信封经 ingress.accept：dry-run 不萃取、不写 crystal，间谍能看到信封。"""
     assert DISTILLER_STORE_WRITE_ENABLED is True
     engine = _engine(tmp_path, monkeypatch)
     spy = EnvelopeSpy()

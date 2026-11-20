@@ -56,12 +56,16 @@ from rogmem.progress import (
     ST_NO_BODY,
     ST_NO_CRYSTAL,
     ST_PARSED,
+    ST_PARSING,
     ST_PARSE_FAIL,
+    ST_QUEUED,
     ST_VEC_FAIL,
     ST_VEC_READY,
     canonical_status,
+    is_active as source_is_active,
     mark_is_no_crystal,
     matches as source_progress_matches,
+    stage_note as source_stage_note,
 )
 from rogmem.prompts import (
     MERGE_ENTITY_SYSTEM,
@@ -482,6 +486,9 @@ _PASSWORD_READY = False
 # The concurrency /healthz is allowed to report. Cached like the two above, so the answer
 # stays truthful when the console changes it, without the request ever opening the database.
 _LIVE_CONCURRENCY = 0
+# The operator's pause switch, cached the same way so /healthz can answer without the
+# database. Every writer of the setting refreshes it (``_remember_liveness``).
+_LIVE_PAUSED = False
 _MODEL = None
 _EMBED_GATE = threading.Lock()
 _VECTOR_CATCHUP = threading.Lock()
@@ -540,6 +547,9 @@ def connect(data: Path, scan: Path) -> None:
     con = _open_connection(data / "rogmem.sqlite")
     schema = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
     con.executescript(schema)
+    # 读文件的线程只活在这一个进程里。进程一停，还在「解析中」的行就是孤儿，
+    # 重新排回「排队中」，下一次启动把它们接着读完。
+    con.execute("UPDATE sources SET status=? WHERE status=?", (ST_QUEUED, ST_PARSING))
     columns = {row[1] for row in con.execute("PRAGMA table_info(agents)")}
     if "last_used" not in columns:
         con.execute("ALTER TABLE agents ADD COLUMN last_used TEXT")
@@ -893,8 +903,11 @@ def connect(data: Path, scan: Path) -> None:
     _link_relations(con)
     _backfill_undated_focus_statements(con)
     from rogmem.crystal_index import reindex_crystals
+    from rogmem.section_index import ensure_index_current
 
     reindex_crystals(con)
+    # 段级索引只在口径升版/首次接入时重建一次，不再每次启动全量重建。
+    ensure_index_current(con)
     con.commit()
     release_orphaned_leases()
     ensure_password()
@@ -1233,6 +1246,24 @@ def distill_concurrency() -> int:
     return max(1, min(n, 32))
 
 
+def distill_paused() -> bool:
+    """The operator's pause switch for the whole distill pipeline.
+
+    Paused, the scheduler takes no new unit at all: no lease, no model call. Queued and
+    leased rows stay where they are, so lifting the switch continues from the same spot
+    instead of restarting the run.
+
+    This reads a setting, so it is not what /healthz asks: the liveness answer reads the
+    cached flag instead (``_remember_liveness``), which stays truthful because every
+    writer of the setting refreshes that cache.
+    """
+    try:
+        raw = (get_setting(DISTILL_PAUSE_KEY) or "").strip().lower()
+    except Exception:
+        return False
+    return raw in {"1", "true", "on", "yes", "paused", "暂停"}
+
+
 def release_orphaned_leases() -> int:
     """Leases from a previous process are stale. A call still running in this process is not."""
     if _DB is None:
@@ -1268,7 +1299,7 @@ def hub_id() -> str:
 
 def _remember_liveness() -> None:
     """Cache what /healthz is allowed to say. The request itself must not open the database."""
-    global _HUB_PUBLIC, _PASSWORD_READY, _LIVE_CONCURRENCY
+    global _HUB_PUBLIC, _PASSWORD_READY, _LIVE_CONCURRENCY, _LIVE_PAUSED
     try:
         _HUB_PUBLIC = hub_id()
     except Exception:
@@ -1279,6 +1310,10 @@ def _remember_liveness() -> None:
         pass
     try:
         _LIVE_CONCURRENCY = distill_concurrency()
+    except Exception:
+        pass
+    try:
+        _LIVE_PAUSED = distill_paused()
     except Exception:
         pass
 
@@ -1296,6 +1331,7 @@ def health_snapshot() -> dict:
         "scan": str(_SCAN or ""),
         "password_ready": _PASSWORD_READY,
         "distill_concurrency": _LIVE_CONCURRENCY or _concurrency_from_env(),
+        "distill_paused": _LIVE_PAUSED,
         "distill_leased": 0,
     }
 
@@ -1322,6 +1358,7 @@ def health() -> dict:
         "scan": str(_SCAN),
         "password_ready": _PASSWORD_READY if ok else False,
         "distill_concurrency": distill_concurrency(),
+        "distill_paused": distill_paused() if ok else False,
         "distill_leased": leased if ok else 0,
     }
 
@@ -2284,7 +2321,7 @@ def _ingest_history_inline(
 
     返回 (imported 列表, 其中 duplicate 数)。sources 的 UNIQUE 约束是唯一真值来源。
     bound_host 是这次作业已经认下的宿主。有它时不再按设备名猜。
-    settle 为假时调用方会把这场按住，等作业结束再蒸馏。
+    settle 为假时调用方会把这场按住，等作业结束再萃取。
     """
     hosts = [] if bound_host is not None else _hosts_for_program(con, program)
     chosen: dict[str, sqlite3.Row | None] = {}
@@ -2666,11 +2703,15 @@ def ingest_file(path: Path, device_name: str | None = None, *, origin: str = ORI
     if dedup:
         with LOCK:
             old = db().execute(
-                "SELECT id, filename FROM sources WHERE content_hash=? AND kind='file'",
+                "SELECT id, filename, status FROM sources WHERE content_hash=? AND kind='file'",
                 (content_hash,),
             ).fetchone()
-            if old:
-                return {"ok": True, "id": old["id"], "duplicate": True, "filename": old["filename"] or path.name}
+        if old:
+            if old["status"] == ST_QUEUED:
+                # 秒回时只建了行、正文还没读。这不是重复，是同一件没做完的活：
+                # 谁先走到这里谁把它读完，读文件的线程掉了也不会漏下这一份。
+                _reread_file(old["id"], old["filename"] or path.name, file_lane)
+            return {"ok": True, "id": old["id"], "duplicate": True, "filename": old["filename"] or path.name}
     try:
         from rogmem.sections import join_sections, read_sections
 
@@ -2707,7 +2748,7 @@ def ingest_file(path: Path, device_name: str | None = None, *, origin: str = ORI
             _set_pipeline(con, source_id, "解析", "fail")
             record_run(
                 con,
-                "蒸馏",
+                "萃取",
                 "失败",
                 path.name,
                 error,
@@ -2731,7 +2772,7 @@ def ingest_file(path: Path, device_name: str | None = None, *, origin: str = ORI
             )
             record_run(
                 con,
-                "蒸馏",
+                "萃取",
                 "跳过",
                 path.name,
                 "去掉标记后没有文字，不调用模型",
@@ -2743,6 +2784,180 @@ def ingest_file(path: Path, device_name: str | None = None, *, origin: str = ORI
             _finish_vector_gate(con, source_id, file_lane)
         con.commit()
     return {"ok": True, "id": source_id, "duplicate": False}
+
+
+def queue_staged(
+    filename: str,
+    staged: Path,
+    digest: str,
+    device_name: str | None = None,
+) -> dict:
+    """Name one uploaded file in the scan directory and leave a queued row for it.
+
+    The bytes are already on disk. Nothing is read here: the row exists so the list
+    can paint it at once, and the reader thread picks the file up a moment later.
+    """
+    safe = Path(filename).name
+    suffix = Path(safe).suffix.lower().lstrip(".")
+    if not safe or suffix not in accepted_suffixes():
+        return {"ok": False, "error": "不接受的文件类型", "filename": safe}
+    root = active_scan()
+    if root is None:
+        return {"ok": False, "error": "没有扫描目录", "filename": safe}
+    root.mkdir(parents=True, exist_ok=True)
+    label = resolve_device_name(device_name)
+    # 同名不同内容才加哈希前缀。读旧文件可能要算一遍完整哈希，放在锁外。
+    dest = root / safe
+    if dest.exists() and _sha256_file(dest) != digest:
+        dest = root / f"{dest.stem}-{digest[:8]}{dest.suffix}"
+    with LOCK:
+        con = db()
+        old = con.execute(
+            "SELECT id, filename FROM sources WHERE content_hash=? AND kind='file'",
+            (digest,),
+        ).fetchone()
+        if old:
+            return {"ok": True, "id": old["id"], "duplicate": True, "filename": old["filename"] or safe}
+        os.replace(staged, dest)
+        try:
+            written_at = datetime.fromtimestamp(dest.stat().st_mtime, timezone.utc).isoformat()
+        except OSError:
+            written_at = ""
+        source_id = secrets.token_hex(8)
+        now = utcnow()
+        con.execute(
+            """INSERT INTO sources(id,kind,device_name,agent_name,event_at,event_basis,ingested_at,
+                   idempotency_key,content_hash,body,status,lane,pair_ready,filename,pipeline)
+               VALUES(?,'file',?,'极空间',?,'file',?,?,?,'',?,?,1,?,'解析:run')""",
+            (
+                source_id,
+                label,
+                written_at or now,
+                now,
+                f"file:{digest}",
+                digest,
+                ST_QUEUED,
+                lane_for(kind="file", origin=ORIGIN_BATCH),
+                dest.name,
+            ),
+        )
+        con.commit()
+    return {"ok": True, "id": source_id, "duplicate": False, "filename": dest.name, "queued": True}
+
+
+def pending_ingests(limit: int = 1) -> list[str]:
+    """Files taken in fast but not read yet. The reader thread asks for a few at a time."""
+    with LOCK:
+        rows = db().execute(
+            "SELECT id FROM sources WHERE status=? ORDER BY ingested_at, id LIMIT ?",
+            (ST_QUEUED, max(1, int(limit))),
+        ).fetchall()
+    return [row["id"] for row in rows]
+
+
+def _release_claimed_read(source_id: str, filename: str, error: str) -> str:
+    """A read that did not land must not leave the row claimed.
+
+    「解析中」只表示有一根线程正在读。读没成，就要么放回队列再读一次（数据库只是
+    一时忙碌），要么记成读取失败——失败那格有「重试」入口，能再读。别人已经收口
+    的行一律不碰。
+    """
+    with LOCK:
+        con = db()
+        current = con.execute("SELECT status FROM sources WHERE id=?", (source_id,)).fetchone()
+        if current is None or current["status"] != ST_PARSING:
+            con.rollback()
+            return "settled"
+        if error == _BUSY_WRITE:
+            con.execute("UPDATE sources SET status=? WHERE id=?", (ST_QUEUED, source_id))
+            con.commit()
+            return "queued"
+        con.execute(
+            "UPDATE sources SET status=?, last_error=? WHERE id=?",
+            (ST_PARSE_FAIL, error, source_id),
+        )
+        _set_pipeline(con, source_id, "解析", "fail")
+        record_run(
+            con,
+            "萃取",
+            "失败",
+            filename,
+            error,
+            step="解析",
+            ref_kind="source",
+            ref_id=source_id,
+        )
+        con.commit()
+        return "failed"
+
+
+def ingest_queued(source_id: str) -> str:
+    """Read one file taken in fast. Runs off the request thread.
+
+    The claim is one atomic update, so two readers cannot take the same file. The
+    reading itself is ``_reread_file`` — the same routine the retry button uses, so
+    there is one place that decides whether a body is usable and one that decides a
+    claimed row is closed.
+    """
+    root = active_scan()
+    if root is None:
+        return "no-scan"
+    with LOCK:
+        con = db()
+        taken = con.execute(
+            "UPDATE sources SET status=?, pipeline=? WHERE id=? AND status=?",
+            (ST_PARSING, "解析:run", source_id, ST_QUEUED),
+        )
+        if taken.rowcount != 1:
+            con.rollback()
+            return "gone"
+        row = con.execute("SELECT filename, lane FROM sources WHERE id=?", (source_id,)).fetchone()
+        con.commit()
+    filename = (row["filename"] if row else "") or ""
+    outcome = _reread_file(source_id, filename, (row["lane"] if row else "") or "")
+    if not outcome.get("ok"):
+        return _release_claimed_read(source_id, filename, outcome.get("error") or "读不出正文")
+    return "done"
+
+
+def _child_vector_counts(ids: list[str]) -> dict[str, tuple[int, int]]:
+    """How many child chunks still lack a vector. Only the watched rows are asked."""
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    found = db().execute(
+        f"""SELECT source_id,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN vec_json IS NOT NULL THEN 1 ELSE 0 END) AS done
+            FROM chunks WHERE role!='parent' AND source_id IN ({marks})
+            GROUP BY source_id""",
+        ids,
+    ).fetchall()
+    return {row["source_id"]: (int(row["done"] or 0), int(row["total"] or 0)) for row in found}
+
+
+def source_rows_by_ids(ids: list[str]) -> list[dict]:
+    """The rows a list is watching, in the caller's order. Same shape the list paints."""
+    clean = [str(item) for item in ids if str(item)][:60]
+    if not clean:
+        return []
+    columns = (
+        "s.id,s.kind,substr(s.body,1,80) AS preview,"
+        f"{_SHOWN_DEVICE} AS device_name,{_SHOWN_AGENT} AS agent_name,"
+        "s.status,s.coverage,s.ingested_at,s.project_ref,s.filename,s.last_error,s.redacted,s.pipeline"
+    )
+    counts = _child_vector_counts(clean)
+    out = []
+    for row in _source_page(columns, clean):
+        item = dict(row)
+        item["note"] = list_note(item)
+        done, total = counts.get(item["id"], (0, 0))
+        item["progress"] = source_stage_note(item["pipeline"] or "", item["status"] or "", done=done, total=total)
+        item["active"] = source_is_active(item["pipeline"] or "", item["status"] or "")
+        out.append(item)
+    order = {sid: at for at, sid in enumerate(clean)}
+    out.sort(key=lambda item: order.get(item["id"], 0))
+    return out
 
 
 def _too_thin(text: str) -> bool:
@@ -2822,7 +3037,7 @@ def _finish_vector_gate(con: sqlite3.Connection, source_id: str, lane: str) -> s
         if current not in busy:
             con.execute(
                 "UPDATE sources SET status=?, last_error=? WHERE id=?",
-                (ST_PARSED, "向量还在补，蒸馏先走", source_id),
+                (ST_PARSED, "向量还在补，萃取先走", source_id),
             )
         return ST_PARSED
     _set_pipeline(con, source_id, "向量", "fail")
@@ -2969,7 +3184,7 @@ def ensure_pending_vectors() -> int:
                         ).fetchone()
                         record_run(
                             con,
-                            "蒸馏",
+                            "萃取",
                             "跳过",
                             _source_subject(label),
                             "去掉标记后没有文字，不调用模型",
@@ -3058,16 +3273,24 @@ def migrate_source_statuses(con: sqlite3.Connection) -> None:
     con.execute("UPDATE sources SET status=? WHERE status='向量未就绪'", (ST_VEC_FAIL,))
     con.execute("UPDATE sources SET status=? WHERE status='覆盖完成'", (ST_CRYSTAL,))
     con.execute("UPDATE sources SET status=? WHERE status='队列中'", (ST_VEC_READY,))
-    con.execute(
-        f"""UPDATE sources SET status=? WHERE status='已蒸馏'
-            AND id IN (SELECT source_id FROM statements WHERE source_id IS NOT NULL)""",
-        (ST_CRYSTAL,),
-    )
-    con.execute(
-        f"""UPDATE sources SET status=? WHERE status='已蒸馏'
-            AND id NOT IN (SELECT source_id FROM statements WHERE source_id IS NOT NULL)""",
-        (ST_NO_CRYSTAL,),
-    )
+    # 「蒸馏」在界面上已统一叫「萃取」。老库里存的还是旧字，先按旧字改一遍，
+    # 再走下面的规范词。旧字只在这条迁移里出现。
+    con.execute("UPDATE sources SET status=? WHERE status='已向量化待蒸馏'", (ST_VEC_READY,))
+    con.execute("UPDATE sources SET status=? WHERE status='蒸馏中'", (ST_DISTILLING,))
+    con.execute("UPDATE sources SET status=? WHERE status='蒸馏已结晶'", (ST_CRYSTAL,))
+    con.execute("UPDATE sources SET status=? WHERE status='蒸馏无结晶'", (ST_NO_CRYSTAL,))
+    con.execute("UPDATE sources SET status=? WHERE status='蒸馏失败'", (ST_DISTILL_FAIL,))
+    for legacy in ("已蒸馏", "已萃取"):
+        con.execute(
+            f"""UPDATE sources SET status=? WHERE status=?
+                AND id IN (SELECT source_id FROM statements WHERE source_id IS NOT NULL)""",
+            (ST_CRYSTAL, legacy),
+        )
+        con.execute(
+            f"""UPDATE sources SET status=? WHERE status=?
+                AND id NOT IN (SELECT source_id FROM statements WHERE source_id IS NOT NULL)""",
+            (ST_NO_CRYSTAL, legacy),
+        )
     con.execute(
         f"""UPDATE sources SET status=? WHERE kind='file' AND status='已解析'
             AND id NOT IN (SELECT source_id FROM queue WHERE state!='done')
@@ -3078,6 +3301,11 @@ def migrate_source_statuses(con: sqlite3.Connection) -> None:
         rewritten = _rewrite_pipeline_stages(row["pipeline"] or "")
         if rewritten != (row["pipeline"] or ""):
             con.execute("UPDATE sources SET pipeline=? WHERE id=?", (rewritten, row["id"]))
+    # 运行日志的工作名、修订作者，以及暂停告警里的旧文案，一并换到新词。
+    con.execute("UPDATE run_log SET kind='萃取' WHERE kind='蒸馏'")
+    con.execute("UPDATE revisions SET actor='萃取' WHERE actor='蒸馏'")
+    con.execute("UPDATE queue SET last_error=? WHERE last_error='没有配置蒸馏模型'", (MISSING_DISTILL_MODEL,))
+    con.execute("UPDATE alerts SET message=? WHERE message='没有配置蒸馏模型'", (MISSING_DISTILL_MODEL,))
     _settle_run_log(con)
 
 
@@ -3450,6 +3678,10 @@ def lease_next() -> dict | None:
     now = utcnow()
     with LOCK:
         con = db()
+        if distill_paused():
+            # 操作员按了暂停：一个单位都不锁。队列与租约原样留着，抬起开关就从这里继续，
+            # 不是重新开始。放在最前面，暂停时连告警/闸门都不用判。
+            return None
         if con.execute(
             """SELECT 1 FROM alerts WHERE open=1 AND (
                  message LIKE '外部模型鉴权失败%' OR message=? OR message=?
@@ -3632,7 +3864,7 @@ def _pump_leased(qid: int, source_id: str, source) -> str | None:
                 db().execute("UPDATE sources SET last_error=NULL WHERE id=?", (source_id,))
                 record_run(
                     db(),
-                    "蒸馏",
+                    "萃取",
                     "无结晶",
                     _source_subject(source),
                     "没有写出结晶",
@@ -3659,7 +3891,10 @@ def _pump_leased(qid: int, source_id: str, source) -> str | None:
             # A call that never came back is not a verdict. It stays on the line
             # and yields, instead of being retired until the next morning.
             incomplete = isinstance(exc, ModelCallFailed)
-            state = "queued" if incomplete or attempts < 5 else "failed"
+            # 有上限：被截断 / 没返回的调用也要封顶；否则坏材料（例如单页输出超额）
+            # 会永远重排队，绕过 attempts 上限在队列里反复烧 token。
+            cap = 8 if incomplete else 5
+            state = "queued" if attempts < cap else "failed"
             wait = _after(min(300, 15 * (2 ** (attempts - 1))))
             for member_qid in _member_qids(qid):
                 db().execute(
@@ -3676,7 +3911,7 @@ def _pump_leased(qid: int, source_id: str, source) -> str | None:
             stage = _failed_stage_name(db(), source_id)
             record_run(
                 db(),
-                "蒸馏",
+                "萃取",
                 "失败" if state == "failed" else "将重试",
                 _source_subject(source),
                 str(exc)[:200],
@@ -3714,7 +3949,7 @@ def _call_not_taken(exc: BaseException) -> bool:
     return isinstance(exc, ProviderRefused)
 
 
-MISSING_DISTILL_MODEL = "没有配置蒸馏模型"
+MISSING_DISTILL_MODEL = "没有配置萃取模型"
 MISSING_PROVIDER_KEY = "供应商密钥还没填"
 DEFAULT_MINIMAX_ID = "minimax-cn"
 DEFAULT_MINIMAX_BASE = "https://api.minimax.cn/v1"
@@ -3735,8 +3970,8 @@ SILICONFLOW_DEFAULT_EMBED = "BAAI/bge-m3"
 MODEL_KIND_CHAT = "chat"
 MODEL_KIND_EMBED = "embed"
 _MODEL_KINDS = {MODEL_KIND_CHAT, MODEL_KIND_EMBED}
-_ASSIGN_KEYS = ("model_distill", "model_merge", "model_embed")
-_CHAT_ASSIGN_KEYS = ("model_distill", "model_merge")
+_ASSIGN_KEYS = ("model_distill", "model_page", "model_sketch", "model_proper", "model_merge", "model_embed")
+_CHAT_ASSIGN_KEYS = ("model_distill", "model_page", "model_sketch", "model_proper", "model_merge")
 _LAND_MISREAD = "integrate/land failed; refuse silent accept"
 
 
@@ -4473,9 +4708,11 @@ def _complete_sheet(items: list[dict]) -> list[dict]:
     return sheets
 
 
-# MiniMax-M3.1 上下文约 100 万。max_tokens 含思考，官方输出上限是 524288。
+# MiniMax-M3.1 上下文约 100 万，max_tokens 含思考。文档写 524288，但真机实测的有效输出上限
+# 是 262144：cost.sqlite 里并页 17 次、草稿 6 次的 output_tokens 恰好停在 262144，从无一次
+# 超过（2026-11-19 取证）。写成真上限，护栏里的「额度」才不骗人。
 # 不在这里再切一刀，否则正文会在半句停住。
-MINIMAX_MAX_COMPLETION = 524288
+MINIMAX_MAX_COMPLETION = 262144
 
 
 def _chat_max_tokens(base: str, model: str) -> int:
@@ -4485,16 +4722,13 @@ def _chat_max_tokens(base: str, model: str) -> int:
     return 4096
 
 
-# 一次并页的答案就是一页，额度按一页给，不按模型的绝对上限给。max_tokens 也要付思考的账，
-# 把它交到 524288 时，重并页会把十万到廿六万 token 花在思考上，回来的只剩开头一截——
-# 2026-11-17 那批 JSON 解析错就是这些调用。真实库里 95% 的并页答案在 5.5 万以内，最大的
-# 非退化答案 95823，页面本身最大 66250 字。131072 在这之上，在退化带之下。
-MERGE_MAX_COMPLETION = 131072
-
-
+# 并页要交回的是一整页，而 max_tokens 里还要付思考的账：这个模型一次并页的思考常是正文的
+# 数倍。把并页单独压在 131072（当时按「页面最大 66250 字」估的）之后，草稿自己交得出
+# 十几到二十几万 token 的页，并页却永远写不下它，于是每次都以「length」收场、无限重试。
+# 并页与草稿本就是同一个模型、同一个档位，额度也该是同一个上限；小模型自身的上限仍不被抬高。
 def _merge_max_tokens(base: str, model: str) -> int:
-    """并页的额度：一页能有多大。不超过模型自己的上限。"""
-    return min(_chat_max_tokens(base, model), MERGE_MAX_COMPLETION)
+    """并页的额度与草稿一致：就是模型自己的输出上限。"""
+    return _chat_max_tokens(base, model)
 
 
 def _distill_system(kind: str) -> str:
@@ -4502,7 +4736,7 @@ def _distill_system(kind: str) -> str:
     return distill_system(kind)
 
 
-@charging("初始蒸馏")
+@charging("草稿")
 def _llm_extract(text: str, kind: str = "") -> dict:
     target = llm_target("distill")
     if not target:
@@ -4527,7 +4761,7 @@ def _llm_extract(text: str, kind: str = "") -> dict:
         content, reason = _complete_chat(base, key, payload, role="distill")
     if not content:
         raise RuntimeError(f"模型没有给出正文（{reason or '空'}）")
-    data = _parse_model_json(content)
+    data = _model_json(content, reason)
     for item in data.get("items") or []:
         quote = item.get("quote") or ""
         value = item.get("value") or ""
@@ -4824,7 +5058,38 @@ def _read_completion(resp, limit: int = 64 << 20) -> str:
     return b"".join(parts).decode("utf-8", "replace")
 
 
-def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = None, role: str = "") -> tuple[str, str]:
+def _record_reply_shape(shape: dict, raw: dict, answer: str, finish: str) -> None:
+    """How much of one reply was thinking and how much was the page.
+
+    MiniMax counts reasoning tokens inside the same output ceiling, so when a reply stops
+    for room the split is the whole question: too little room for thinking looks identical
+    to too little room for the page.
+    """
+    message = {}
+    try:
+        choices = raw.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message") or {}
+    except (AttributeError, TypeError):
+        message = {}
+    shape["content_chars"] = len(answer or "")
+    shape["reasoning_chars"] = len(str(message.get("reasoning_content") or ""))
+    shape["finish"] = finish
+    usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+    details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+    if isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+        shape["reasoning_tokens"] = details.get("reasoning_tokens")
+
+
+def _complete_chat(
+    base: str,
+    key: str,
+    payload: dict,
+    *,
+    timeout: int | None = None,
+    role: str = "",
+    shape: dict | None = None,
+) -> tuple[str, str]:
     outbound = dict(payload)
     if role and "minimax" in f"{base} {payload.get('model') or ''}".lower():
         outbound.update(thinking_request(str(payload.get("model") or ""), reasoning_level(role)))
@@ -4867,6 +5132,8 @@ def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = 
     if streamed or streamed_reason:
         answer = re.sub(r"<think>[\s\S]*?</think>", "", streamed, flags=re.I).strip() or streamed
         _meter_chat(base, str(payload.get("model") or ""), messages, answer, raw, role)
+        if isinstance(shape, dict):
+            _record_reply_shape(shape, raw, answer, streamed_reason)
         return answer, streamed_reason
     # A 200 can still carry a MiniMax fault in base_resp.status_code / error.code.
     code = _vendor_code(raw)
@@ -4880,7 +5147,10 @@ def _complete_chat(base: str, key: str, payload: dict, *, timeout: int | None = 
     message = choices[0].get("message") or {}
     answer = _message_answer(message)
     _meter_chat(base, str(payload.get("model") or ""), messages, answer, raw, role)
-    return answer, str(choices[0].get("finish_reason") or "")
+    finish = str(choices[0].get("finish_reason") or "")
+    if isinstance(shape, dict):
+        _record_reply_shape(shape, raw, answer, finish)
+    return answer, finish
 
 
 def _message_answer(message: dict) -> str:
@@ -4900,21 +5170,50 @@ def _message_answer(message: dict) -> str:
 
 
 def _parse_model_json(content: str) -> dict:
+    """Read one JSON reply from a model.
+
+    ``strict=False`` is deliberate. A model that writes a long page or a long fact
+    list routinely puts a raw newline (or other control character) inside a string
+    value instead of escaping it. RFC-strict parsing calls that "Invalid control
+    character at line N column M" and drops the whole reply — which, for a 200k-char
+    page, throws away a call that was otherwise complete and hands the unit back to
+    the queue for an identical retry. Tolerating control characters inside strings
+    accepts exactly the idiom the model actually uses. Everything else stays strict:
+    a truncated reply still raises (``Unterminated string``/``Expecting ...``), so a
+    page that stopped for room is still refused and retried, never written half-done.
+    """
     text = (content or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
     try:
-        data = json.loads(text)
+        data = json.loads(text, strict=False)
     except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
             raise
-        data = json.loads(text[start : end + 1])
+        data = json.loads(text[start : end + 1], strict=False)
     if not isinstance(data, dict):
         raise ValueError("模型没有返回对象")
     return data
+
+
+def _require_finished(reason: str) -> None:
+    """A reply that stopped for room (``finish=length``) is not a result.
+
+    One place answers this, so no parser path can accept the part the model reached
+    as if it were the whole answer. A truncated reply still parses often enough —
+    markdown pages especially — that the check cannot live inside any one parser.
+    """
+    if reason == "length":
+        raise ModelCallFailed("模型因额度用尽没有写完（finish=length），不当作结果")
+
+
+def _model_json(content: str, reason: str) -> dict:
+    """Read a model JSON reply, refusing one the model never finished."""
+    _require_finished(reason)
+    return _parse_model_json(content)
 
 
 def checklist(ctype: str, owner: bool = False) -> list[tuple[str, str]]:
@@ -6014,6 +6313,67 @@ def _is_a_pack(item) -> bool:
     return all(key in item for key in ("id", "type", "name", "aliases", "summary", "body_md", "facts"))
 
 
+# 正文超过这个字数才做段级注入（否则整篇注入，行为与旧版一致）。
+SECTION_INJECT_LIMIT = 6000
+# 段级注入时，未命中段的「只给目录」容器标题（不是可改小节）。
+SECTION_OUTLINE_HEADING = "其余小节（只给目录）"
+# 其余小节摘要的长度（给模型判断"要不要并进这段"）。
+SECTION_OUTLINE_GIST_CHARS = 60
+# 整篇重写上限：保留"整篇重排"这一既有能力，但输出不得超过旧正文的 FACTOR 倍 + SLACK，
+# 超了才降级为段级（防"一页 32k 被写成 426k"的输出爆炸）。不许一刀切禁掉该能力。
+FULL_REWRITE_FACTOR = 1.5
+FULL_REWRITE_SLACK = 2000
+
+
+def _outline_line(heading: str, block: str) -> str:
+    """其余小节给一行「标题：短摘要」，别只给标题——否则模型看不到别段内容会漏并。"""
+    text = block or ""
+    if text.startswith("## "):
+        _, _, text = text.partition("\n")
+    gist = " ".join(text.split())[:SECTION_OUTLINE_GIST_CHARS]
+    return f"- {heading}：{gist}" if gist else f"- {heading}"
+
+
+def _sectioned_pack(pack: dict, terms: str) -> dict:
+    """正文过长时只注入命中段 + 其余段目录（带短摘要）；路由不到就退回整篇。
+
+    规则路由（词面等价），确定性、可回溯；不改 facts，只改注入用的 body_md。
+    """
+    body = str(pack.get("body_md") or "")
+    if len(body) <= SECTION_INJECT_LIMIT:
+        return pack
+    from rogmem.section_index import (
+        heading_matches,
+        load_body_term_sets,
+        pick_sections,
+        split_sections,
+    )
+
+    sections = split_sections(body)
+    # 正文摘要词已随索引落档；对得上就直接用（省去逐段分词），对不上才现算。
+    body_sets = None
+    try:
+        body_sets = load_body_term_sets(db(), str(pack.get("id") or ""), sections)
+    except Exception:
+        body_sets = None
+    picked = pick_sections(terms, sections, body_sets=body_sets)
+    if not picked:
+        return pack
+    # 标题命中的段也强制注入：不让"模型想改的段恰恰没被注入"发生（那会被下游护栏挡掉）。
+    routed = {heading for heading, _ in picked} | {
+        heading for heading, _ in heading_matches(terms, sections)
+    }
+    parts = [block for heading, block in sections if heading == "" or heading in routed]
+    outline = [_outline_line(heading, block) for heading, block in sections if heading and heading not in routed]
+    reduced = dict(pack)
+    text = "\n\n".join(part.strip() for part in parts if part and part.strip()).strip()
+    if outline:
+        text = (text + f"\n\n## {SECTION_OUTLINE_HEADING}\n\n" + "\n".join(outline)).strip()
+    reduced["body_md"] = text
+    reduced["body_injection"] = "sectioned"
+    return reduced
+
+
 def _complete_integrate_mid(
     text: str,
     kind: str = "",
@@ -6039,7 +6399,17 @@ def _complete_integrate_mid(
         "owner_aliases": owner_aliases,
     }
     packs = [_full_library_pack(item) for item in hits] if hits else library_candidates
-    return _llm_integrate(text, kind, library_candidates=packs, **common)
+    if isinstance(packs, list):
+        packs = [_sectioned_pack(item, text) for item in packs if isinstance(item, dict)]
+    raw = _llm_integrate(text, kind, library_candidates=packs, **common)
+    if isinstance(raw, dict) and any(
+        isinstance(item, dict) and str(item.get("body_injection") or "") == "sectioned"
+        for item in (packs or [])
+    ):
+        # 只有真做了段级注入才带下落库范围；整篇注入没有范围限制，不带（护栏本就不该拦）。
+        raw = dict(raw)
+        raw[_SECTION_SCOPE] = [item for item in packs if isinstance(item, dict)]
+    return raw
 
 
 def _library_for_match() -> list[dict]:
@@ -6210,7 +6580,7 @@ def _owner_brief_for_distill() -> str:
     return (crystal.body_md or "").strip()
 
 
-@charging("初始蒸馏")
+@charging("草稿")
 def _llm_draft(
     text: str,
     kind: str = "",
@@ -6280,10 +6650,11 @@ def _llm_draft(
         content, reason = _complete_chat(base, key, payload, role="distill")
     if not content:
         raise RuntimeError(f"模型没有给出正文（{reason or '空'}）")
+    _require_finished(reason)
     pages = parse_pages(content)
     if pages:
         return {"markdown_pages": pages}
-    return _parse_model_json(content)
+    return _model_json(content, reason)
 
 
 def _match0_new_raw() -> dict:
@@ -6371,7 +6742,7 @@ def _llm_integrate(
     """
     if not _valid_integrate_user_parts(draft_crystal, library_candidates):
         return None
-    target = llm_target("distill")
+    target = llm_target("page")
     if not target:
         return None
     from rogmem.distill_resim import approved_integrate_prompts, fill_integrate_user
@@ -6399,13 +6770,13 @@ def _llm_integrate(
             {"role": "user", "content": user},
         ],
     }
-    content, reason = _complete_chat(base, key, payload, role="distill")
+    content, reason = _complete_chat(base, key, payload, role="page")
     if not content and reason == "length":
         payload["max_tokens"] = max(int(payload["max_tokens"]), _chat_max_tokens(base, model))
-        content, reason = _complete_chat(base, key, payload, role="distill")
+        content, reason = _complete_chat(base, key, payload, role="page")
     if not content:
         raise RuntimeError(f"模型没有给出正文（{reason or '空'}）")
-    return _parse_model_json(content)
+    return _model_json(content, reason)
 
 
 def _produce_integrate(raw) -> dict:
@@ -6420,6 +6791,11 @@ _DRAFT_SIDECAR = "_draft_crystal"
 _INTEGRATE_BATCH = "_integrate_batch"
 _INTEGRATE_CALL_FAIL = "_integrate_call_failed"
 _LIBRARY_SIDECAR = "_library_candidates"
+# 段级注入时，把「本次真正给模型看过的小节候选」随 payload 带下落库那一步。
+# 落库入口只拿到 matched id，段级 pack 原本到不了 _filter_ops_to_injected_sections，
+# 护栏因此从未跑过（crystal_events 里 full_body_write_sectioned / gate_drop 一直为 0），
+# 模型可以改自己没看过的小节。带上它，护栏才按"实际看过的小节"生效。
+_SECTION_SCOPE = "_injected_scope"
 _BA_PROMOTED = "_ba_promoted"
 _BA_PROMOTE_FAIL = "_ba_promote_failed"
 _BA_PROMOTE_CODE = "_ba_promote_code"
@@ -6460,6 +6836,15 @@ def _peel_draft_sidecar(raw):
     if not isinstance(sidecar, dict) or not sidecar:
         return cleaned, None
     return cleaned, sidecar
+
+
+def _peel_section_scope(raw):
+    """Pull the 段级注入范围 off the stamped payload before evaluate."""
+    if not isinstance(raw, dict) or _SECTION_SCOPE not in raw:
+        return raw, None
+    cleaned = dict(raw)
+    scope = cleaned.pop(_SECTION_SCOPE, None)
+    return cleaned, (scope if isinstance(scope, list) and scope else None)
 
 
 def _peel_ba_sidecars(raw):
@@ -7020,7 +7405,7 @@ def _produce_distill_payload(text: str, kind: str = "", **integrate_kw) -> dict:
         if isinstance(produced, dict):
             produced = dict(produced)
             if isinstance(raw, dict):
-                for key in (_BA_PROMOTED, _BA_PROMOTE_FAIL, _BA_PROMOTE_CODE, _LIBRARY_SIDECAR):
+                for key in (_BA_PROMOTED, _BA_PROMOTE_FAIL, _BA_PROMOTE_CODE, _LIBRARY_SIDECAR, _SECTION_SCOPE):
                     if key in raw:
                         produced[key] = raw[key]
             if isinstance(draft, dict) and draft:
@@ -7233,6 +7618,85 @@ def _write_ops_sidecar(con, crystal_id: str, ops: list[dict], *, holder: str | N
             )
 
 
+def _injected_section_headings(packed: dict) -> set[str] | None:
+    """段级注入时，本次真正注入（可改）的小节标题；整篇注入返回 None（不限制）。"""
+    if str(packed.get("body_injection") or "").strip() != "sectioned":
+        return None
+    from rogmem.section_index import split_sections
+
+    headings = {heading for heading, _ in split_sections(str(packed.get("body_md") or "")) if heading}
+    headings.discard(SECTION_OUTLINE_HEADING)
+    return headings or None
+
+
+def _gate_drop(store, target_id: str, op: dict, reason: str, **extra) -> None:
+    """记一条被护栏丢弃的 op，供观测。store 不在就静默。"""
+    if store is None:
+        return
+    try:
+        store.record_event(
+            target_id,
+            "gate_drop",
+            {"op": str(op.get("op") or ""), "path": str(op.get("path") or ""), "why": reason, **extra},
+        )
+    except Exception:
+        pass
+
+
+def _filter_ops_to_injected_sections(ops, candidates, target_id: str, existing_body: str, store) -> list[dict]:
+    """丢弃段级注入下「模型没读过就改」的 ops。
+
+    段级注入只把命中段给了模型；模型对没读过的既有小节发 body_md## ops，属于看不全就改，
+    是新的漂移口子。新增小节（旧正文里本来没有）不受限。
+
+    整篇 body_md 重写保留既有能力（整篇注入下本就无限制），只守长度上限，防「一页 32k
+    被写成 426k」的输出爆炸。段级注入下这条路径风险最高——模型没读全仍会整篇重写，
+    所以给它记一条事件，让它在指标里可见，而不是悄悄发生。
+    """
+    packed = None
+    for item in candidates or []:
+        if isinstance(item, dict) and str(item.get("id") or "") == str(target_id or ""):
+            packed = item
+            break
+    if packed is None:
+        return ops
+    allowed = _injected_section_headings(packed)
+    if allowed is None:
+        return ops
+    from rogmem.section_index import split_sections
+
+    existing = {heading for heading, _ in split_sections(existing_body or "") if heading}
+    kept: list[dict] = []
+    for op in ops:
+        path = str(op.get("path") or "").strip()
+        if path == "body_md":
+            value = str(op.get("value") or "")
+            cap = int(FULL_REWRITE_FACTOR * max(len(existing_body or ""), 1)) + FULL_REWRITE_SLACK
+            if len(value) > cap:
+                _gate_drop(store, target_id, op, "full_body_write_over_cap", len=len(value), cap=cap)
+                continue
+            if store is not None:
+                try:
+                    store.record_event(
+                        target_id, "full_body_write_sectioned",
+                        {"len": len(value), "cap": cap, "injected": len(allowed)},
+                    )
+                except Exception:
+                    pass
+            kept.append(op)
+            continue
+        if path.startswith("body_md##"):
+            heading = path[9:].strip()
+            # 「其余小节」是本次注入的目录容器，不是真小节，绝不为它落 op；此外，对
+            # 未注入的既有小节的 op 也丢弃（新增小节不受限）。
+            outline = heading == SECTION_OUTLINE_HEADING
+            if outline or (heading in existing and heading not in allowed):
+                _gate_drop(store, target_id, op, "outline_heading" if outline else "section_not_injected")
+                continue
+        kept.append(op)
+    return kept
+
+
 def apply_integrate(
     raw,
     *,
@@ -7263,6 +7727,7 @@ def apply_integrate(
 
     eval_raw, sidecar_draft = _peel_draft_sidecar(raw)
     eval_raw, promoted, lib_hits, promote_fail = _peel_ba_sidecars(eval_raw)
+    eval_raw, section_scope = _peel_section_scope(eval_raw)
     draft = draft_crystal if isinstance(draft_crystal, dict) and draft_crystal else sidecar_draft
     if promote_fail:
         from rogmem.distill_gate import GateResult
@@ -7419,6 +7884,9 @@ def apply_integrate(
                 result.issues = list(result.issues or []) + core_issues
                 return result
         ops = _filter_restricted_agent_ops(apply_con, ops, use_holder)
+        # 段级注入的范围随 payload 带到这里；没有它（整篇注入）就退回 candidates，护栏不拦。
+        scope = section_scope if section_scope is not None else candidates
+        ops = _filter_ops_to_injected_sections(ops, scope, target_id, existing_body, target_store)
         injected = store is not None and getattr(store, "con", None) is not apply_con
 
         def sidecar() -> None:
@@ -7696,6 +8164,47 @@ def _keep_unnamed_relations(page: str, explanation: str, *sources: str, hang_unm
 _H2_LINE = re.compile(r"^## (?!#)(.*)$")
 _NOTE_DEF_LINE = re.compile(r"^\[\^[^\]]+\][:：]")
 _WORD_CHAR = re.compile(r"[^\W_]", re.UNICODE)
+# 病态长页才做结构折收；正常页一字不动。
+PAGE_FOLD_MIN_CHARS = 60_000
+# 太短的重复行不判为「无效重复」：可能是分隔、示例或表格行。
+PAGE_FOLD_MIN_PARA_CHARS = 12
+_PAGE_HEAD_LINE = re.compile(r"^#{2,6}\s+\S")
+
+
+def _fold_repeated_page(text: str) -> str:
+    """把病态长页里重复的标题行与整段一字不差的内容收成一份。
+
+    长页的模型回复会陷入把同一个小节反复重写的循环：真机上出现过一页 87 万字、同一个
+    ``### 其他持续事项`` 出现 32 次、358 个段落整段重复。页因此大到任何一次整页回复都写不下，
+    并页永远交不回，只能反复烧额度。这里只收「整行标题同名」和「整段一字不差」两种重复，
+    保留首次出现的位置与原文；短行、注释定义、只有标记的行都不动。正常长度的页直接原样返回。
+    """
+    raw = text or ""
+    if len(raw) <= PAGE_FOLD_MIN_CHARS:
+        return raw
+    out: list[str] = []
+    seen_heads: set[str] = set()
+    seen_paras: set[str] = set()
+    for block in re.split(r"\n\s*\n", raw.strip()):
+        block = block.strip()
+        if not block:
+            continue
+        lines = [line.rstrip() for line in block.split("\n")]
+        if lines and _PAGE_HEAD_LINE.match(lines[0].strip()):
+            head = lines[0].strip()
+            if head in seen_heads:
+                lines = lines[1:]
+            else:
+                seen_heads.add(head)
+        para = "\n".join(lines).strip()
+        if not para:
+            continue
+        if len(para) >= PAGE_FOLD_MIN_PARA_CHARS and para in seen_paras:
+            continue
+        seen_paras.add(para)
+        out.append(para)
+    folded = "\n\n".join(out).strip()
+    return folded or raw
 
 
 def _is_note_definition(line: str) -> bool:
@@ -7859,7 +8368,7 @@ def _assemble_page(sections: list[tuple[str, list[str]]], notes: dict[str, str])
     return text
 
 
-def _shape_merged_page(old: str, new: str) -> str:
+def _shape_merged_page(old: str, new: str, *, keep_missing: bool = False) -> str:
     """The model's page is the page. The old wording is not kept beside it.
 
     This used to paste back every paragraph the model left out, so a page that had
@@ -7868,6 +8377,10 @@ def _shape_merged_page(old: str, new: str) -> str:
     the call. What a merge replaced stays readable in `revisions`, which stores the whole
     page before and after each change, so the guard no longer decides which wording is
     current by pasting the old one next to the new.
+
+    ``keep_missing`` is for a page too big to write in one reply: there the model is asked
+    for the changed sections only, so a section it did not return means "unchanged" and
+    stays exactly as stored — not "removed".
 
     What is still the program's job: old headings keep their order, a heading the old page
     did not have keeps its place as an insertion, and note definitions and lines that are
@@ -7905,7 +8418,11 @@ def _shape_merged_page(old: str, new: str) -> str:
     ordered: list[tuple[str, list[str]]] = []
     ordered.extend(insert_after.get(sentinel, []))
     for title in old_keys:
-        ordered.append((title, list(new_map.get(title, []))))
+        paras = new_map.get(title)
+        if paras is None and keep_missing:
+            # 超页这次只交回改动的小节：没交回的小节按字节留着，不是"删掉"。
+            paras = old_map.get(title, [])
+        ordered.append((title, list(paras or [])))
         ordered.extend(insert_after.get(title, []))
     bound, used = _bind_paragraph_notes(ordered, old, new)
     # A reply that carried no usable paragraph leaves the page as it was. Returning an
@@ -7983,6 +8500,24 @@ def _parse_page_merge(raw: str) -> dict:
     }
 
 
+# 并页要把整页交回，而模型单次回复有硬上限（MINIMAX_MAX_COMPLETION）。已有页加新材料超过
+# 这个规模时，整页回复必然被截断成 finish=length，护栏拒收、回队列重试，同一页永远写不回、
+# 只烧额度。超页时改问「只交回改动/新增的小节」，未交回的小节按字节保留，回复规模只与新
+# 改动相当——页再大也落得下。40 万字符按中文约 2.2 字符/token 折合约 18 万 token，仍留足
+# 思考额度，正常页一律走原路。
+MERGE_SINGLE_CALL_CHARS = 400_000
+MERGE_PARTIAL_NOTE = (
+    "本次已有这一页很长，一次写不下。只交回你改动过或新增的小节：每个小节用「## 标题」起头，"
+    "后面写这一小节修订后的完整正文；没有改动的小节不要重复，程序会按原样保留。"
+    "若判定不是同一个主体，仍按原要求交回新主体自己的正文。"
+)
+
+
+def _merge_needs_partial(old: str, new: str) -> bool:
+    """一次整页并页写不下时，改问「只交回改动的小节」。"""
+    return len(old or "") + len(new or "") > MERGE_SINGLE_CALL_CHARS
+
+
 @charging("并页")
 def _merge_existing_page(
     old: str,
@@ -7992,11 +8527,12 @@ def _merge_existing_page(
     page_event_at: str = "",
     page_name: str = "",
     page_type: str = "",
+    partial: bool = False,
 ) -> tuple[str, list[dict], str, str, bool, str, str]:
     """Ask whether this is the same subject. A different subject comes back as its own page."""
     from rogmem.prompts import merge_user
 
-    target = llm_target("distill")
+    target = llm_target("page")
     if not target or not (old or "").strip():
         return new, [], "", "", False, "", ""
     _base, key, _model = target
@@ -8009,37 +8545,45 @@ def _merge_existing_page(
         clock_basis or _source_column(source, "event_basis"),
     )
     base, key, model = target
+    user = merge_user(
+        old,
+        new,
+        material or "",
+        event_at=shown_event,
+        ingested_at=_source_column(source, "ingested_at"),
+        event_basis=shown_basis,
+        page_event_at=page_event_at,
+        page_name=page_name,
+        page_type=page_type,
+        owner_appellation=_stored_owner_appellation(),
+        agent_name=_source_column(source, "agent_name"),
+        session_id=_source_column(source, "session_id"),
+    )
+    if partial:
+        user = MERGE_PARTIAL_NOTE + "\n" + user
     payload = {
         "model": model,
         "max_tokens": _merge_max_tokens(base, model),
         "messages": [
             {"role": "system", "content": INTEGRATE_PAGE_SYSTEM},
-            {
-                "role": "user",
-                "content": merge_user(
-                    old,
-                    new,
-                    material or "",
-                    event_at=shown_event,
-                    ingested_at=_source_column(source, "ingested_at"),
-                    event_basis=shown_basis,
-                    page_event_at=page_event_at,
-                    page_name=page_name,
-                    page_type=page_type,
-                    owner_appellation=_stored_owner_appellation(),
-                    agent_name=_source_column(source, "agent_name"),
-                    session_id=_source_column(source, "session_id"),
-                ),
-            },
+            {"role": "user", "content": user},
         ],
     }
-    content, reason = _complete_chat(base, key, payload, role="distill")
+    shape: dict = {}
+    content, reason = _complete_chat(base, key, payload, role="page", shape=shape)
     if reason == "length":
         # A reply that stopped for room is not a page. Writing it would drop whatever it
         # never reached, and the guard no longer pastes the missing paragraphs back. The
         # room above is already the page's own room, so there is no fuller room to try:
         # hand the unit back to the queue, which runs this merge again.
-        raise ModelCallFailed("并页没有写完这一页")
+        # 记下这一笔额度被思考吃掉了多少，否则"思考挤满"与"页面太大"看起来一模一样。
+        raise ModelCallFailed(
+            "并页没有写完这一页（思考 {} 字 / 正文 {} 字 / 额度 {}）".format(
+                shape.get("reasoning_chars", "?"),
+                shape.get("content_chars", "?"),
+                payload["max_tokens"],
+            )
+        )
     parsed = _parse_page_merge(content or "")
     page = parsed["page"]
     conflicts = parsed["conflicts"]
@@ -8056,7 +8600,7 @@ def _merge_existing_page(
         return old, conflicts, "", gist, False, "", ""
     if not page:
         raise RuntimeError("并页没有交回修订")
-    page = _shape_merged_page(old, page)
+    page = _shape_merged_page(old, page, keep_missing=partial)
     kept_old = page.strip() == (old or "").strip()
     sources = (old,) if kept_old else (old, new)
     proposed = parsed["name"] if parsed["same"] == "是" else ""
@@ -8221,30 +8765,72 @@ def sketch_char_limit() -> int:
     return SKETCH_CHAR_LIMIT_DEFAULT
 
 
-def _fit_sketch(text: str, limit: int | None = None) -> str:
-    """Keep a sketch inside the configured length, ending on a paragraph when one fits."""
-    body = (text or "").strip()
-    ceiling = limit if isinstance(limit, int) and limit > 0 else sketch_char_limit()
-    if len(body) <= ceiling:
-        return body
-    clipped = body[:ceiling]
-    for sep in ("\n\n", "\n", "。"):
-        at = clipped.rfind(sep)
-        if at >= int(ceiling * 0.6):
-            return clipped[: at + (1 if sep == "。" else 0)].strip()
-    return clipped.strip()
+SKETCH_MAX_TOKENS_RETRY = 16384
+# 低于这个字数就不是一份可用的速写（实测有 5 字符的退化产出落库过）。它只用来挡退化，
+# 不抬高正常速写——正常速写中位数在 800 字上下。
+SKETCH_MIN_CHARS = 40
+# 速写不可用时最多留待办重试几轮，超限才判失败并落 run_log（避免无限重试烧额度）。
+SKETCH_TRY_LIMIT = 3
+# 超上限的速写改写几次；改写仍压不到上限就保留完整原文，绝不剪尾（半截不是速写）。
+SKETCH_COMPRESS_TRIES = 2
+
+
+def _compress_sketch(text: str, base: str, key: str, model: str, *, limit: int) -> str:
+    """Second pass: an over-length sketch is rewritten inside the ceiling, not clipped.
+
+    压缩稿自己也是模型写的；它没写完（finish=length）就不是压缩稿，返回空，
+    让调用方保留上一份完整原文，绝不拿半截顶替。
+    """
+    from rogmem.prompts import sketch_compress_system
+
+    payload = {
+        "model": model,
+        "max_tokens": _chat_max_tokens(base, model),
+        "messages": [
+            {"role": "system", "content": sketch_compress_system(limit=limit)},
+            {"role": "user", "content": text},
+        ],
+    }
+    try:
+        content, reason = _complete_chat(base, key, payload, role="sketch")
+    except Exception:
+        return ""
+    if reason == "length":
+        return ""
+    return (content or "").strip()
+
+
+def _fit_or_compress(text: str, base: str, key: str, model: str, *, limit: int) -> str:
+    """Bring a sketch toward the ceiling by rewriting it, never by cutting it.
+
+    Over the ceiling the sketch is rewritten (bounded tries), each rewrite kept only
+    when it is actually shorter. Whatever comes back is a whole sketch: a rewrite that
+    cannot reach the ceiling keeps its complete text rather than losing its tail.
+    Half a sketch is not a sketch — that is the "内容不全" we must never ship, and the
+    手改路径（save_crystal_markdown）本来就把超上限的速写按原样存下，这里与它一致。
+    """
+    best = (text or "").strip()
+    if not best or len(best) <= limit:
+        return best
+    for _ in range(SKETCH_COMPRESS_TRIES):
+        compressed = _compress_sketch(best, base, key, model, limit=limit)
+        if compressed and len(compressed) < len(best):
+            best = compressed
+        if len(best) <= limit:
+            break
+    return best
 
 
 @charging("速写")
 def _ask_sketch(body: str, ctype: str, *, owner: bool) -> str:
-    """Model call only. Does not touch the database. Sketch uses the distill model."""
-    target = llm_target("distill")
+    """Model call only. Does not touch the database. Without its own model it follows 草稿."""
+    target = llm_target("sketch")
     if not target or not str(target[1] or "").strip() or not (body or "").strip():
         return ""
     from rogmem.prompts import sketch_system
 
     limit = sketch_char_limit()
-    role = "distill"
+    role = "sketch"
     base, key, model = target
     payload = {
         "model": model,
@@ -8256,14 +8842,34 @@ def _ask_sketch(body: str, ctype: str, *, owner: bool) -> str:
     }
     try:
         content, reason = _complete_chat(base, key, payload, role=role)
-        if reason == "length":
-            payload["max_tokens"] = max(int(payload["max_tokens"]), _chat_max_tokens(base, model))
-            content, _reason = _complete_chat(base, key, payload, role=role)
     except ModelCallFailed:
         raise
     except Exception:
         return ""
-    return _fit_sketch((content or "").strip())
+    if reason == "length":
+        # 没写完的回复不是速写：额度还抬得动就再要一次；抬不动或再要的仍没写完，
+        # 就当作这次不可用（返回空，交上层留待办重试）——绝不把半截当速写落库。
+        raised = max(int(payload["max_tokens"]), _chat_max_tokens(base, model), SKETCH_MAX_TOKENS_RETRY)
+        again_payload = dict(payload, max_tokens=raised) if raised > int(payload["max_tokens"]) else payload
+        try:
+            again, again_reason = _complete_chat(base, key, again_payload, role=role)
+        except Exception:
+            again, again_reason = "", reason
+        content = again if (again and again_reason != "length") else ""
+    text = _fit_or_compress((content or "").strip(), base, key, model, limit=limit)
+    if len(text) >= SKETCH_MIN_CHARS or len((body or "").strip()) < SKETCH_MIN_CHARS:
+        return text
+    # 退化的速写（空/极短）：再要一次；仍不行就返回空，交上层判失败——不静默落库。
+    try:
+        retry, retry_reason = _complete_chat(
+            base, key, dict(payload, max_tokens=max(int(payload["max_tokens"]), SKETCH_MAX_TOKENS_RETRY)), role=role
+        )
+    except Exception:
+        retry, retry_reason = "", ""
+    if retry_reason == "length":
+        retry = ""
+    text = _fit_or_compress((retry or "").strip(), base, key, model, limit=limit)
+    return text if len(text) >= SKETCH_MIN_CHARS else ""
 
 
 def _drop_pending(con, source_id: str, crystal_id: str) -> None:
@@ -8288,6 +8894,45 @@ def _drop_pending(con, source_id: str, crystal_id: str) -> None:
     )
 
 
+def _retry_or_drop_sketch(con, source_id: str, crystal_id: str) -> None:
+    """Sketch unusable. Keep the checkpoint for a bounded retry; past the limit, record it and drop.
+
+    The old path dropped the checkpoint silently, so a page could sit forever with no sketch and
+    no trace. Now the miss is counted (run_log, step=速写) and retried a few passes first.
+    """
+    name = crystal_id
+    tries = 0
+    data: dict = {}
+    row = con.execute("SELECT filename, stage_json FROM sources WHERE id=?", (source_id,)).fetchone()
+    if row is not None:
+        name = row["filename"] or crystal_id
+        if row["stage_json"]:
+            try:
+                loaded = json.loads(row["stage_json"])
+            except json.JSONDecodeError:
+                loaded = None
+            if isinstance(loaded, dict):
+                data = loaded
+                tries = int(data.get("sketch_tries") or 0)
+    tries += 1
+    data["sketch_tries"] = tries
+    con.execute(
+        "UPDATE sources SET stage_json=? WHERE id=?", (json.dumps(data, ensure_ascii=False), source_id)
+    )
+    if tries < SKETCH_TRY_LIMIT:
+        record_run(
+            con, "萃取", "将重试", name,
+            f"速写产出不可用（空或过短），第 {tries} 次，留在待办",
+            step="速写", ref_kind="crystal", ref_id=crystal_id,
+        )
+        return
+    record_run(
+        con, "萃取", "失败", name, "速写产出不可用（空或过短），已重试到上限",
+        step="速写", ref_kind="crystal", ref_id=crystal_id,
+    )
+    _drop_pending(con, source_id, crystal_id)
+
+
 def _write_sketch(crystal_id: str, *, source_id: str = "") -> None:
     """Read the page, ask for a sketch, then write it with the checkpoint in one commit."""
     with LOCK:
@@ -8304,8 +8949,10 @@ def _write_sketch(crystal_id: str, *, source_id: str = "") -> None:
     text = _ask_sketch(body, ctype, owner=owner)
     with LOCK:
         if not text:
+            # 速写不可用：不再静默丢掉——先留待办重试几轮，超限才判失败并记 run_log，
+            # 让「这一页没有速写」这件事在稳定性指标里看得见，而不是无声消失。
             if source_id:
-                _drop_pending(db(), source_id, crystal_id)
+                _retry_or_drop_sketch(db(), source_id, crystal_id)
                 db().commit()
             return
         fresh_row = db().execute("SELECT * FROM crystallizations WHERE id=?", (crystal_id,)).fetchone()
@@ -8545,6 +9192,11 @@ def _merge_one_page(source, page: dict, prior: dict) -> None:
     """One merge call. The caller stores the page before the next call."""
     material = _cited_material(source)
     bound = _bind_source_cites(page["body"], source["id"], material or "")
+    folded = _fold_repeated_page(bound)
+    if folded != bound:
+        # 病态长草稿在交给并页之前先折收，否则整页重写永远写不完（见 _fold_repeated_page）。
+        page["folded_chars"] = int(page.get("folded_chars") or 0) + (len(bound) - len(folded))
+        bound = folded
     old = prior["old"]
     if not old or old == bound.strip():
         page["body"] = bound
@@ -8554,6 +9206,7 @@ def _merge_one_page(source, page: dict, prior: dict) -> None:
         if prior["id"] and not page.get("separate"):
             page["id"] = prior["id"]
         return
+    partial = _merge_needs_partial(old, bound)
     try:
         _touch_lease(source["id"])
         merged, conflicts, note, gist, separate, new_name, new_type = _merge_existing_page(
@@ -8564,12 +9217,14 @@ def _merge_one_page(source, page: dict, prior: dict) -> None:
             prior["at"],
             page_name=prior["name"],
             page_type=prior["type"],
+            partial=partial,
         )
     except ModelCallFailed as exc:
         mark_pipeline(source["id"], "并页", "fail")
         _note_stage_error(source["id"], exc)
         raise
     page["body"] = merged
+    page["merge_partial"] = partial
     page["conflicts"] = conflicts
     page["merge_note"] = note
     page["gist"] = gist
@@ -8613,6 +9268,10 @@ def _deliver_page(source, catalog: list[dict], page: dict) -> None:
     A draft is not delivered. This runs only after that page's merge has settled.
     """
     cleaned = _drop_unbacked_marks(page.get("body") or "")
+    folded = _fold_repeated_page(cleaned)
+    if folded != cleaned:
+        page["folded_chars"] = int(page.get("folded_chars") or 0) + (len(cleaned) - len(folded))
+        cleaned = folded
     if not str(page.get("name") or "").strip() or not cleaned:
         raise RuntimeError("模型没有交出页面")
     page["body"] = cleaned
@@ -8705,6 +9364,18 @@ def _deliver_page(source, catalog: list[dict], page: dict) -> None:
                 if body_changed:
                     crystal.body_md = incoming
                 CrystalStore(con).put(crystal, holder=holder, commit=False)
+                if page.get("merge_partial"):
+                    CrystalStore(con).record_event(
+                        crystal.id,
+                        "merge_partial",
+                        {"before": len(before or ""), "after": len(incoming or "")},
+                    )
+                if page.get("folded_chars"):
+                    CrystalStore(con).record_event(
+                        crystal.id,
+                        "page_folded",
+                        {"dropped_chars": int(page["folded_chars"]), "after": len(incoming or "")},
+                    )
                 parts: list[str] = []
                 judged = ""
                 title_line = ""
@@ -8746,7 +9417,7 @@ def _deliver_page(source, catalog: list[dict], page: dict) -> None:
                     source["id"],
                     "",
                     clock_at or (source["event_at"] or ""),
-                    actor=who or "蒸馏",
+                    actor=who or "萃取",
                     change=change,
                     basis=basis,
                     snapshot=incoming if body_changed else "",
@@ -9173,10 +9844,10 @@ def _ask_model(role: str, system: str, user: str) -> dict:
     content, reason = _complete_chat(base, key, payload, role=role)
     if not content and reason == "length":
         payload["max_tokens"] = _chat_max_tokens(base, model)
-        content, _reason = _complete_chat(base, key, payload, role=role)
+        content, reason = _complete_chat(base, key, payload, role=role)
     if not content:
         raise RuntimeError("这一问没有给出正文")
-    return _parse_model_json(content)
+    return _model_json(content, reason)
 
 
 def _ask_same_entity(name_a: str, name_b: str, anchors: list, extra: str) -> str:
@@ -9698,7 +10369,7 @@ def _describe_text_change(before: str, after: str, *, label: str = "正文") -> 
 
 
 def _who_and_basis(con, source_id: str, quote: str = "") -> tuple[str, str]:
-    """蒸馏 is the writer. The basis is the material it was given."""
+    """萃取 is the writer. The basis is the material it was given."""
     if not source_id:
         return "", ""
     row = con.execute(
@@ -9706,7 +10377,7 @@ def _who_and_basis(con, source_id: str, quote: str = "") -> tuple[str, str]:
         (source_id,),
     ).fetchone()
     if row is None:
-        return "蒸馏", "来源已不在库里。"
+        return "萃取", "来源已不在库里。"
     kind = row["kind"] or ""
     if kind == "file":
         name = (row["filename"] or "").strip() or "未命名文件"
@@ -9723,7 +10394,7 @@ def _who_and_basis(con, source_id: str, quote: str = "") -> tuple[str, str]:
     passage = (quote or "").strip()
     if passage:
         basis = basis + "：「" + passage + "」"
-    return "蒸馏", basis
+    return "萃取", basis
 
 
 def _passage_texts(body: str) -> list[str]:
@@ -11383,7 +12054,7 @@ def _engineering_identity(source, page: dict) -> str:
 
 @charging("专名核对")
 def _proper_name_ok(name: str, ctype: str, quote: str) -> bool:
-    target = llm_target("distill")
+    target = llm_target("proper")
     if not target:
         return False
     base, key, model = target
@@ -11396,8 +12067,8 @@ def _proper_name_ok(name: str, ctype: str, quote: str) -> bool:
         ],
     }
     try:
-        content, _reason = _complete_chat(base, key, payload, role="distill")
-        data = _parse_model_json(content)
+        content, reason = _complete_chat(base, key, payload, role="proper")
+        data = _model_json(content, reason)
     except Exception:
         return False
     return data.get("answer") == "是"
@@ -11669,6 +12340,9 @@ def _page_bounds(page: int, total: int, page_size: int = PAGE_SIZE) -> tuple[int
 _SHOWN_DEVICE = "COALESCE(NULLIF(a.device_name, ''), s.device_name)"
 _SHOWN_AGENT = "COALESCE(NULLIF(a.display_name, ''), s.agent_name)"
 _NAMED_SOURCES = "sources s LEFT JOIN agents a ON a.id = s.agent_id"
+# 列表与探测共用这一条排序。并列的时间戳也有确定的先后，翻页不重不漏，
+# 「最新一条」两边也永远指同一行——否则同刻入库会让列表刚画好就误报有新内容。
+_SOURCES_ORDER = "s.ingested_at DESC, s.id DESC"
 
 
 def _source_page(columns: str, ids: list[str]) -> list:
@@ -11685,18 +12359,17 @@ def _source_page(columns: str, ids: list[str]) -> list:
     return [by_id[item] for item in ids if item in by_id]
 
 
-def list_sources(
-    tab: str = "session",
+def _sources_where(
+    tab: str,
     query: str = "",
     kind: str = "",
     device: str = "",
     agent: str = "",
     project: str = "",
-    status: str = "",
     session: str = "",
     turn: str = "",
-    page: int = 1,
-) -> dict:
+) -> tuple[str, list[str]]:
+    """The list's own filter clause. A probe reads it too, so the two never disagree."""
     where = ["s.kind='file'" if tab == "file" else "s.kind!='file'"]
     args: list[str] = []
     if kind:
@@ -11720,7 +12393,23 @@ def list_sources(
     if query:
         where.append("(s.body LIKE ? OR IFNULL(s.filename,'') LIKE ? OR s.id LIKE ?)")
         args.extend([f"%{query}%", f"%{query}%", f"%{query}%"])
-    joined = f"FROM {_NAMED_SOURCES} WHERE {' AND '.join(where)}"
+    return " AND ".join(where), args
+
+
+def list_sources(
+    tab: str = "session",
+    query: str = "",
+    kind: str = "",
+    device: str = "",
+    agent: str = "",
+    project: str = "",
+    status: str = "",
+    session: str = "",
+    turn: str = "",
+    page: int = 1,
+) -> dict:
+    clause, args = _sources_where(tab, query, kind, device, agent, project, session, turn)
+    joined = f"FROM {_NAMED_SOURCES} WHERE {clause}"
     # Session rows hover the whole body. File rows show a filename, so a missing name only needs a short stand-in.
     held = "s.body" if tab != "file" else "substr(s.body,1,80)"
     columns = (
@@ -11730,7 +12419,7 @@ def list_sources(
     )
     if status:
         narrow = db().execute(
-            f"SELECT s.id AS id, IFNULL(s.pipeline,'') AS pipeline, IFNULL(s.status,'') AS status {joined} ORDER BY s.ingested_at DESC",
+            f"SELECT s.id AS id, IFNULL(s.pipeline,'') AS pipeline, IFNULL(s.status,'') AS status {joined} ORDER BY {_SOURCES_ORDER}",
             args,
         ).fetchall()
         ids = [row["id"] for row in narrow if source_progress_matches(row["pipeline"], row["status"], status)]
@@ -11744,7 +12433,7 @@ def list_sources(
         chosen = [
             row["id"]
             for row in db().execute(
-                f"SELECT s.id AS id {joined} ORDER BY s.ingested_at DESC LIMIT ? OFFSET ?",
+                f"SELECT s.id AS id {joined} ORDER BY {_SOURCES_ORDER} LIMIT ? OFFSET ?",
                 [*args, LIST_PAGE, offset],
             ).fetchall()
         ]
@@ -11755,7 +12444,39 @@ def list_sources(
         item["status_label"] = display_status(item["kind"], item["status"])
         item["note"] = list_note(item)
         out.append(item)
+    counts = _child_vector_counts([item["id"] for item in out]) if tab == "file" else {}
+    for item in out:
+        vec_done, vec_total = counts.get(item["id"], (0, 0))
+        item["progress"] = source_stage_note(item.get("pipeline") or "", item.get("status") or "", done=vec_done, total=vec_total)
+        item["active"] = source_is_active(item.get("pipeline") or "", item.get("status") or "")
     return {"rows": out, "total": total, "page": current, "pages": pages, "page_size": LIST_PAGE}
+
+
+def source_latest_probe(
+    tab: str = "session",
+    query: str = "",
+    kind: str = "",
+    device: str = "",
+    agent: str = "",
+    project: str = "",
+    session: str = "",
+    turn: str = "",
+) -> dict:
+    """The top of the list, read cheaply, so a drawn page can tell if anything landed.
+
+    Takes the list's own filters, so a row it would hide can never raise the flag. The
+    newest row comes off ``sources_ingested`` and no body is read — the count is the only
+    scan. ``marker`` is empty when the filtered list is empty.
+    """
+    clause, args = _sources_where(tab, query, kind, device, agent, project, session, turn)
+    joined = f"FROM {_NAMED_SOURCES} WHERE {clause}"
+    top = db().execute(
+        f"SELECT s.id AS id, s.ingested_at AS ingested_at {joined} ORDER BY {_SOURCES_ORDER} LIMIT 1",
+        args,
+    ).fetchone()
+    total = int(db().execute(f"SELECT COUNT(*) AS n {joined}", args).fetchone()["n"])
+    marker = f"{top['ingested_at']}|{top['id']}" if top else ""
+    return {"marker": marker, "total": total}
 
 
 def list_note(row: dict) -> str:
@@ -11951,7 +12672,7 @@ def source_detail(source_id: str) -> dict | None:
     source["_fate"] = _source_fate(
         row["body"] or "",
         statements,
-        row["status"] in {ST_CRYSTAL, ST_NO_CRYSTAL, "已蒸馏", "覆盖完成"},
+        row["status"] in {ST_CRYSTAL, ST_NO_CRYSTAL, "已蒸馏", "已萃取", "覆盖完成"},
     )
     source["_origin"] = resolve_source_origin(source_id)
     return {"source": source, "statements": statements, "mate": mate}
@@ -12055,6 +12776,8 @@ def record_questions(chunk_id: int, questions: list[str]) -> dict:
 # How long one user write waits for a connection that is not in this process.
 # In-process writers already take LOCK and commit before they release it.
 _WRITE_WAIT_MS = 20000
+# 数据库一时忙碌不是失败。写没落地时按这句话判断「值得再试一次」，读文件的一方也照它办。
+_BUSY_WRITE = "数据库正忙，请再试一次"
 
 
 def _discard_connection(con) -> None:
@@ -12101,7 +12824,7 @@ def _finish_write(con, write):
     except sqlite3.OperationalError as exc:
         _rollback_write(con)
         if getattr(exc, "sqlite_errorcode", None) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
-            return {"ok": False, "error": "数据库正忙，请再试一次"}
+            return {"ok": False, "error": _BUSY_WRITE}
         raise
     except BaseException:
         _rollback_write(con)
@@ -12751,10 +13474,9 @@ def save_crystal_markdown(cid: str, body: str, sketch: str | None = None, addres
     before_sketch = crystal.sketch_md or ""
     incoming = (body or "").replace("\r\n", "\n").strip()
     raw_sketch = None if sketch is None else str(sketch).replace("\r\n", "\n").strip()
-    if raw_sketch is None or raw_sketch == before_sketch.strip():
-        incoming_sketch = raw_sketch
-    else:
-        incoming_sketch = _fit_sketch(raw_sketch)
+    # 人写的速写按原样存：上限（sketch_char_limit）是写速写时的目标，不是剪人文字的许可。
+    # 系统生成的速写由 _ask_sketch 先改写靠近上限，同样不剪尾。
+    incoming_sketch = raw_sketch
     if (
         not address_change
         and incoming == before_body.strip()
@@ -14271,7 +14993,7 @@ def revisions(crystal_id: str, revision_id: int | None = None) -> list[dict]:
             item["actor"] = item.get("actor") or who
             item["basis"] = item.get("basis") or why
         if item.get("note") == "正文" and not (item.get("change") or "").strip():
-            item["actor"] = item.get("actor") or "蒸馏"
+            item["actor"] = item.get("actor") or "萃取"
             item["change"] = "这一笔只记下写过正文，没有留下改了哪些字。"
             item["basis"] = item.get("basis") or "没有记下是哪一份材料。"
         origin = resolve_source_origin(item.get("source_id") or "")
@@ -15936,9 +16658,20 @@ def _providers() -> list[dict]:
     return opened
 
 
+_ROLE_MODEL_KEYS = {
+    "distill": "model_distill",
+    "page": "model_page",
+    "sketch": "model_sketch",
+    "proper": "model_proper",
+    "merge": "model_merge",
+}
+# 这几个工人没被单独指派模型时，跟随「草稿」工人，和过去共用 distill 一致。
+_ROLE_FOLLOW_DRAFT = ("page", "sketch", "proper")
+
+
 def llm_target(role: str) -> tuple[str, str, str] | None:
-    key = {"distill": "model_distill", "merge": "model_merge"}.get(role)
-    assigned = get_setting(key or "")
+    key = _ROLE_MODEL_KEYS.get(role)
+    assigned = get_setting(key or "") if key else ""
     found: tuple[str, str, str] | None = None
     if assigned and "|" in assigned:
         ident, model = assigned.split("|", 1)
@@ -15950,6 +16683,8 @@ def llm_target(role: str) -> tuple[str, str, str] | None:
                 break
     if found and str(found[1]).strip():
         return found
+    if role in _ROLE_FOLLOW_DRAFT:
+        return llm_target("distill")
     if role == "distill":
         env_base = os.environ.get("ROGMEM_LLM_BASE", "").rstrip("/")
         env_key = os.environ.get("ROGMEM_LLM_KEY", "")
@@ -16217,6 +16952,8 @@ def probe_interval_seconds() -> float:
 # meters a rolling window is the operator's to know and ours to guess.
 GATE_JITTER = 0.1
 PROBE_INTERVAL_DEFAULT = 60
+# The operator's pause switch for the whole distill pipeline, set from 管线设置.
+DISTILL_PAUSE_KEY = "distill_paused"
 _THROTTLE_GATE_SECONDS = 60
 _QUOTA_GATE_STEPS = (300, 900, 1800, 3600, 7200, 18000)
 # A quota window that has just reopened is not proof the window has room: the probe is
@@ -16373,17 +17110,34 @@ def gate_next_probe(provider_id: str) -> float:
     The ladder decides how long the line stays off this provider. It must not decide how
     long until we look again: a quota window can come back at any minute, the check is one
     small call, and a gate that only looks once per rung turns a five-hour window into a
-    five-hour outage after the provider is already answering. So the next check is at most
-    one probe interval out, whatever rung the ladder reached. A record written before this
-    clock existed falls back to the deadline, which is what it did before.
+    five-hour outage after the provider is already answering.
+
+    The instant kept in the record is a cache, never an authority. gate_hold writes it as
+    probe_interval_seconds() past the hold, and that setting is operator-tunable: shorten
+    it afterwards and a record already carrying the old, longer instant would keep the look
+    frozen for hours — probing stops, and with it the provider's availability band goes
+    blank even though nothing is wrong. A record can also arrive from an older run whose
+    interval was longer, or with no probe clock at all. So the stored instant is capped at
+    one current interval past the provider's own last probe (health_unix, written on every
+    probe): "we look at least once per interval" then holds whatever the record says, and a
+    record left stale by a longer interval self-corrects to "due now" the moment one current
+    interval has passed since we last looked.
     """
     reading = gate_reading(provider_id)
     if reading["state"] != "cooling":
         return 0.0
     probe_at = float(reading.get("probe_unix") or 0.0)
     if probe_at <= 0:
-        return float(reading["until_unix"])
-    return probe_at
+        probe_at = float(reading["until_unix"])
+    last = 0.0
+    for item in _providers():
+        if item.get("id") == provider_id:
+            last = float(item.get("health_unix") or 0)
+            break
+    if last <= 0:
+        return probe_at
+    cap = last + probe_interval_seconds()
+    return cap if probe_at <= 0 else min(probe_at, cap)
 
 
 def gate_cooling(provider_id: str) -> bool:
@@ -16435,7 +17189,11 @@ def _gate_wait(seconds: float, jitter: float | None) -> float:
 
 
 def _release_leased_for_gate() -> int:
-    """Hand back this provider's leased rows at once, not after the 600s lease runs out."""
+    """把还没真正开跑的租约一次性交回队列（正在跑的那条不算），不等 600s 到期。
+
+    注意：粒度是「全部未开跑的租约」，不按供应商切分——闸门只会在命中萃取供应商时
+    调它，暂停开关也共用这一条。名字里的 gate 指「闸门/暂停」这个时机，不是范围。
+    """
     live = _live_lease_ids()
     skip = ""
     if live:
@@ -16769,7 +17527,7 @@ def assign_models(values: dict) -> dict:
     keys = [key for key in _ASSIGN_KEYS if key in (values or {})]
     incoming = {key: str(values.get(key) or "") for key in keys}
     # Empty POST / mistyped Content-Type yields {}. Must not wipe a working assignment
-    # and reopen「没有配置蒸馏模型」to stall the distill queue.
+    # and reopen「没有配置萃取模型」to stall the distill queue.
     if not keys and any(str(get_setting(key) or "") for key in _ASSIGN_KEYS):
         return {"ok": False, "error": "不能用空分配清掉已选模型"}
     for key, value in incoming.items():
@@ -16785,7 +17543,7 @@ def assign_models(values: dict) -> dict:
     with LOCK:
         for key, value in incoming.items():
             set_setting(key, value)
-        for role in ("distill", "merge"):
+        for role in ("distill", "page", "sketch", "proper", "merge"):
             flag = f"thinking_{role}"
             if flag not in values:
                 continue
@@ -16964,6 +17722,9 @@ def pipeline_config() -> dict:
         "reconcile_hours": get_setting("reconcile_hours") or "3",
         "sweep_at": get_setting("sweep_at") or "03:00",
         "thinking_distill": reasoning_level("distill"),
+        "thinking_page": reasoning_level("page"),
+        "thinking_sketch": reasoning_level("sketch"),
+        "thinking_proper": reasoning_level("proper"),
         "thinking_merge": reasoning_level("merge"),
         # The gate's own numbers. How a provider meters a rolling window is the
         # operator's to know, so none of these is only a constant in the code.
@@ -16972,6 +17733,7 @@ def pipeline_config() -> dict:
         "gate_probation_units": str(probation_units()),
         "gate_probation_seconds": str(int(probation_seconds())),
         "distill_concurrency": str(distill_concurrency()),
+        "distill_paused": "1" if distill_paused() else "",
     }
 
 
@@ -17004,8 +17766,15 @@ def _checked_pipeline_extras(values: dict) -> tuple[dict, str]:
     raw = str(values.get("distill_concurrency") or "").strip()
     if raw:
         if not raw.isdigit() or not 1 <= int(raw) <= 32:
-            return {}, "蒸馏并发要是 1 到 32"
+            return {}, "萃取并发要是 1 到 32"
         extra["distill_concurrency"] = raw
+    # The pause switch is a checkbox, and the form always sends true/false. A plain false
+    # must resume, so it is applied whenever the key is present; "blank means leave it"
+    # does not fit here.
+    if DISTILL_PAUSE_KEY in values:
+        raw = values.get(DISTILL_PAUSE_KEY)
+        paused = raw is True or str(raw).strip().lower() in {"1", "true", "on", "yes", "paused"}
+        extra[DISTILL_PAUSE_KEY] = "1" if paused else ""
     return extra, ""
 
 
@@ -17035,12 +17804,16 @@ def save_pipeline(values: dict) -> dict:
         set_setting("sweep_at", sweep_at)
         for key, value in extra.items():
             set_setting(key, value)
+        if extra.get(DISTILL_PAUSE_KEY) == "1":
+            # 暂停即刻生效：把还没真正开跑的租约交回队列，正在跑的那条不算（_live_lease_ids）。
+            # 队列顺序与已完成进度都不动，抬起开关就从原处继续。
+            _release_leased_for_gate()
         db().commit()
     _remember_liveness()
     return {"ok": True, "config": pipeline_config()}
 
 
-RUN_KINDS = ("告警", "蒸馏", "修订", "裁决", "词条整合", "清扫")
+RUN_KINDS = ("告警", "萃取", "修订", "裁决", "词条整合", "清扫")
 _LOG_LIMIT = 200
 
 
@@ -17099,7 +17872,7 @@ def record_run(
            VALUES(?,?,?,?,?,?,?,?,?)""",
         (
             utcnow(),
-            (kind or "蒸馏")[:20],
+            (kind or "萃取")[:20],
             (step or "")[:20],
             (outcome or "")[:40],
             (subject or "系统")[:160],
@@ -17118,7 +17891,7 @@ def _settle_run_log(con) -> None:
         return
     marks = ",".join("?" * len(RUN_KINDS))
     con.execute(
-        f"UPDATE run_log SET step=kind, kind='蒸馏' WHERE IFNULL(step,'')='' AND kind NOT IN ({marks})",
+        f"UPDATE run_log SET step=kind, kind='萃取' WHERE IFNULL(step,'')='' AND kind NOT IN ({marks})",
         RUN_KINDS,
     )
 
@@ -17269,7 +18042,7 @@ def _entries_from_runs() -> list[dict]:
         _log_entry(
             row["created_at"],
             row["id"],
-            row["kind"] or "蒸馏",
+            row["kind"] or "萃取",
             row["outcome"] or "",
             row["subject"] or "系统",
             row["summary"] or "",

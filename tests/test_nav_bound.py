@@ -26,7 +26,7 @@ def test_source_order_does_not_read_the_body(tmp_path, monkeypatch):
     body = "句" * 30
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('talk','user','2026-01-01T00:00:00+00:00','h',?,'已蒸馏','fast',1)""",
+           VALUES('talk','user','2026-01-01T00:00:00+00:00','h',?,'已萃取','fast',1)""",
         (body,),
     )
     engine.db().commit()
@@ -67,7 +67,7 @@ def test_queue_window_uses_the_stored_instant(tmp_path, monkeypatch):
     ancient = (now - timedelta(days=40)).isoformat()
     engine.db().executemany(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES(?,?,?,?,'字','已蒸馏','p1',1)""",
+           VALUES(?,?,?,?,'字','已萃取','p1',1)""",
         [("new", "file", inside, "n"), ("old", "file", ancient, "o")],
     )
     engine.db().executemany(
@@ -97,7 +97,7 @@ def test_chart_stops_at_the_window(tmp_path, monkeypatch):
     end = start + timedelta(hours=2)
     cost.record(
         at=(start - timedelta(days=40)).isoformat(),
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(1, 1, 0),
@@ -106,7 +106,7 @@ def test_chart_stops_at_the_window(tmp_path, monkeypatch):
     )
     cost.record(
         at=(start + timedelta(minutes=30)).isoformat(),
-        worker="初始蒸馏",
+        worker="草稿",
         provider_id="p",
         model="m",
         usage=(1, 1, 0),

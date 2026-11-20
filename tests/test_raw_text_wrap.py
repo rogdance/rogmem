@@ -36,7 +36,7 @@ def _row_with_body(body: str) -> dict:
         "kind": "file",
         "filename": "note.md",
         "body": body,
-        "status": "蒸馏已结晶",
+        "status": "萃取已结晶",
         "_part": "text",
         "_cited": [],
     }

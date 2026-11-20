@@ -43,7 +43,7 @@ def _source(engine, sid: str, kind: str, agent_id: str | None, device_name: str,
     engine.db().execute(
         """INSERT INTO sources(id,kind,agent_id,device_name,agent_name,ingested_at,content_hash,body,status,lane,pair_ready)
            VALUES(?,?,?,?,?,?,?,?,?,?,1)""",
-        (sid, kind, agent_id, device_name, agent_name, engine.utcnow(), sid, "正文", "已蒸馏", "fast"),
+        (sid, kind, agent_id, device_name, agent_name, engine.utcnow(), sid, "正文", "已萃取", "fast"),
     )
     engine.db().commit()
 

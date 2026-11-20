@@ -110,7 +110,7 @@ def _insert_source(
     engine.db().execute(
         """INSERT INTO sources(
              id,kind,turn_id,project_ref,event_at,ingested_at,content_hash,body,status,lane,pair_ready
-           ) VALUES(?,?,?,?,?,?,?,?, '已蒸馏','fast',1)""",
+           ) VALUES(?,?,?,?,?,?,?,?, '已萃取','fast',1)""",
         (sid, kind, turn_id or None, project_ref or None, event_at, event_at, f"hash-{sid}", body),
     )
     engine.db().commit()
@@ -211,7 +211,7 @@ def _apply_interest_op(engine, source, *, value: str, quote: str):
 
 
 def test_PROMPT_V54_02_prompts_marked_expired():
-    """旧蒸馏稿不再冻成现行契约，文首必须标明过期。"""
+    """旧萃取稿不再冻成现行契约，文首必须标明过期。"""
     root = Path(__file__).resolve().parents[1]
     draft = (root / "docs/prompts/wiki-distill-draft-prompt-v5.md").read_text(encoding="utf-8")
     current = (root / "docs/CURRENT.md").read_text(encoding="utf-8")
@@ -244,7 +244,7 @@ def test_V54_MK_01_material_kind_maps_and_fills_user(tmp_path, monkeypatch):
         seen[payload["messages"][1]["content"].split("材料类型：", 1)[-1][:2]] = payload["messages"][1]["content"]
         return json.dumps({"crystals": [{"name": "云岚甲", "type": "人物", "facts": [{"claim": "x", "evidence": "我喜欢爵士。"}]}]}), "stop"
 
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
     monkeypatch.setattr(engine, "_complete_chat", fake_complete)
     engine._llm_draft("我喜欢爵士。", "user", filename="a.md", owner_real_name="云岚甲", owner_aliases="甲")
     engine._llm_draft("我喜欢爵士。", "file", filename="a.md", owner_real_name="云岚甲", owner_aliases="甲")

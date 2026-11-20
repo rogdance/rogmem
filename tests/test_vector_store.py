@@ -163,7 +163,7 @@ def test_forget_drops_vectors_incrementally_without_a_sync_reload(tmp_path, monk
     token = "sk-abc_def9999zzzz"
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('forget','user',?,'f-h',?,'已蒸馏','fast',1)""",
+           VALUES('forget','user',?,'f-h',?,'已萃取','fast',1)""",
         (engine.utcnow(), f"请忘掉 {token}"),
     )
     cur = con.execute(

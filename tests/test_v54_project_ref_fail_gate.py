@@ -85,7 +85,7 @@ def _insert_source(
     engine.db().execute(
         """INSERT INTO sources(
              id,kind,turn_id,project_ref,event_at,ingested_at,content_hash,body,status,lane,pair_ready
-           ) VALUES(?,?,?,?,?,?,?,?, '已蒸馏','fast',1)""",
+           ) VALUES(?,?,?,?,?,?,?,?, '已萃取','fast',1)""",
         (sid, kind, None, project_ref or None, event_at, event_at, f"hash-{sid}", body),
     )
     engine.db().commit()
@@ -198,7 +198,7 @@ def test_V54_PREF_01_draft_injects_associated_project_line(tmp_path, monkeypatch
         seen["user"] = payload["messages"][1]["content"]
         return json.dumps({"crystals": [PROJECT_DRAFT]}, ensure_ascii=False), "stop"
 
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
     monkeypatch.setattr(engine, "_complete_chat", fake_complete)
     raw = engine._llm_draft(
         FOCUS_BODY,
@@ -259,7 +259,7 @@ def test_V54_PREF_03_integrate_aligns_existing_project(tmp_path, monkeypatch):
     def fake_complete(_base, _key, payload, **_kwargs):
         system = payload["messages"][0]["content"]
         user = payload["messages"][1]["content"]
-        if "蒸馏写作者" in system:
+        if "萃取写作者" in system:
             seen["draft"] = user
             return json.dumps({"crystals": [PROJECT_DRAFT]}, ensure_ascii=False), "stop"
         seen["integrate"] = user
@@ -280,7 +280,7 @@ def test_V54_PREF_03_integrate_aligns_existing_project(tmp_path, monkeypatch):
             ensure_ascii=False,
         ), "stop"
 
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role == "distill" else None)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
     monkeypatch.setattr(engine, "_complete_chat", fake_complete)
     inject = engine._prompt_injection(source)
     data = engine._produce_distill_payload(FOCUS_BODY, "user", **{**inject, **engine._match_integrate_parts(FOCUS_BODY)})

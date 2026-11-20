@@ -10,10 +10,10 @@
 | 默认 15000 字 | `rogmem/engine.py` 的 `CORE_BUDGET_DEFAULT`，基础设置页同一数字 |
 | 五类页 | `rogmem/pages_md.py` 的 `PAGE_TYPES` |
 | 管线阶段：解析、草稿、并页、速写 | `rogmem/progress.py` 的 `STAGES` |
-| 工人，以及模型沿用关系 | `rogmem/ui.py` 的 `pipeline_page` 列出工人；沿用关系在 `rogmem/engine.py` 的 `_judge_model` |
+| 工人，以及模型沿用关系 | `rogmem/ui.py` 的 `pipeline_page` 列出六个工人；沿用关系在 `rogmem/engine.py` 的 `llm_target` 与 `_judge_model` |
 | 说法对不上在并页里裁决 | `rogmem/prompts.py` 的 `INTEGRATE_PAGE_SYSTEM` |
 | 并页交回的正文直接落地 | `rogmem/engine.py` 并页落地后调用 `_write_sketch` |
-| 蒸馏前替换密钥模样的字符串 | `rogmem/engine.py` 的 `_llm_extract` |
+| 萃取前替换密钥模样的字符串 | `rogmem/engine.py` 的 `_llm_extract` |
 | 知识文件类型 | `rogmem/ui.py` 的 `FILE_TYPES` |
 | 相同内容只留一条 | `rogmem/engine.py` 的 `hash_dedup_enabled` |
 | 宿主名单 | `rogmem/engine.py` 的 `HOST_PROGRAMS` |

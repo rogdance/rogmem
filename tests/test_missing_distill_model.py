@@ -58,7 +58,7 @@ def test_missing_distill_model_pauses_before_land(tmp_path, monkeypatch):
     queued = engine_mod.db().execute(
         "SELECT state, attempts, last_error, next_at FROM queue WHERE source_id='src-no-model'"
     ).fetchone()
-    assert queued["last_error"] == "没有配置蒸馏模型"
+    assert queued["last_error"] == "没有配置萃取模型"
     assert "integrate/land" not in queued["last_error"]
     assert queued["attempts"] == 0
     assert queued["state"] == "queued"
@@ -67,7 +67,7 @@ def test_missing_distill_model_pauses_before_land(tmp_path, monkeypatch):
         "SELECT status, last_error FROM sources WHERE id='src-no-model'"
     ).fetchone()
     assert source["status"] == engine_mod.ST_DISTILL_FAIL
-    assert source["last_error"] == "没有配置蒸馏模型"
+    assert source["last_error"] == "没有配置萃取模型"
     assert engine_mod.lease_next() is None
     after = {
         row["id"]
@@ -108,7 +108,7 @@ def test_assigning_a_distill_model_releases_the_pause(tmp_path, monkeypatch):
     assert source["status"] == engine_mod.ST_VEC_READY
     assert source["last_error"] is None
     alert = engine_mod.db().execute(
-        "SELECT open FROM alerts WHERE message='没有配置蒸馏模型'"
+        "SELECT open FROM alerts WHERE message='没有配置萃取模型'"
     ).fetchone()
     assert alert is None or alert["open"] == 0
     wiped = engine_mod.assign_models({})

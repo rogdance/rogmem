@@ -74,7 +74,7 @@ def _insert_source(
     engine.db().execute(
         """INSERT INTO sources(
              id,kind,session_id,turn_id,event_at,ingested_at,content_hash,body,status,lane,pair_ready
-           ) VALUES(?,?,?,?,?,?,?,?,'已蒸馏','fast',1)""",
+           ) VALUES(?,?,?,?,?,?,?,?,'已萃取','fast',1)""",
         (sid, kind, session_id or None, turn_id or None, event_at, event_at, f"hash-{sid}", body),
     )
     engine.db().commit()

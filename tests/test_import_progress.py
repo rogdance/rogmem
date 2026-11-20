@@ -97,7 +97,8 @@ def test_a_received_file_comes_back_with_the_lamps(tmp_path, monkeypatch):
     imported = first.json()["imported"]
     assert len(imported) == 2
     assert all(item["ok"] for item in imported)
-    assert all(item["row_html"].startswith("<tr>") for item in imported)
+    assert all(item["row_html"].startswith("<tr") for item in imported)
+    assert all("data-source-id" in item["row_html"] for item in imported)
     assert all("class='flow'" in item["row_html"] for item in imported)
     assert all("lamp" in item["row_html"] for item in imported)
     assert "pace.txt" in imported[0]["row_html"]

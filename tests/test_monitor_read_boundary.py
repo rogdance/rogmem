@@ -42,7 +42,7 @@ def test_queue_page_reads_cards_for_one_page_only(tmp_path, monkeypatch):
         rows.append((sid, recent))
     con.executemany(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename,pipeline)
-           VALUES(?, 'file', ?, ?, '正文', '已向量化待蒸馏', 'p1', 1, ?, '解析:ok~向量:ok')""",
+           VALUES(?, 'file', ?, ?, '正文', '已向量化待萃取', 'p1', 1, ?, '解析:ok~向量:ok')""",
         [(sid, recent, sid, f"{sid}.md") for sid, recent in rows],
     )
     con.executemany(
@@ -80,7 +80,7 @@ def test_chart_fold_does_not_materialize_each_call(tmp_path, monkeypatch):
     for i in range(3):
         cost.record(
             at=(moment - timedelta(hours=i + 1)).isoformat(),
-            worker="初始蒸馏",
+            worker="草稿",
             provider_id="p",
             model="m",
             usage=(1_000_000, 0, 0),

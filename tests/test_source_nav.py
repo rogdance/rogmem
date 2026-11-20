@@ -30,10 +30,10 @@ def test_a_failed_stage_is_not_painted_green_by_the_next_one():
 def test_a_source_row_shows_the_stage_lamps():
     from rogmem.ui import flow_states
 
-    assert [state for _name, state in flow_states("并页:run", "蒸馏中")] == ["ok", "ok", "run", "wait"]
-    assert [state for _name, state in flow_states("润色:fail", "蒸馏失败")] == ["ok", "ok", "ok", "fail"]
-    assert [state for _name, state in flow_states("", "蒸馏已结晶")] == ["ok", "ok", "ok", "ok"]
-    assert [state for _name, state in flow_states("解析:ok,草稿:ok,并页:ok,润色:fail", "蒸馏失败")] == [
+    assert [state for _name, state in flow_states("并页:run", "萃取中")] == ["ok", "ok", "run", "wait"]
+    assert [state for _name, state in flow_states("润色:fail", "萃取失败")] == ["ok", "ok", "ok", "fail"]
+    assert [state for _name, state in flow_states("", "萃取已结晶")] == ["ok", "ok", "ok", "ok"]
+    assert [state for _name, state in flow_states("解析:ok,草稿:ok,并页:ok,润色:fail", "萃取失败")] == [
         "ok",
         "ok",
         "ok",
@@ -48,7 +48,7 @@ def test_a_source_row_shows_the_stage_lamps():
                 "filename": "简历.md",
                 "device_name": "",
                 "agent_name": "",
-                "status": "蒸馏中",
+                "status": "萃取中",
                 "pipeline": "并页:run",
                 "ingested_at": "",
                 "project_ref": "",
@@ -66,7 +66,7 @@ def test_a_source_row_shows_the_stage_lamps():
     assert "lamp-pop" in html
     from rogmem.ui import flow_html
 
-    branched = flow_html("解析:ok,草稿:run~向量:ok", "蒸馏中", "")
+    branched = flow_html("解析:ok,草稿:run~向量:ok", "萃取中", "")
     assert "class='branch'" in branched
     assert "aria-label='向量化：通过'" in branched
     assert "aria-label='草稿：进行中'" in branched
@@ -80,7 +80,7 @@ def test_an_old_stage_name_is_rewritten_on_open(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pipeline)
-           VALUES('old','file','2026-01-01T00:00:00+00:00','h','正文','蒸馏失败','fast','整合:fail')"""
+           VALUES('old','file','2026-01-01T00:00:00+00:00','h','正文','萃取失败','fast','整合:fail')"""
     )
     engine.db().commit()
     engine.migrate_source_statuses(engine.db())
@@ -89,7 +89,7 @@ def test_an_old_stage_name_is_rewritten_on_open(tmp_path, monkeypatch):
     assert stored == "并页:fail"
     kept = engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pipeline)
-           VALUES('kept','file','2026-01-01T00:00:00+00:00','h2','正文','蒸馏失败','fast','整合|解析:ok,整合:fail~向量:ok')"""
+           VALUES('kept','file','2026-01-01T00:00:00+00:00','h2','正文','萃取失败','fast','整合|解析:ok,整合:fail~向量:ok')"""
     )
     del kept
     engine.db().commit()
@@ -173,7 +173,7 @@ def test_file_detail_is_the_text_and_the_crystals_that_cite_it():
         "kind": "file",
         "filename": "note.md",
         "body": "# 标题\n第一句带格式。\n第二句还在。",
-        "status": "蒸馏已结晶",
+        "status": "萃取已结晶",
         "coverage": "partial",
         "_part": "text",
         "_cited": [
@@ -204,7 +204,7 @@ def test_a_material_lists_every_crystal_that_used_it(tmp_path, monkeypatch):
     engine = _open(tmp_path, monkeypatch)
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,filename)
-           VALUES('src-1','file','2026-11-06T00:00:00+00:00','h','他在南港写编辑器。','蒸馏已结晶','fast','note.md')"""
+           VALUES('src-1','file','2026-11-06T00:00:00+00:00','h','他在南港写编辑器。','萃取已结晶','fast','note.md')"""
     )
     engine._insert_crystal_page(engine.db(), "old", "组织", "南港书院", holder="test")
     engine._insert_crystal_page(engine.db(), "made", "人物", "云岚甲", holder="test")
@@ -377,12 +377,12 @@ def test_a_session_list_keeps_the_whole_body_and_a_file_list_does_not(tmp_path, 
     body = "句" * 120
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
-           VALUES('talk','user','2026-01-01T00:00:00+00:00','h',?,'已蒸馏','fast',1)""",
+           VALUES('talk','user','2026-01-01T00:00:00+00:00','h',?,'已萃取','fast',1)""",
         (body,),
     )
     engine.db().execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready,filename)
-           VALUES('doc','file','2026-01-02T00:00:00+00:00','h2',?,'已蒸馏','fast',1,'笔记.md')""",
+           VALUES('doc','file','2026-01-02T00:00:00+00:00','h2',?,'已萃取','fast',1,'笔记.md')""",
         ("字" * 120,),
     )
     engine.db().commit()

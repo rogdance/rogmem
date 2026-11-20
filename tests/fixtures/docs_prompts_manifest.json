@@ -2,15 +2,15 @@
   "root": "docs/prompts",
   "files": {
     "docs/prompts/README.md": {
-      "sha256": "cca1c56a2bcd3f12dfd2a65649bf643db8b62cf154ca2e43d82c1d52eec3bd8d",
+      "sha256": "69ed2423bc666efb8c82e86de776f975b69719e1fe4125d3c105feb9cd02321e",
       "size": 2959
     },
     "docs/prompts/wiki-distill-draft-prompt-v5.md": {
-      "sha256": "beea9c2c0dc1083ff8d828a3bcaca545301e8c15835280bc5f085886356b8e14",
+      "sha256": "72c52ab09309a968a8ef5a2c019630c5684356cae5a31d9fa637a09cdae6eae7",
       "size": 25182
     },
     "docs/prompts/wiki-integrate-adjudicate-prompt-v1.md": {
-      "sha256": "d8a78d9a37ff7f3cfe110cdb5078354520609eac2b29dcba6a921626314c0a79",
+      "sha256": "43aad08c265103a6d054d1eeaa108096461ead20e14907b1cd8c01f5a26762a9",
       "size": 29051
     }
   }

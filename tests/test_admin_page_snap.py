@@ -45,7 +45,7 @@ def test_operation_log_view_serves_existing_snap_without_refresh(monkeypatch):
             {
                 "at": "2099-01-01T00:00:00+00:00",
                 "id": "synth-1",
-                "kind": "蒸馏",
+                "kind": "萃取",
                 "outcome": "ok",
                 "subject": "合成主体甲",
                 "summary": "虚构条目仅供单测",

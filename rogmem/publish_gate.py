@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal
 
-DISTILLED = "蒸馏已结晶"
+DISTILLED = "萃取已结晶"
 COVERAGE_COMPLETE = "complete"
 SOURCE_STATES = {"partial", "complete"}
 
@@ -317,7 +317,7 @@ def coverage_state_for_source(con: Any, source_id: str, body: str) -> Literal["p
 
 def set_source_distill_state(con: Any, source_id: str, state: Literal["partial", "complete"]) -> None:
     if state not in SOURCE_STATES:
-        raise ValueError(f"非法蒸馏状态：{state}")
+        raise ValueError(f"非法萃取状态：{state}")
     con.execute(
         "UPDATE sources SET status=?, coverage=? WHERE id=?",
         (DISTILLED, state, source_id),

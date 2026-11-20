@@ -60,11 +60,11 @@ def test_operation_log_is_one_list_newest_first(tmp_path, monkeypatch):
     )
     con.execute(
         """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pipeline,filename)
-           VALUES('s','file','2026-01-01T00:00:00+00:00','h','正文','蒸馏失败','fast','润色:fail','甲.md')"""
+           VALUES('s','file','2026-01-01T00:00:00+00:00','h','正文','萃取失败','fast','润色:fail','甲.md')"""
     )
     engine.record_run(
         con,
-        "蒸馏",
+        "萃取",
         "失败",
         "甲.md",
         "模型没有返回",
@@ -76,13 +76,13 @@ def test_operation_log_is_one_list_newest_first(tmp_path, monkeypatch):
 
     log = engine.operation_log()
     assert log["selected"] == "全部"
-    assert log["kinds"] == ["告警", "蒸馏", "修订", "裁决", "词条整合", "清扫"]
-    assert log["entries"][0]["kind"] == "蒸馏"
+    assert log["kinds"] == ["告警", "萃取", "修订", "裁决", "词条整合", "清扫"]
+    assert log["entries"][0]["kind"] == "萃取"
     assert log["entries"][0]["step"] == "润色"
     assert log["entries"][0]["outcome"] == "失败"
     assert log["entries"][0]["href"] == "/admin/sources/s"
     order = [item["kind"] + ":" + (item.get("step") or "") + ":" + item["outcome"] for item in log["entries"]]
-    assert order.index("蒸馏:润色:失败") < order.index("裁决::可能同一实体")
+    assert order.index("萃取:润色:失败") < order.index("裁决::可能同一实体")
     assert order.index("裁决::可能同一实体") < order.index("清扫::完成")
     assert order.index("清扫::完成") < order.index("词条整合::完成")
     assert order.index("词条整合::完成") < order.index("裁决::无法说定")
@@ -102,10 +102,10 @@ def test_operation_log_is_one_list_newest_first(tmp_path, monkeypatch):
     assert same["subject"] == "云岚甲、云岚乙"
     assert "aa" not in same["subject"] and "bb" not in same["summary"]
 
-    distill = engine.operation_log("蒸馏")
-    assert distill["selected"] == "蒸馏"
+    distill = engine.operation_log("萃取")
+    assert distill["selected"] == "萃取"
     assert {item["step"] for item in distill["entries"]} == {"润色"}
-    assert {item["kind"] for item in distill["entries"]} == {"蒸馏"}
+    assert {item["kind"] for item in distill["entries"]} == {"萃取"}
     assert engine.operation_log("润色")["selected"] == "全部"
     assert engine.operation_log("不存在")["selected"] == "全部"
     con.execute(
@@ -115,8 +115,8 @@ def test_operation_log_is_one_list_newest_first(tmp_path, monkeypatch):
     con.commit()
     engine.migrate_source_statuses(con)
     con.commit()
-    settled = next(item for item in engine.operation_log("蒸馏")["entries"] if item["summary"] == "旧的一步")
-    assert settled["kind"] == "蒸馏" and settled["step"] == "润色"
+    settled = next(item for item in engine.operation_log("萃取")["entries"] if item["summary"] == "旧的一步")
+    assert settled["kind"] == "萃取" and settled["step"] == "润色"
     assert engine._failed_stage_name(engine.db(), "s") == "速写"
 
     page = logs_page(log["entries"], log["kinds"], log["selected"], "")
@@ -128,7 +128,7 @@ def test_operation_log_is_one_list_newest_first(tmp_path, monkeypatch):
     assert "结晶修订" not in page
     assert "<h2>告警</h2>" not in page
     assert ">全部<" in page and "class='on'" in page
-    assert "href='/admin/settings?kind=蒸馏'" in page
+    assert "href='/admin/settings?kind=萃取'" in page
     assert "href='/admin/settings?kind=词条整合'" in page
     assert "href='/admin/settings?kind=并页'" not in page
     assert "href='/admin/settings?kind=润色'" not in page
@@ -136,7 +136,7 @@ def test_operation_log_is_one_list_newest_first(tmp_path, monkeypatch):
     assert page.find("模型没有返回") < page.find("外部模型鉴权失败")
     assert "身份合并" not in page
     filtered = logs_page(distill["entries"], distill["kinds"], distill["selected"], "")
-    assert "class='on' href='/admin/settings?kind=蒸馏'" in filtered
+    assert "class='on' href='/admin/settings?kind=萃取'" in filtered
     assert "模型没有返回" in filtered
     assert "外部模型鉴权失败" not in filtered
 
@@ -150,7 +150,7 @@ def test_run_log_pages_fifty_with_the_shared_pager(tmp_path, monkeypatch):
                VALUES(?,?,?,?,?,?)""",
             (
                 f"2026-08-01T00:{index:02d}:00+00:00",
-                "蒸馏",
+                "萃取",
                 "润色",
                 "失败",
                 f"主体{index:02d}",
@@ -177,7 +177,7 @@ def test_run_log_pages_fifty_with_the_shared_pager(tmp_path, monkeypatch):
     assert foot.index("共 55 条") < foot.index("<form class='pager'")
     assert "aria-label='页码'" in foot and "page=2" in foot
     assert html.count("<tr>") == 21
-    narrowed = engine.operation_log_view("蒸馏", page=2)
+    narrowed = engine.operation_log_view("萃取", page=2)
     kept = logs_page(
         narrowed["entries"],
         narrowed["kinds"],
@@ -192,6 +192,6 @@ def test_run_log_pages_fifty_with_the_shared_pager(tmp_path, monkeypatch):
 
     kept_foot = kept.split("class='list-foot'", 1)[1].split("</form></div>", 1)[0]
     kept_query = parse_qs(urlparse(unescape(kept_foot.split("href='", 1)[1].split("'", 1)[0])).query)
-    assert kept_query["kind"] == ["蒸馏"]
+    assert kept_query["kind"] == ["萃取"]
     assert "page" not in kept_query
     assert "page=4" not in kept_foot

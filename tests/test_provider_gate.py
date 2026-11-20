@@ -205,7 +205,7 @@ def test_a_throttle_waits_without_spending_an_attempt(tmp_path, monkeypatch):
     assert queued["state"] == "queued"
     assert queued["attempts"] == 0
     assert queued["leased_until"] is None
-    assert source["status"] == "蒸馏中"
+    assert source["status"] == "萃取中"
     assert engine_mod.gate_cooling(provider) is True
 
 
@@ -237,7 +237,7 @@ def test_opening_the_gate_returns_leased_rows(tmp_path, monkeypatch):
         engine_mod.db().execute(
             """INSERT INTO sources(id,kind,ingested_at,content_hash,body,status,lane,pair_ready)
                VALUES(?,?,?,?,?,?,?,1)""",
-            (sid, "file", "2026-11-10T00:00:00+00:00", "h", "甲在南港。", "蒸馏中", "p3"),
+            (sid, "file", "2026-11-10T00:00:00+00:00", "h", "甲在南港。", "萃取中", "p3"),
         )
         engine_mod.db().execute(
             "INSERT INTO queue(source_id,lane,state,leased_until) VALUES(?,?, 'leased', ?)",
@@ -298,8 +298,8 @@ def test_the_ladder_does_not_delay_the_next_check(tmp_path, monkeypatch):
     assert engine_mod.gate_cooling(provider) is True
 
 
-# 9c — a record written before the probe clock existed still reads.
-def test_a_record_without_the_probe_clock_falls_back_to_the_deadline(tmp_path, monkeypatch):
+# 9c — a record without the probe clock is still capped to one interval, not the deadline.
+def test_a_record_without_the_probe_clock_is_capped_to_one_interval(tmp_path, monkeypatch):
     engine_mod = _open(tmp_path, monkeypatch)
     provider = _gate_provider(engine_mod)
     legacy = {"state": "cooling", "until_unix": time.time() + 18000, "level": 5, "reason": "quota_window", "code": "", "at": ""}
@@ -312,9 +312,58 @@ def test_a_record_without_the_probe_clock_falls_back_to_the_deadline(tmp_path, m
         "_probe_provider",
         lambda item: calls.append(item["id"]) or {"health": "ok", "health_detail": "正常", "remark": ""},
     )
-    assert engine_mod.gate_next_probe(provider) == pytest.approx(legacy["until_unix"], abs=1)
+    # 没有探活时钟也不再等 5 小时：下一个探活最多一个间隔。
+    assert engine_mod.gate_next_probe(provider) - time.time() == pytest.approx(300, abs=5)
     assert engine_mod.probe_providers_if_due() == 0
     assert calls == []
+
+
+# 9e — a probe clock baked from a longer interval must not freeze an overdue look.
+def test_a_probe_clock_from_a_longer_interval_does_not_freeze_the_look(tmp_path, monkeypatch):
+    engine_mod = _open(tmp_path, monkeypatch)
+    provider = _gate_provider(engine_mod)
+    # 距上次探活已超过一个当前间隔：本该到期了。
+    engine_mod._store_providers(
+        [
+            {
+                "id": provider,
+                "name": "闸门供应商",
+                "base_url": "https://gate.test/v1",
+                "api_key": "sk-test",
+                "models": ["m"],
+                "model_kinds": {"m": "chat"},
+                "health": "ok",
+                "health_unix": time.time() - 400,
+            }
+        ]
+    )
+    engine_mod.set_setting(
+        f"provider_gate:{provider}",
+        json.dumps(
+            {
+                "state": "cooling",
+                "until_unix": time.time() + 18000,
+                # 这枚时刻来自还没调小的探活间隔（曾把 interval 调成 6 小时省额度）。
+                "probe_unix": time.time() + 21600,
+                "level": 5,
+                "reason": "quota_window",
+                "code": "",
+                "at": "",
+            }
+        ),
+    )
+    engine_mod.db().commit()
+    monkeypatch.setattr(engine_mod, "probe_interval_seconds", lambda: 300.0)
+    calls = []
+    monkeypatch.setattr(
+        engine_mod,
+        "_probe_provider",
+        lambda item: calls.append(item["id"]) or {"health": "warn", "health_detail": "HTTP 429", "remark": "HTTP 429"},
+    )
+    # 探活间隔调回 300 后，过期的那次探活不再被 6 小时外的旧时刻压住。
+    assert engine_mod.gate_next_probe(provider) <= time.time()
+    assert engine_mod.probe_providers_if_due() == 1
+    assert calls == [provider]
 
 
 # 9d — the quota comes back mid-rung: the next check opens the gate at once.

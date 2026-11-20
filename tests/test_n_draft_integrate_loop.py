@@ -520,5 +520,5 @@ def test_n_loop_hard_gates_and_prompts_zero_diff():
     assert "_fail_integrate_call(" in enter_src
     draft_text = DRAFT_PROMPT_PATH.read_text(encoding="utf-8")
     integrate_text = INTEGRATE_PROMPT_PATH.read_text(encoding="utf-8")
-    assert "你是记忆库的蒸馏写作者" in draft_text
+    assert "你是记忆库的萃取写作者" in draft_text
     assert "你是记忆库的**整合裁决者**" in integrate_text

@@ -191,7 +191,7 @@ EVENT_TIME_PRINCIPLE = (
     "也不能把已经由更晚事件说定的当前态重新打开，提交时间和文件最后写入时间都不能代替事件时间。"
 )
 
-# 蒸馏和并页共用。并页的模型看不到蒸馏提示词，交卷时仍要按这份标准写成词条。
+# 萃取和并页共用。并页的模型看不到萃取提示词，交卷时仍要按这份标准写成词条。
 CRYSTAL_WRITE = """\
 怎么写。节名、写哪些、写多少，看着材料决定。对不上现成位置的，自己起一节。只留下名字、把其余事实留在原文里，这一页就是残的。谁的经历写在谁那一页。
 先让人知道这是谁、这是什么，再写材料里有的事实。语气像百科条目，不写成广告。材料里没有的不要编。日期、数字和专名保持材料里的样子。叙述可以用更好读的语言来组织，专名仍用原文。
@@ -230,7 +230,7 @@ CRYSTAL_WRITE = """\
 
 
 DISTILL_SYSTEM = """\
-你是记忆库的蒸馏写作者。程序把你交回的页面原样保存。
+你是记忆库的萃取写作者。程序把你交回的页面原样保存。
 
 任务：读懂这一份材料，为每一个值得单独成篇的主体各写一页。写每一页时，都站在没看过这份材料的人这一边：只读这一页，就要知道它描写的是谁、是什么。这不是在填一张空表，也不是把材料摘成碎片。
 
@@ -295,6 +295,16 @@ def distill_system(kind: str) -> str:
     return DISTILL_SYSTEM
 
 
+# 速写预算：首轮写作与压缩重写共用一个目标——留出收尾余量，宁可短，不要贴边。
+SKETCH_TARGET_NUM = 9
+SKETCH_TARGET_DEN = 10
+
+
+def sketch_target(limit: int) -> int:
+    """A sketch's working target, below the ceiling, so the ending is never the casualty."""
+    return max(1, limit * SKETCH_TARGET_NUM // SKETCH_TARGET_DEN)
+
+
 def sketch_system(ctype: str, *, owner: bool = False, limit: int) -> str:
     """One sketch bound to the page. The character ceiling comes from settings, not from this text."""
     if owner:
@@ -335,6 +345,12 @@ def sketch_system(ctype: str, *, owner: bool = False, limit: int) -> str:
             + "，不要把早先的并列进来把眼下冲淡。\n"
             "经过能用一句话带过就带过；还是放不下，就整段省掉。\n"
         )
+    closing = (
+        f"篇幅写在上限以内，但不要贴着上限写：按{sketch_target(ceiling)}字左右收，留出收尾的余量，宁可短，不要贴边。\n"
+        "动笔前先把要留下的事排一遍次序，排在最后的先删；写不下的旧经过先让位，不要为了写全把前面铺开、后面没地方收。\n"
+        "收尾要落在一句完整的话或一整个条目上，不要写到半句停住。\n"
+        "交卷前自己数一遍字数，超了就按上面的次序再压一遍，只交回完整、成句的正文。\n"
+    )
     return (
         "你在给这一页写结晶速写。\n\n"
         "读者是以后来协作的智能体。它每轮先看到这段，正文要另开才读得到。你只根据这一页已经写成的正文来写，不另编事实。\n\n"
@@ -342,7 +358,22 @@ def sketch_system(ctype: str, *, owner: bool = False, limit: int) -> str:
         + "\n\n"
         + budget
         + "上面的例子只是让人想起这一类，不是栏目。不按固定栏目，没有的就跳过，不要为了凑齐而编。\n\n"
-        f"篇幅写在{ceiling}字以内，可以写成一段或几段。用 Markdown 交回，不要交 JSON。"
+        + closing
+        + f"篇幅写在{ceiling}字以内，可以写成一段或几段。用 Markdown 交回，不要交 JSON。"
+    )
+
+
+def sketch_compress_system(*, limit: int) -> str:
+    """Second pass. The first sketch overran the ceiling, so it is rewritten inside it."""
+    if not isinstance(limit, int) or limit <= 0:
+        raise ValueError("速写字数上限要由设置传入")
+    keep = sketch_target(limit)
+    return (
+        "你刚为这一页写好的结晶速写超出了字数上限。现在只做一件事：把这份草稿压进上限，不新增事实，不改口径，不换栏目。\n"
+        f"压到{keep}字以内，留出余量，宁可短，不要贴边。\n"
+        "按重要性删：先删经过和例子，再删能一句话带过的旧说法；名字、别名、还在生效的约定和此刻状态，原值照留。\n"
+        "收尾要落在一句完整的话或一整个条目上，不要写到半句停住。\n"
+        "只交回压缩后的正文，用 Markdown，不要解释，不要交 JSON。"
     )
 
 
@@ -364,8 +395,8 @@ INTEGRATE_PAGE_SYSTEM = f"""\
 你看到的材料都是程序放进来的。
 已有这一页：库里这篇现在的正文。开头若有「篇名」「类型」，那两行是程序写的，不是正文。篇名是这一页现在的标题。类型是它属于哪一类，成文时按这个类型用下面的交付标准。你交回的 page 不要再写一级标题，也不要写类型行。篇名改不改，只写在 name 里。写记忆主人本人时，篇名保持「记忆主人」，不要改成真人姓名。
 最晚事件时间写在这一页上，含义见下面的时间字段。
-新写成的一页：这份材料刚刚蒸馏出来的正文。它只是草稿，可能还没达到交付标准，不要把它原样当成交卷。
-这份材料：蒸馏所依据的原文，带着事件时间和提交时间。
+新写成的一页：这份材料刚刚萃取出来的正文。它只是草稿，可能还没达到交付标准，不要把它原样当成交卷。
+这份材料：萃取所依据的原文，带着事件时间和提交时间。
 材料开头若有「主人称呼」，那一行是用户记下的叫法，都是在说记忆主人，不是这一页名字的上限。
 
 记忆库认可的主体只有这五类。请你识别2份结晶的主体是不是同一个，先看两边是不是同一类，再看是不是这一个。
