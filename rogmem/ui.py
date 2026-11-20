@@ -1886,6 +1886,7 @@ table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: 
 .table-scroll {{ overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-base); }}
 .table-scroll table {{ border: 0; border-radius: 0; }}
 .fresh {{ display: flex; justify-content: center; margin: 0 0 12px; }}
+.fresh[hidden] {{ display: none; }}
 .fresh button.fresh-btn {{ width: auto; min-height: 32px; padding: 5px 14px; border: 1px solid var(--notice-border); border-radius: 999px; font-size: 13px; font-weight: 500; color: var(--notice-text); background: var(--notice-bg); cursor: pointer; }}
 .fresh button.fresh-btn:hover, .fresh button.fresh-btn:focus-visible {{ background: var(--surface-hover); }}
 table.sources {{ width: max-content; min-width: 100%; }}
@@ -3161,14 +3162,22 @@ _LIST_PARTIAL_SCRIPT = r"""
       else root.removeAttribute("aria-busy");
     }
   }
+  var listAbort = null;
   function refresh(foot, href) {
     var kind = foot.getAttribute("data-partial");
     if (!kind || !href) return;
     var root = rootOf(foot);
     var url = new URL(href, location.href);
     url.searchParams.set("part", kind);
+    if (listAbort) listAbort.abort();
+    listAbort = typeof AbortController === "function" ? new AbortController() : null;
     setBusy(root, true);
-    fetch(url.pathname + url.search, {credentials: "same-origin", cache: "no-store", headers: {"X-Rogmem-List": "1"}})
+    fetch(url.pathname + url.search, {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: {"X-Rogmem-List": "1"},
+      signal: listAbort ? listAbort.signal : undefined
+    })
       .then(function (response) {
         var type = response.headers.get("content-type") || "";
         if (!response.ok || type.indexOf("html") < 0) throw new Error("list");
@@ -3178,7 +3187,8 @@ _LIST_PARTIAL_SCRIPT = r"""
         paint(foot, html);
         setBusy(root, false);
       })
-      .catch(function () {
+      .catch(function (err) {
+        if (err && err.name === "AbortError") return;
         setBusy(root, false);
         location.href = href;
       });
@@ -3524,7 +3534,7 @@ def _fresh_hint(tab: str, params: dict, rows: list[dict], total: int, page_no: i
         f" data-marker='{esc(marker)}'"
         f" data-total='{int(total)}'"
         f" data-label='{esc(label)}'>"
-        f"<button type='button' class='fresh-btn'>有新的{esc(label)}会在上面亮一下</button>"
+        f"<button type='button' class='fresh-btn'>{esc(label)}列表有更新 · 点击加载</button>"
         "</div>"
         f"{_FRESH_SCRIPT}"
     )
@@ -7457,7 +7467,7 @@ _COST_PENDING_SCRIPT = r"""
       sessionStorage.setItem("rogmem-cost-reloads", "0");
     }
   } catch (err) {}
-  function reloadDocument() {
+  function reloadCards() {
     var n = 0;
     try { n = Number(sessionStorage.getItem("rogmem-cost-reloads") || 0); } catch (err) {}
     if (n >= 6) {
@@ -7466,7 +7476,54 @@ _COST_PENDING_SCRIPT = r"""
       return;
     }
     try { sessionStorage.setItem("rogmem-cost-reloads", String(n + 1)); } catch (err2) {}
-    location.reload();
+    var url = new URL(location.href);
+    url.searchParams.delete("page");
+    url.searchParams.set("part", "overview");
+    fetch(url.pathname + url.search, {credentials: "same-origin", cache: "no-store"})
+      .then(function (response) {
+        var kind = response.headers.get("content-type") || "";
+        if (!response.ok || kind.indexOf("json") < 0) throw new Error("overview");
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data || window.__costLeave) return;
+        var money = document.querySelector("#ov-money-box .money");
+        var token = document.querySelector("#ov-token-box .money");
+        var split = document.querySelector("#ov-token-box .ov-split");
+        var caption = document.getElementById("ov-caption");
+        var fx = document.getElementById("fx");
+        var openPrices = document.getElementById("open-prices");
+        root.setAttribute("data-cost-observed", data.observed ? "1" : "0");
+        root.setAttribute("data-cost-state", data.state || "");
+        root.setAttribute("data-cost-epoch", data.epoch == null ? "" : String(data.epoch));
+        root.setAttribute("data-cost-asof", data.as_of || "");
+        if (data.state === "pending" || data.state === "stale") root.setAttribute("aria-busy", "true");
+        else root.removeAttribute("aria-busy");
+        if (money) {
+          money.textContent = data.money_text || "";
+          money.classList.toggle("gathering", !!data.gathering);
+        }
+        if (token) {
+          token.textContent = data.token_text || "";
+          token.classList.toggle("gathering", !!data.gathering);
+        }
+        if (split) split.textContent = data.split_text || "";
+        if (caption) {
+          caption.textContent = data.caption_text || "";
+          caption.classList.toggle("gathering", !!data.gathering);
+        }
+        if (fx) {
+          if (data.rate_text != null) fx.value = data.rate_text;
+          fx.disabled = !data.observed;
+        }
+        if (openPrices) openPrices.disabled = !data.observed;
+        if (data.chart && typeof window.__rogmemCostChartBoot === "function") {
+          window.__rogmemCostChartBoot(data.chart);
+        }
+        rendered = tokenOf(data.state, data.epoch, data.as_of);
+        if (data.state === "pending" || data.state === "stale") setTimeout(arm, 400);
+      })
+      .catch(function () { if (!window.__costLeave) location.reload(); });
   }
   document.addEventListener("click", function (event) {
     var anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
@@ -7499,11 +7556,11 @@ _COST_PENDING_SCRIPT = r"""
       return response.json();
     }).then(function (data) {
       if (!data || window.__costLeave) return;
-      if (data.state === "failed") { reloadDocument(); return; }
+      if (data.state === "failed") { reloadCards(); return; }
       var next = tokenOf(data.state, data.epoch, data.as_of);
-      if (next !== rendered) { reloadDocument(); return; }
+      if (next !== rendered) { reloadCards(); return; }
       setTimeout(arm, delay);
-    }).catch(function () { if (!window.__costLeave) reloadDocument(); });
+    }).catch(function () { if (!window.__costLeave) reloadCards(); });
   }
   window.__costResume = function () {
     window.__costLeave = false;
@@ -7515,30 +7572,273 @@ _COST_PENDING_SCRIPT = r"""
 """.replace("__HEADER__", COST_OBSERVE_HEADER)
 _COST_SCRIPT = r"""
 <script>
-function saveCostFilter(control) {
-  var url = control && control.value ? String(control.value) : "";
-  if (!url) return;
-  saveCostFilterThen(url);
-}
-function saveCostFilterThen(url) {
-  if (!url) return;
-  window.__costLeave = true;
-  var query = url.indexOf("?") >= 0 ? url.slice(url.indexOf("?") + 1) : "";
-  var pairs = query ? query.split("&") : [];
-  var combo = {span: "30d", detail: "30d", worker: "", model: "", dworker: "", dmodel: ""};
-  for (var i = 0; i < pairs.length; i++) {
-    var sep = pairs[i].indexOf("=");
-    var key = sep >= 0 ? pairs[i].slice(0, sep) : pairs[i];
-    var value = sep >= 0 ? decodeURIComponent(pairs[i].slice(sep + 1).replace(/\+/g, " ")) : "";
-    if (key in combo) combo[key] = value;
+(function () {
+  var OVERVIEW_KEYS = {span: 1, worker: 1, model: 1};
+  var DETAIL_KEYS = {detail: 1, dworker: 1, dmodel: 1};
+  var FILTER_KEYS = ["span", "detail", "worker", "model", "dworker", "dmodel"];
+  var overviewAbort = null;
+  var callsAbort = null;
+  var filterSeq = 0;
+
+  function comboFromUrl(url) {
+    var parsed = new URL(url, location.href);
+    var combo = {span: "30d", detail: "30d", worker: "", model: "", dworker: "", dmodel: ""};
+    for (var i = 0; i < FILTER_KEYS.length; i++) {
+      var key = FILTER_KEYS[i];
+      if (parsed.searchParams.has(key)) combo[key] = parsed.searchParams.get(key) || "";
+    }
+    return combo;
   }
-  post("/admin/api/costs/filters", combo, url);
-}
+  function hrefFromCombo(combo, page) {
+    var url = new URL("/admin/costs", location.href);
+    for (var i = 0; i < FILTER_KEYS.length; i++) {
+      var key = FILTER_KEYS[i];
+      var value = combo[key] || "";
+      if (key === "span" || key === "detail" || value) url.searchParams.set(key, value);
+    }
+    if (page && Number(page) > 1) url.searchParams.set("page", String(page));
+    return url.pathname + url.search;
+  }
+  function applyKey(combo, key, value, resetPage) {
+    var next = {
+      span: combo.span || "30d",
+      detail: combo.detail || "30d",
+      worker: combo.worker || "",
+      model: combo.model || "",
+      dworker: combo.dworker || "",
+      dmodel: combo.dmodel || ""
+    };
+    next[key] = value == null ? "" : String(value);
+    return {combo: next, page: resetPage ? 1 : (Number(new URL(location.href).searchParams.get("page") || 1) || 1)};
+  }
+  function markTabs(combo) {
+    document.querySelectorAll("a[data-cost-filter][data-cost-key]").forEach(function (anchor) {
+      var key = anchor.getAttribute("data-cost-key") || "";
+      var value = anchor.getAttribute("data-cost-value") || "";
+      anchor.classList.toggle("on", (combo[key] || "") === value);
+      var built = applyKey(combo, key, value, !!DETAIL_KEYS[key]);
+      anchor.setAttribute("href", hrefFromCombo(built.combo, built.page));
+    });
+    document.querySelectorAll("select[data-cost-key]").forEach(function (select) {
+      var key = select.getAttribute("data-cost-key") || "";
+      var current = combo[key] || "";
+      Array.prototype.forEach.call(select.options, function (option) {
+        var value = option.getAttribute("data-cost-value");
+        if (value == null) value = "";
+        var built = applyKey(combo, key, value, !!DETAIL_KEYS[key]);
+        option.value = hrefFromCombo(built.combo, built.page);
+        option.selected = value === current;
+      });
+    });
+  }
+  function setBusy(root, on) {
+    if (!root) return;
+    if (window.RogmemLoad && typeof RogmemLoad.list === "function") RogmemLoad.list(root, on);
+    else {
+      root.classList.toggle("list-busy", !!on);
+      if (on) root.setAttribute("aria-busy", "true");
+      else root.removeAttribute("aria-busy");
+    }
+  }
+  function paintCalls(html) {
+    var root = document.getElementById("calls");
+    if (!root) return;
+    var doc = new DOMParser().parseFromString(html, "text/html");
+    var nextBody = doc.querySelector("tbody");
+    var nextFoot = doc.querySelector(".list-foot");
+    var body = root.querySelector("tbody");
+    var current = root.querySelector(".list-foot");
+    if (nextBody && body) body.replaceWith(nextBody);
+    if (nextFoot && current) current.replaceWith(nextFoot);
+  }
+  function paintOverview(data) {
+    var root = document.getElementById("cost");
+    if (!root || !data) return;
+    root.setAttribute("data-cost-observed", data.observed ? "1" : "0");
+    root.setAttribute("data-cost-state", data.state || "");
+    root.setAttribute("data-cost-epoch", data.epoch == null ? "" : String(data.epoch));
+    root.setAttribute("data-cost-asof", data.as_of || "");
+    if (data.state === "pending" || data.state === "stale") root.setAttribute("aria-busy", "true");
+    else root.removeAttribute("aria-busy");
+    var money = document.querySelector("#ov-money-box .money");
+    var token = document.querySelector("#ov-token-box .money");
+    var split = document.querySelector("#ov-token-box .ov-split");
+    var caption = document.getElementById("ov-caption");
+    var fx = document.getElementById("fx");
+    var openPrices = document.getElementById("open-prices");
+    if (money) {
+      money.textContent = data.money_text || "";
+      money.classList.toggle("gathering", !!data.gathering);
+    }
+    if (token) {
+      token.textContent = data.token_text || "";
+      token.classList.toggle("gathering", !!data.gathering);
+    }
+    if (split) split.textContent = data.split_text || "";
+    if (caption) {
+      caption.textContent = data.caption_text || "";
+      caption.classList.toggle("gathering", !!data.gathering);
+    }
+    if (fx) {
+      if (data.rate_text != null) fx.value = data.rate_text;
+      fx.disabled = !data.observed;
+    }
+    if (openPrices) openPrices.disabled = !data.observed;
+    if (data.chart && typeof window.__rogmemCostChartBoot === "function") {
+      window.__rogmemCostChartBoot(data.chart);
+    }
+  }
+  function refreshCalls(href, seq) {
+    var root = document.getElementById("calls");
+    var url = new URL(href, location.href);
+    url.searchParams.set("part", "calls");
+    if (callsAbort) callsAbort.abort();
+    callsAbort = typeof AbortController === "function" ? new AbortController() : null;
+    setBusy(root, true);
+    fetch(url.pathname + url.search, {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: {"X-Rogmem-List": "1"},
+      signal: callsAbort ? callsAbort.signal : undefined
+    }).then(function (response) {
+      if (seq !== filterSeq) return null;
+      var type = response.headers.get("content-type") || "";
+      if (!response.ok || type.indexOf("html") < 0) throw new Error("list");
+      return response.text();
+    }).then(function (html) {
+      if (html == null || seq !== filterSeq) return;
+      paintCalls(html);
+      setBusy(root, false);
+    }).catch(function (err) {
+      if (err && err.name === "AbortError") return;
+      setBusy(root, false);
+      if (seq === filterSeq) location.href = href;
+    });
+  }
+  function refreshOverview(href, seq) {
+    var root = document.getElementById("cost");
+    var url = new URL(href, location.href);
+    url.searchParams.delete("page");
+    url.searchParams.set("part", "overview");
+    if (overviewAbort) overviewAbort.abort();
+    overviewAbort = typeof AbortController === "function" ? new AbortController() : null;
+    setBusy(root, true);
+    fetch(url.pathname + url.search, {
+      credentials: "same-origin",
+      cache: "no-store",
+      signal: overviewAbort ? overviewAbort.signal : undefined
+    }).then(function (response) {
+      if (seq !== filterSeq) return null;
+      var type = response.headers.get("content-type") || "";
+      if (!response.ok || type.indexOf("json") < 0) throw new Error("overview");
+      return response.json();
+    }).then(function (data) {
+      if (data == null || seq !== filterSeq) return;
+      paintOverview(data);
+      setBusy(root, false);
+      if (data.state === "pending" || data.state === "stale") {
+        window.__costLeave = false;
+        if (typeof window.__costResume === "function") window.__costResume();
+      }
+    }).catch(function (err) {
+      if (err && err.name === "AbortError") return;
+      setBusy(root, false);
+      if (seq === filterSeq) location.href = href;
+    });
+  }
+  function saveCostFilterPartial(combo, href, kinds) {
+    filterSeq += 1;
+    var seq = filterSeq;
+    window.__costLeave = true;
+    markTabs(combo);
+    if (window.history && typeof history.pushState === "function") history.pushState({}, "", href);
+    fetch("/admin/api/costs/filters", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      credentials: "same-origin",
+      body: JSON.stringify(combo)
+    }).then(function (response) {
+      if (response.status === 401) { location = "/admin/login"; return null; }
+      if (!response.ok) throw new Error("filters");
+      return response.json();
+    }).then(function () {
+      if (seq !== filterSeq) return;
+      if (kinds.overview) refreshOverview(href, seq);
+      if (kinds.detail) refreshCalls(href, seq);
+      window.__costLeave = false;
+    }).catch(function () {
+      window.__costLeave = false;
+      if (seq === filterSeq) location.href = href;
+    });
+  }
+  window.saveCostFilter = function (control) {
+    if (!control) return;
+    var key = control.getAttribute("data-cost-key") || "";
+    var selected = control.options ? control.options[control.selectedIndex] : null;
+    var value = selected ? (selected.getAttribute("data-cost-value") || "") : "";
+    if (!key) {
+      var fallback = control.value ? String(control.value) : "";
+      if (fallback) saveCostFilterThen(fallback, control.getAttribute("data-cost-scope") || "");
+      return;
+    }
+    var built = applyKey(comboFromUrl(location.href), key, value, !!DETAIL_KEYS[key]);
+    var href = hrefFromCombo(built.combo, built.page);
+    saveCostFilterPartial(built.combo, href, {
+      overview: !!OVERVIEW_KEYS[key],
+      detail: !!DETAIL_KEYS[key]
+    });
+  };
+  window.saveCostFilterThen = function (url, scopeHint) {
+    if (!url) return;
+    var combo = comboFromUrl(url);
+    var current = comboFromUrl(location.href);
+    var overview = false;
+    var detail = false;
+    for (var key in OVERVIEW_KEYS) if ((combo[key] || "") !== (current[key] || "")) overview = true;
+    for (var dkey in DETAIL_KEYS) if ((combo[dkey] || "") !== (current[dkey] || "")) detail = true;
+    if (scopeHint === "overview") overview = true;
+    if (scopeHint === "detail") detail = true;
+    if (!overview && !detail) detail = true;
+    var page = Number(new URL(url, location.href).searchParams.get("page") || 1) || 1;
+    if (detail) page = page || 1;
+    saveCostFilterPartial(combo, hrefFromCombo(combo, detail ? page : (Number(new URL(location.href).searchParams.get("page") || 1) || 1)), {
+      overview: overview,
+      detail: detail
+    });
+  };
+})();
 document.addEventListener("click", function (event) {
   var anchor = event.target.closest ? event.target.closest("a[data-cost-filter]") : null;
   if (!anchor) return;
   window.__costLeave = true;
   event.preventDefault();
+  var key = anchor.getAttribute("data-cost-key") || "";
+  var value = anchor.getAttribute("data-cost-value");
+  if (key) {
+    var DETAIL = {detail: 1, dworker: 1, dmodel: 1};
+    var OVERVIEW = {span: 1, worker: 1, model: 1};
+    var combo = (function () {
+      var parsed = new URL(location.href);
+      var out = {span: "30d", detail: "30d", worker: "", model: "", dworker: "", dmodel: ""};
+      ["span", "detail", "worker", "model", "dworker", "dmodel"].forEach(function (name) {
+        if (parsed.searchParams.has(name)) out[name] = parsed.searchParams.get(name) || "";
+      });
+      out[key] = value == null ? "" : String(value);
+      return out;
+    })();
+    var page = DETAIL[key] ? 1 : (Number(new URL(location.href).searchParams.get("page") || 1) || 1);
+    var href = (function () {
+      var url = new URL("/admin/costs", location.href);
+      ["span", "detail", "worker", "model", "dworker", "dmodel"].forEach(function (name) {
+        var item = combo[name] || "";
+        if (name === "span" || name === "detail" || item) url.searchParams.set(name, item);
+      });
+      if (page > 1) url.searchParams.set("page", String(page));
+      return url.pathname + url.search;
+    })();
+    saveCostFilterThen(href, OVERVIEW[key] ? "overview" : (DETAIL[key] ? "detail" : ""));
+    return;
+  }
   saveCostFilterThen(anchor.getAttribute("href") || "");
 });
 (function () {
@@ -7784,8 +8084,11 @@ _AVAIL_JS = r"""
 
 _CHART_SCRIPT = r"""
 <script>
-(function () {
-  var COST = __COST__;
+window.__rogmemCostChartBoot = function (COST) {
+  if (window.__rogmemCostChartCleanup) {
+    try { window.__rogmemCostChartCleanup(); } catch (err) {}
+    window.__rogmemCostChartCleanup = null;
+  }
   var container = document.querySelector(".ov-chart");
   var svg = document.getElementById("ov-svg");
   var tip = document.getElementById("ov-tip");
@@ -8428,8 +8731,16 @@ __AVAIL_JS__
       render();
     }, 50);
   }
-  if (window.ResizeObserver) new ResizeObserver(schedule).observe(container);
-  else window.addEventListener("resize", schedule);
+  var resizeObserver = null;
+  if (window.ResizeObserver) {
+    resizeObserver = new ResizeObserver(schedule);
+    resizeObserver.observe(container);
+  } else window.addEventListener("resize", schedule);
+  window.__rogmemCostChartCleanup = function () {
+    if (rerenderTimer) clearTimeout(rerenderTimer);
+    if (resizeObserver) resizeObserver.disconnect();
+    else window.removeEventListener("resize", schedule);
+  };
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", render);
@@ -8460,7 +8771,8 @@ __AVAIL_JS__
     });
   }
   window.__COST_CHART__ = Object.freeze({render: render, snapshot: snapshot});
-})();
+};
+window.__rogmemCostChartBoot(__COST__);
 </script>
 """
 
@@ -8551,6 +8863,7 @@ def _cost_catalog(providers: list[dict], prices: dict, called: list[dict]) -> li
 
 def _cost_tabs(board: dict, key: str, labels: tuple[tuple[str, str], ...], *, reset_page: bool) -> str:
     current = str(board.get(key) or "")
+    scope = "detail" if key in {"detail", "dworker", "dmodel"} else "overview"
     parts = []
     for value, label in labels:
         changes: dict = {key: value}
@@ -8558,24 +8871,29 @@ def _cost_tabs(board: dict, key: str, labels: tuple[tuple[str, str], ...], *, re
             changes["page"] = 1
         mark = " class='on'" if current == value else ""
         parts.append(
-            f"<a{mark} data-cost-filter href='{esc(_cost_href(board, **changes))}'>{label}</a>"
+            f"<a{mark} data-cost-filter data-cost-scope='{scope}' data-cost-key='{esc(key)}' "
+            f"data-cost-value='{esc(value)}' href='{esc(_cost_href(board, **changes))}'>{label}</a>"
         )
     return "".join(parts)
 
 
 def _cost_select(board: dict, key: str, label: str, aria: str, options: list[tuple[str, str]], *, reset_page: bool) -> str:
     current = str(board.get(key) or "")
+    scope = "detail" if key in {"detail", "dworker", "dmodel"} else "overview"
     reset = {"page": 1} if reset_page else {}
     choices = [
-        f"<option value='{esc(_cost_href(board, **{key: ''}, **reset))}'{'' if current else ' selected'}>全部</option>"
+        f"<option data-cost-value='' value='{esc(_cost_href(board, **{key: ''}, **reset))}'"
+        f"{'' if current else ' selected'}>全部</option>"
     ]
     for value, text in options:
         selected = " selected" if current == value else ""
         choices.append(
-            f"<option value='{esc(_cost_href(board, **{key: value}, **reset))}'{selected}>{esc(text)}</option>"
+            f"<option data-cost-value='{esc(value)}' value='{esc(_cost_href(board, **{key: value}, **reset))}'"
+            f"{selected}>{esc(text)}</option>"
         )
     return (
-        f"<label>{label} <select aria-label='{esc(aria)}' onchange='saveCostFilter(this)'>"
+        f"<label>{label} <select aria-label='{esc(aria)}' data-cost-key='{esc(key)}' "
+        f"data-cost-scope='{scope}' onchange='saveCostFilter(this)'>"
         f"{''.join(choices)}</select></label>"
     )
 
@@ -8717,12 +9035,9 @@ def cost_page(board: dict, providers: list[dict] | None = None, prices: dict | N
         view_state = "ready"
     show_numbers = view_state in {"ready", "stale"} or (view_state == "failed" and board.get("observed") is not False)
     working = " gathering" if view_state == "pending" else ""
+    # Call list is its own read model: card pending must not blank or freeze the table.
+    body_rows = "".join(_call_row(row) for row in rows) or "<tr><td class='empty' colspan='10'>还没有调用</td></tr>"
     if not show_numbers:
-        body_rows = "<tr><td class='empty{}' colspan='10'>{}</td></tr>".format(
-            working,
-            "汇总没有完成" if view_state == "failed" else "正在汇总",
-        )
-        count_note = "汇总没有完成" if view_state == "failed" else "正在汇总"
         money_text = "汇总没有完成" if view_state == "failed" else "正在汇总"
         token_text = money_text
         split_text = "这一时段还没有可用的汇总" if view_state == "failed" else "汇总完成后显示这一时段的用量"
@@ -8731,8 +9046,6 @@ def cost_page(board: dict, providers: list[dict] | None = None, prices: dict | N
         busy_attr = "" if view_state == "failed" else " aria-busy='true'"
         price_disabled = " disabled"
     else:
-        body_rows = "".join(_call_row(row) for row in rows) or "<tr><td class='empty' colspan='10'>还没有调用</td></tr>"
-        count_note = f"共 {int(board.get('count') or 0)} 条"
         money_text = _cost_headline(summary)
         token_text = _million(summary.get("tokens") or 0)
         split_text = (
@@ -8758,11 +9071,9 @@ def cost_page(board: dict, providers: list[dict] | None = None, prices: dict | N
     foot = list_pager(
         "/admin/costs",
         _cost_params(board),
-        total=int(board.get("count") or 0) if show_numbers else 0,
+        total=int(board.get("count") or 0),
         page=page_no,
         page_size=board.get("page_size") or _COST_PAGE,
-        note=None if show_numbers else count_note,
-        note_class="gathering" if view_state == "pending" else "",
         partial="calls",
     )
     rate = board.get("rate")
@@ -8889,6 +9200,117 @@ def cost_calls_fragment(board: dict) -> str:
         partial="calls",
     )
     return f"<tbody>{rows}</tbody>{foot}"
+
+
+def cost_overview_payload(board: dict, providers: list[dict] | None = None, prices: dict | None = None) -> dict:
+    """JSON for a card-only partial refresh. Same numbers as a full page paint."""
+
+    providers = providers or []
+    prices = prices or {}
+    summary = board.get("summary") or {}
+    catalog = _cost_catalog(providers, prices, board.get("models") or [])
+    if board.get("model") and board["model"] not in {item[2] for item in catalog}:
+        provider_id, _, model = str(board["model"]).partition("\t")
+        catalog.append((provider_id, model, str(board["model"]), provider_id or "未命名"))
+    chosen = next(
+        (
+            f"{vendor} · {model}" if vendor else model
+            for _pid, model, value, vendor in catalog
+            if value == board.get("model")
+        ),
+        "",
+    )
+    scope = " · ".join(part for part in (board.get("worker") or "", chosen) if part)
+    raw_series = board.get("series") or []
+    board_window = board.get("window") if isinstance(board.get("window"), dict) else {}
+    first_grain = next((str(item.get("grain") or "") for item in raw_series if item.get("grain")), "")
+    grain = str(board_window.get("grain") or first_grain or ("hour" if str(board.get("span") or "") == "24h" else "day"))
+    series = [
+        {
+            "at": str(item.get("at") or ""),
+            "grain": str(item.get("grain") or grain),
+            "label": item.get("label") or "",
+            "money": item.get("money"),
+            "money_known": float(item.get("money_known") or 0.0),
+            "tokens": item.get("tokens") or 0,
+            "input": item.get("input") or 0,
+            "output": item.get("output") or 0,
+            "cache": item.get("cache") or 0,
+            "unpriced": item.get("unpriced") or 0,
+            "bare": item.get("bare") or 0,
+        }
+        for item in raw_series
+    ]
+    window_start = str(board_window.get("start") or "")
+    window_end = str(board_window.get("end") or "")
+    window_tz = str(board_window.get("tz") or "UTC+8")
+    window_available = bool(window_start and window_end)
+    observation = board.get("observation") if isinstance(board.get("observation"), dict) else {}
+    if observation.get("state"):
+        view_state = str(observation.get("state"))
+    elif board.get("observed") is False:
+        view_state = "pending"
+    else:
+        view_state = "ready"
+    show_numbers = view_state in {"ready", "stale"} or (view_state == "failed" and board.get("observed") is not False)
+    if not show_numbers:
+        money_text = "汇总没有完成" if view_state == "failed" else "正在汇总"
+        token_text = money_text
+        split_text = "这一时段还没有可用的汇总" if view_state == "failed" else "汇总完成后显示这一时段的用量"
+        caption_text = "汇总没有完成" if view_state == "failed" else "正在汇总这一时段"
+    else:
+        money_text = _cost_headline(summary)
+        token_text = _million(summary.get("tokens") or 0)
+        split_text = (
+            f"输入 {_million(summary.get('input') or 0)}"
+            f" · 输出 {_million(summary.get('output') or 0)}"
+            f" · 缓存 {_million(summary.get('cache') or 0)}"
+        )
+        if view_state == "stale":
+            caption_text = "记录有变，正在重算这一时段"
+        elif view_state == "failed":
+            caption_text = "这一时段的汇总停了，稍后再打开"
+        else:
+            caption_text = "所选时段总用量 · UTC+8 · 悬停或方向键查看"
+    rate = board.get("rate")
+    avail = _chart_availability(
+        series,
+        {
+            "start": window_start if window_available else "",
+            "end": window_end if window_available else "",
+            "grain": grain,
+        },
+    )
+    chart = {
+        "scope": scope,
+        "span": str(board.get("span") or ""),
+        "grain": grain,
+        "unit": {"money": {"currency": "CNY"}, "token": {"name": "token"}},
+        "window": {
+            "start": window_start if window_available else None,
+            "end": window_end if window_available else None,
+            "grain": grain,
+            "tz": window_tz,
+            "available": window_available,
+        },
+        "series": series,
+        "availability": avail,
+        "observed": show_numbers,
+        "observation": {"state": view_state, "epoch": observation.get("epoch"), "as_of": observation.get("as_of")},
+    }
+    return {
+        "state": view_state,
+        "epoch": observation.get("epoch"),
+        "as_of": observation.get("as_of"),
+        "observed": show_numbers,
+        "money_text": money_text,
+        "token_text": token_text,
+        "split_text": split_text,
+        "caption_text": caption_text,
+        "rate_text": "" if rate is None else _plain_price(float(rate)),
+        "gathering": view_state == "pending",
+        "chart": chart,
+    }
 
 
 def _choice_html(providers: list[dict], kind: str = "") -> str:

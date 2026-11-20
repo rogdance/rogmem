@@ -1070,13 +1070,24 @@ def _cost_page(request: Request) -> Response:
         listed["worker"] = str(query.get("worker") or "")
         listed["model"] = str(query.get("model") or "")
         return HTMLResponse(ui.cost_calls_fragment(listed), headers=headers)
-    wants_status = request.query_params.get("observe") == "1" or request.headers.get(ui.COST_OBSERVE_HEADER) == "1"
+    wants_overview = query.get("part") == "overview"
+    wants_status = (
+        not wants_overview
+        and (request.query_params.get("observe") == "1" or request.headers.get(ui.COST_OBSERVE_HEADER) == "1")
+    )
     board, prices = cost.board_and_prices(**view)
     obs = board.get("observation") if isinstance(board.get("observation"), dict) else {}
     # A switch asks for a view that is not published yet. The document may wait
     # for that gather. A status probe must not: it only reports the current
     # observation, and waiting here would hold the worker the next page needs.
-    if obs.get("state") == "pending" and cost.VIEW_WAIT_SECONDS > 0 and not wants_status:
+    # Full first paint may wait briefly. Partial card refresh returns immediately so the
+    # UI can paint a pending shell and finish via observe, without blocking the worker.
+    if (
+        obs.get("state") == "pending"
+        and cost.VIEW_WAIT_SECONDS > 0
+        and not wants_status
+        and not wants_overview
+    ):
         cost.wait_for_view(cost.view_key(**view), cost.VIEW_WAIT_SECONDS)
         board, prices = cost.board_and_prices(**view)
         obs = board.get("observation") if isinstance(board.get("observation"), dict) else {}
@@ -1092,16 +1103,20 @@ def _cost_page(request: Request) -> Response:
             },
             headers=headers,
         )
-    state = str(obs.get("state") or ("pending" if board.get("observed") is False else "ready"))
-    if state != "pending":
-        board = cost.with_call_page(
-            board,
-            now=view["now"],
-            detail=view["detail"],
-            dworker=view["dworker"],
-            dmodel=view["dmodel"],
-            page=view["page"],
+    if wants_overview:
+        return JSONResponse(
+            ui.cost_overview_payload(board, engine.public_providers(), prices),
+            headers=headers,
         )
+    # Call list is independent of card observation. Pending cards must not hide rows.
+    board = cost.with_call_page(
+        board,
+        now=view["now"],
+        detail=view["detail"],
+        dworker=view["dworker"],
+        dmodel=view["dmodel"],
+        page=view["page"],
+    )
     return HTMLResponse(ui.cost_page(board, engine.public_providers(), prices), headers=headers)
 
 
@@ -1890,6 +1905,11 @@ def _poll_seconds() -> float:
     return float(os.environ.get("ROGMEM_POLL", "0.2"))
 
 
+# 暂停时 worker 不再按 0.2 秒空转一圈（那会让三个 worker 每秒撞库十几次）。
+# 慢转一圈只为看开关有没有被抬起，抬起后最多等这么久就接着干。
+_PAUSED_POLL_SECONDS = 1.0
+
+
 # The console may change the concurrency while the workers are already running, and
 # threads are spawned once. So the live limit is an admission count held around one
 # model call, not a thread count: a worker that finds no slot waits a tick and looks again.
@@ -1924,9 +1944,20 @@ def _distill_loop(stop: threading.Event | None = None) -> None:
 
     The workers are spawned once, so a concurrency changed in the console is an
     admission count, not a thread count: lowering it takes effect on the next round.
+
+    Paused, the whole pipeline stands still: no unit is taken, and the worker stops
+    hot-polling. It wakes on a slow tick only to see whether the switch came back up,
+    so a paused hub is idle instead of hammering the database fifteen times a second.
     """
 
     while stop is None or not stop.is_set():
+        if engine.distill_paused():
+            wait = _PAUSED_POLL_SECONDS
+            if stop is None:
+                time.sleep(wait)
+            elif stop.wait(wait):
+                break
+            continue
         if _admit_distill(engine.distill_concurrency()):
             try:
                 engine.pump_one()

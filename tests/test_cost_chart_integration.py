@@ -20,12 +20,12 @@ from rogmem import cost
 
 
 NOW = datetime(2026, 11, 11, 3, 37, 42, 123_000, tzinfo=timezone.utc)
-_PAYLOAD_RE = re.compile(r"var COST = (\{.*?\});", re.DOTALL)
+_PAYLOAD_RE = re.compile(r"__rogmemCostChartBoot\((\{.*?\})\);", re.DOTALL)
 
 
 def _payload(html: str) -> dict:
     m = _PAYLOAD_RE.search(html)
-    assert m, "cost_page 必须注入 var COST = {...}"
+    assert m, "cost_page 必须注入 __rogmemCostChartBoot({...})"
     return json.loads(m.group(1))
 
 

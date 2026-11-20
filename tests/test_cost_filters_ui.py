@@ -1,4 +1,4 @@
-"""成本页前端契约：筛选变化走 POST 再导航，失败可见；翻页保持纯 href；首渲染不写入。"""
+"""成本页前端契约：筛选走 partial + 持久化；翻页保持纯 href；首渲染不写入。"""
 
 from __future__ import annotations
 
@@ -44,8 +44,15 @@ def test_select_calls_save_cost_filter():
 
 def test_tabs_intercept_click():
     html = cost_page(_board(), [], {})
-    # 概览和明细 tab 的 <a> 带 data-cost-filter 钩子。
+    # 概览和明细 tab 的 <a> 带 data-cost-filter 钩子，并标出读写范围。
     assert "data-cost-filter" in html
+    assert "data-cost-scope='overview'" in html
+    assert "data-cost-scope='detail'" in html
+    assert "data-cost-key='span'" in html
+    assert "data-cost-key='detail'" in html
+    assert 'set("part", "overview")' in html
+    assert "history.pushState" in html
+    assert "AbortController" in html
 
 
 def test_call_pager_shares_the_count_line():

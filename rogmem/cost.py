@@ -1325,12 +1325,13 @@ def _overview(
     dmodel: str = "",
     page: int = 1,
 ) -> dict:
+    """Fold the overview cards only. The call list is a separate read model."""
+
     span = span if span in SPANS else "30d"
     detail = detail if detail in DETAIL_SPANS else "30d"
     moment = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     earliest = _earliest_at(con)
     start, grain = span_bounds(span, moment, earliest)
-    dstart, _ = span_bounds(detail, moment, earliest)
     prices = _prices(con)
     rate = _rate_of(con)
     folded = _empty()
@@ -1357,47 +1358,19 @@ def _overview(
                 **_public_sum(slot),
             }
         )
-    listed, count = _detail_rows(
-        con, start=dstart, end=moment, worker=dworker, model=dmodel, page=page
-    )
     window = {
         "start": start.isoformat(),
         "end": moment.isoformat(),
         "grain": grain,
         "tz": "UTC+8",
     }
-    pages = max(1, (count + PAGE - 1) // PAGE)
-    current = page if page >= 1 else 1
-    if current > pages:
-        current = pages
-    rows = []
-    for call in listed:
-        price = prices.get((call.provider_id, call.model))
-        amount = None
-        if call.input_tokens is not None or call.output_tokens is not None:
-            amount = money_cny(
-                int(call.input_tokens or 0),
-                int(call.output_tokens or 0),
-                int(call.cache_tokens or 0),
-                price,
-                rate,
-            )
-        rows.append(
-            {
-                "at": call.at.astimezone(SHANGHAI).strftime("%m-%d %H:%M"),
-                "worker": call.worker,
-                "provider_id": call.provider_id,
-                "model": call.model,
-                "prompt": call.prompt,
-                "answer": call.answer,
-                "input": call.input_tokens,
-                "output": call.output_tokens,
-                "cache": call.cache_tokens,
-                "total": total_tokens(call.input_tokens, call.output_tokens),
-                "money": amount,
-            }
-        )
     workers, models = _catalog(con)
+    try:
+        page_no = int(page)
+    except (TypeError, ValueError):
+        page_no = 1
+    if page_no < 1:
+        page_no = 1
     return {
         "span": span,
         "worker": worker,
@@ -1405,14 +1378,14 @@ def _overview(
         "detail": detail,
         "dworker": dworker,
         "dmodel": dmodel,
-        "page": current,
-        "pages": pages,
+        "page": page_no,
+        "pages": 1,
         "page_size": PAGE,
-        "count": count,
+        "count": 0,
         "summary": _public_sum(folded),
         "series": series,
         "window": window,
-        "rows": rows,
+        "rows": [],
         "workers": workers,
         "models": models,
         "rate": rate,
@@ -1427,9 +1400,10 @@ _BOARD_SNAP_THREAD: threading.Thread | None = None
 # How long a page may wait for the gather it just asked for. The request itself
 # does not open the ledger; it only waits until that identity is published.
 VIEW_WAIT_SECONDS = 2.0
-_BOARD_SNAP_KEYS = ("span", "worker", "model", "detail", "dworker", "dmodel")
+# Card identity only. Detail filters and page belong to the call-list read model.
+_BOARD_SNAP_KEYS = ("span", "worker", "model")
 _BOARD_WAKE = threading.Event()
-# Identity is the filter combo. Freshness is separate: input generation, the bucket the
+# Identity is the overview filter combo. Freshness is separate: input generation, the bucket the
 # window was computed in, and whether the last gathers failed. A hit is ready only while
 # both still match; otherwise the old numbers stay visible and a new gather is scheduled.
 _BOARD_OBS: dict[tuple, dict] = {}
@@ -1681,8 +1655,19 @@ def _start_board_refresher() -> None:
 
 
 def overview(**kwargs) -> dict:
+    """Cards plus one call page. Gather caches cards only; the list is attached here."""
+
+    filtered = _normalize_board_kwargs(kwargs)
     with _store() as con:
-        return _overview(con, **kwargs)
+        board = _overview(con, **filtered)
+    return with_call_page(
+        board,
+        now=filtered["now"],
+        detail=filtered["detail"],
+        dworker=filtered["dworker"],
+        dmodel=filtered["dmodel"],
+        page=filtered["page"],
+    )
 
 
 def _present_calls(con: sqlite3.Connection, calls: list[Call]) -> list[dict]:
@@ -1842,12 +1827,13 @@ def _observation_state(entry: dict | None, now: datetime, epoch: int, gave_up: i
 
 
 def board_and_prices(**kwargs) -> tuple[dict, dict[tuple[str, str], Price]]:
-    """Read one cost view without gathering the ledger on the request path.
+    """Read overview cards without gathering on the request path.
 
-    Identity is the filter combo. A ready hit matches the current inputs and the
-    current bucket. Anything older is stale: the previous numbers stay, the price
-    book is the latest one, and a gather is scheduled. Missing is pending, not zero.
-    A gave-up identity is failed until the inputs change or the reader asks again.
+    Identity is span/worker/model. Detail filters never open a new card view.
+    A ready hit matches the current card inputs and the current bucket. Anything
+    older is stale: the previous numbers stay, the price book is the latest one,
+    and a gather is scheduled. Missing is pending, not zero. A gave-up identity
+    is failed until the card inputs change or the reader asks again.
     """
 
     global _BOARD_SNAP_WANT
@@ -1869,8 +1855,8 @@ def board_and_prices(**kwargs) -> tuple[dict, dict[tuple[str, str], Price]]:
         book_rate = _PRICE_BOOK["rate"]
         book_known = _PRICE_BOOK["epoch"] >= 0 and book_prices is not None
     state = _observation_state(entry, now, epoch, gave_up)
-    # A new identity or a stale reading asks for one fold. Repeating a view that
-    # is still pending must not ask again, or every probe would start another fold.
+    # A new card identity or a stale reading asks for one fold. Detail-only
+    # changes keep the same want, so they must not wake another fold.
     if changed or state == "stale":
         _BOARD_WAKE.set()
     _start_board_refresher()
@@ -1882,7 +1868,12 @@ def board_and_prices(**kwargs) -> tuple[dict, dict[tuple[str, str], Price]]:
         if book_known:
             shell["rate"] = book_rate
         return shell, prices
-    board = entry["board"]
+    board = dict(entry["board"])
+    # Echo the call-list filters the reader asked for. Cached cards stay untouched.
+    board["detail"] = filtered["detail"]
+    board["dworker"] = filtered["dworker"]
+    board["dmodel"] = filtered["dmodel"]
+    board["page"] = filtered["page"]
     board["observation"] = {
         "state": state,
         "epoch": entry["epoch"],
