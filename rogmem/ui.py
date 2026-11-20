@@ -1402,6 +1402,7 @@ try {{
   --destructive: #b43b4d;
   --destructive-hover: #982d3e;
   --brand: #ef6576;
+  --rev-tick: #6a7078;
   --link-color: #8b3e50;
   --focus-color: #b64a60;
   --success-bg: #edf5f0;
@@ -1459,6 +1460,7 @@ html[data-theme="dark"] {{
   --destructive: #b43b4d;
   --destructive-hover: #982d3e;
   --brand: #ef6576;
+  --rev-tick: #c8c8c8;
   --link-color: #f2acba;
   --focus-color: #f095a8;
   --success-bg: #173b2c;
@@ -1708,16 +1710,16 @@ sup.cite .cite-card b {{ display: block; font-size: 12px; letter-spacing: 0; col
 sup.cite .cite-card q {{ display: block; margin: 4px 0; quotes: none; }}
 sup.cite:hover .cite-card, sup.cite:focus .cite-card, sup.cite:focus-within .cite-card {{ display: block; }}
 .rev-sheet {{ display: flex; align-items: flex-start; gap: 14px; }}
-.rev-rail {{ position: sticky; top: 0; z-index: 2; flex: none; display: flex; flex-direction: column; justify-content: stretch; gap: 0; width: 22px; height: calc(100vh - 220px); margin: 0; padding: 2px 0; }}
-.rev-tick {{ position: relative; flex: 1 1 0; display: block; min-height: 0; width: 22px; margin: 0; padding: 0; border: 0; background: transparent; color: inherit; box-shadow: none; cursor: pointer; transform: none; }}
+.rev-rail {{ position: sticky; top: 0; z-index: 2; flex: none; display: flex; flex-direction: column; justify-content: flex-start; gap: 1px; width: 22px; height: calc(100vh - 220px); margin: 0; padding: 2px 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }}
+.rev-tick, button.rev-tick {{ position: relative; flex: 1 0 5px; display: block; min-height: 5px; max-height: 28px; width: 22px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; box-shadow: none; cursor: pointer; transform: none; }}
 button.rev-tick:hover, button.rev-tick:focus-visible {{ background: transparent; color: inherit; }}
-.rev-tick i {{ display: block; width: 4px; height: calc(100% - 3px); margin: 1.5px auto 0; border-radius: 999px; background: var(--text-muted); opacity: .72; transition: width .14s cubic-bezier(.22, .8, .28, 1), background-color .14s ease, opacity .14s ease, box-shadow .14s ease; }}
+.rev-tick i {{ display: block; width: 4px; min-height: 3px; height: calc(100% - 2px); margin: 1px auto 0; border-radius: 999px; background: var(--rev-tick); opacity: .92; transition: width .14s cubic-bezier(.22, .8, .28, 1), background-color .14s ease, opacity .14s ease, box-shadow .14s ease; }}
 .rev-tick.on i {{ opacity: 1; background: var(--brand); animation: rev-tick-on .28s ease; }}
 .rev-tick.wave-3 i {{ width: 6px; opacity: .8; }}
 .rev-tick.wave-2 i {{ width: 8px; opacity: .88; }}
 .rev-tick.wave-1 i {{ width: 10px; opacity: .94; }}
 .rev-tick.hot i {{ width: 12px; opacity: 1; background: var(--brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 28%, transparent); animation: none; }}
-.rev-rail:hover .rev-tick.on:not(.hot) i, .rev-rail:focus-within .rev-tick.on:not(.hot) i {{ background: var(--text-muted); box-shadow: none; animation: none; }}
+.rev-rail:hover .rev-tick.on:not(.hot) i, .rev-rail:focus-within .rev-tick.on:not(.hot) i {{ background: var(--rev-tick); box-shadow: none; animation: none; }}
 @keyframes rev-tick-on {{ from {{ transform: scaleY(.6); opacity: .4; }} to {{ transform: scaleY(1); opacity: 1; }} }}
 .rev-tip {{ display: none; position: absolute; left: calc(100% + 8px); top: 0; width: max-content; max-width: 360px; padding: 8px 10px; font-size: 12px; line-height: 1.5; font-weight: 400; text-align: left; color: var(--text-primary); background: var(--surface-popover); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-menu); z-index: 6; pointer-events: none; white-space: normal; }}
 .rev-tick:hover .rev-tip, .rev-tick:focus-visible .rev-tip {{ display: block; }}
@@ -3387,9 +3389,12 @@ def sources_page(rows: list[dict], tab: str, filters: dict, facets: dict, pager:
     session = (filters.get("session") or "").strip()
     turn = (filters.get("turn") or "").strip()
     if tab != "file" and session:
+        turn_hidden = (
+            f'<input type="hidden" name="turn" value="{esc(turn)}">' if turn else ""
+        )
         form += (
             f"<input type='hidden' name='session' value='{esc(session)}'>"
-            f"{f'<input type=\"hidden\" name=\"turn\" value=\"{esc(turn)}\">' if turn else ''}"
+            f"{turn_hidden}"
             f"<p class='muted'>会话 {esc(session)}"
             f"{(' · 回合 ' + esc(turn)) if turn else ''} "
             f"<a href='/admin/sources?tab=session'>清除会话</a></p>"
@@ -4498,6 +4503,10 @@ def _write_stamp(label: str, value) -> str:
     return f"<span>{label}：{shown}</span>"
 
 
+# First paint keeps a short card page. The rail still lists every revision.
+REVISION_LOG_PAGE = 40
+
+
 def _entry_head(detail: dict, lock: str) -> str:
     """Title, then the type row. Body and sketch clocks sit on the right of that row."""
     kind = f"{esc(detail['type'])} · {esc(detail.get('status_label') or detail['status'])}"
@@ -4640,12 +4649,25 @@ def crystal_page(
     )
     if revisions:
         newest_first = list(reversed(revisions))
+        first_page = newest_first[:REVISION_LOG_PAGE]
+        more = len(newest_first) > REVISION_LOG_PAGE
+        list_attrs = (
+            f" class='rev-log' data-crystal='{esc(detail['id'])}' data-name='{esc(detail.get('name') or '')}'"
+            f" data-rev-offset='{len(first_page)}' data-rev-total='{len(newest_first)}'"
+        )
+        cards = "".join(
+            _revision_item(detail["id"], item, index, detail.get("name") or "")
+            for index, item in enumerate(first_page)
+        )
+        sentinel = "<div id='rev-more' aria-hidden='true'></div>" if more else ""
         logs = (
             "<div class='rev-sheet'>"
             + _revision_rail(newest_first)
-            + f"<ol class='rev-log'>{''.join(_revision_item(detail['id'], item, index, detail.get('name') or '') for index, item in enumerate(newest_first))}</ol>"
+            + f"<ol{list_attrs}>{cards}</ol>"
+            + sentinel
             + _revision_detail_modal()
             + _revision_rail_script()
+            + (_revision_more_script() if more else "")
             + "</div>"
         )
     else:
@@ -4920,6 +4942,59 @@ def _revision_rail(items: list[dict]) -> str:
             f"<i></i><span class='rev-tip'>{esc(gist)}</span></button>"
         )
     return f"<nav class='rev-rail' aria-label='修订定位'>{''.join(ticks)}</nav>"
+
+
+def revision_cards_html(crystal_id: str, items: list[dict], *, name: str = "", start_index: int = 0) -> str:
+    """HTML for one thin page of revision cards. Newest-first order is the caller's job."""
+    return "".join(
+        _revision_item(crystal_id, item, start_index + index, name)
+        for index, item in enumerate(items)
+    )
+
+
+def _revision_more_script() -> str:
+    return f"""
+<script>
+(function () {{
+  var list = document.querySelector("ol.rev-log");
+  var sentinel = document.getElementById("rev-more");
+  if (!list || !sentinel) return;
+  var loading = false;
+  function pump() {{
+    var offset = Number(list.getAttribute("data-rev-offset") || "0");
+    var total = Number(list.getAttribute("data-rev-total") || "0");
+    var crystal = list.getAttribute("data-crystal") || "";
+    if (loading || !crystal || offset >= total) {{
+      if (offset >= total) observer.disconnect();
+      return;
+    }}
+    loading = true;
+    var params = new URLSearchParams();
+    params.set("offset", String(offset));
+    params.set("limit", String({REVISION_LOG_PAGE}));
+    fetch("/admin/api/crystals/" + encodeURIComponent(crystal) + "/revision-cards?" + params.toString())
+      .then(function (response) {{
+        if (!response.ok) throw new Error("cards");
+        return response.text();
+      }})
+      .then(function (html) {{
+        var wrap = document.createElement("div");
+        wrap.innerHTML = html;
+        while (wrap.firstChild) list.appendChild(wrap.firstChild);
+        var next = offset + {REVISION_LOG_PAGE};
+        list.setAttribute("data-rev-offset", String(Math.min(next, total)));
+        loading = false;
+        if (Number(list.getAttribute("data-rev-offset")) >= total) observer.disconnect();
+      }})
+      .catch(function () {{ loading = false; }});
+  }}
+  var root = list.closest(".wiki-article");
+  var observer = new IntersectionObserver(function (entries) {{
+    if (entries[0] && entries[0].isIntersecting) pump();
+  }}, {{ root: root, rootMargin: "160px" }});
+  observer.observe(sentinel);
+}})();
+</script>"""
 
 
 def _revision_rail_script() -> str:
