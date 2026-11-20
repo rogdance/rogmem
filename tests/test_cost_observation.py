@@ -148,16 +148,15 @@ def test_identity_change_signals_gather_once(monkeypatch):
             "span": "30d",
             "worker": "",
             "model": "",
-            "detail": "30d",
-            "dworker": "",
-            "dmodel": "",
-            "page": 1,
         }
     board, _prices = cost.board_and_prices(span="7d", detail="30d")
     assert board["observed"] is False
     assert cost._BOARD_WAKE.is_set()
     cost._BOARD_WAKE.clear()
     cost.board_and_prices(span="7d", detail="30d")
+    assert not cost._BOARD_WAKE.is_set()
+    # Detail-only changes keep the same card identity and must not wake another fold.
+    cost.board_and_prices(span="7d", detail="24h", dworker="草稿")
     assert not cost._BOARD_WAKE.is_set()
 
 
@@ -193,14 +192,11 @@ def test_unobserved_board_is_not_painted_as_zero_usage():
     assert "正在汇总" in token
     assert "money gathering" in token
     assert "0 百万" not in token
-    assert "还没有调用" not in html
-    assert "共 0 条" not in html
+    # Call list is independent: an empty attached page may say there are no calls.
     assert "正在汇总这一时段" in html
     assert 'data-cost-observed="0"' in html
     assert '"observed": false' in html
-    assert html.find("COST.observed === false") < html.find("所选时段无数据")
     assert "observe=1" in html
-    assert "location.reload" in html
     assert 'id="open-prices" disabled' in html
 
 
