@@ -2365,6 +2365,52 @@ table.calls td.num, table.calls th.num {{ text-align: right; font-variant-numeri
 .list-foot {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 8px; }}
 .list-foot > .note {{ margin: 0; }}
 .list-foot > .pager {{ margin: 0; flex: none; }}
+#rogmem-progress {{
+  position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 90;
+  pointer-events: none; opacity: 0; overflow: hidden; background: transparent;
+  transition: opacity .18s ease;
+}}
+html.rogmem-loading #rogmem-progress {{ opacity: 1; }}
+#rogmem-progress .bar {{
+  display: block; height: 100%; width: 30%;
+  background: var(--brand);
+  transform: translateX(-130%);
+}}
+html.rogmem-loading #rogmem-progress .bar {{
+  animation: rogmem-progress-run 1.05s cubic-bezier(.4, 0, .2, 1) infinite;
+}}
+@keyframes rogmem-progress-run {{
+  0% {{ transform: translateX(-130%); }}
+  100% {{ transform: translateX(430%); }}
+}}
+.content.rogmem-enter {{ animation: rogmem-fade-in .2s ease; }}
+@keyframes rogmem-fade-in {{
+  from {{ opacity: .55; }}
+  to {{ opacity: 1; }}
+}}
+.list-busy {{ position: relative; }}
+.list-busy::before {{
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0; height: 2px; z-index: 3;
+  background: var(--brand); transform-origin: left center;
+  animation: rogmem-list-pulse 1s ease-in-out infinite; pointer-events: none;
+}}
+.list-busy::after {{
+  content: "";
+  position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  background: color-mix(in srgb, var(--surface-page) 52%, transparent);
+}}
+@keyframes rogmem-list-pulse {{
+  0%, 100% {{ opacity: .35; transform: scaleX(.32); }}
+  50% {{ opacity: 1; transform: scaleX(1); }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  html.rogmem-loading #rogmem-progress .bar {{
+    animation: none; width: 100%; transform: none; opacity: .85;
+  }}
+  .list-busy::before {{ animation: none; opacity: .7; transform: none; }}
+  .content.rogmem-enter {{ animation: none; }}
+}}
 .price-dialog {{
   width: min(880px, calc(100% - 48px)); max-height: min(760px, calc(100vh - 48px));
   display: flex; flex-direction: column; background: var(--surface-base);
@@ -2515,6 +2561,7 @@ html[data-theme="dark"] .nav-theme .theme-sun {{ display: block; }}
   #nav-drawer, #nav-drawer::backdrop {{ transition: none; }}
 }}
 </style></head><body class="{body_class}">
+<div id="rogmem-progress" aria-hidden="true"><span class="bar"></span></div>
 {channel_bar()}
 <header><a class="brand" href="/admin/crystals" aria-label="ROGMEM">{BRAND_LOCKUP_SVG}</a><nav>{links}</nav><span class="ver">{esc(product_version())}</span><button type="button" id="theme" class="quiet theme" aria-label="切换到日间" title="切换到日间"><svg class="theme-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg><svg class="theme-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg></button><button type="button" id="nav-toggle" class="nav-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="nav-drawer" hidden><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button></header>
 <main class="{'reader' if reader else ''}">{side}<div class="content">{body}</div></main>
@@ -2671,7 +2718,67 @@ html[data-theme="dark"] .nav-theme .theme-sun {{ display: block; }}
     else if (typeof mql.addListener === "function") mql.addListener(onChange);
   }}
 }})();
+window.RogmemLoad = (function () {{
+  var enterArmed = false;
+  function start() {{
+    document.documentElement.classList.add("rogmem-loading");
+  }}
+  function done() {{
+    document.documentElement.classList.remove("rogmem-loading");
+  }}
+  function list(root, on) {{
+    if (!root) return;
+    root.classList.toggle("list-busy", !!on);
+    if (on) root.setAttribute("aria-busy", "true");
+    else root.removeAttribute("aria-busy");
+  }}
+  function sameOriginAdmin(url) {{
+    try {{
+      var next = new URL(url, location.href);
+      if (next.origin !== location.origin) return false;
+      return next.pathname.indexOf("/admin") === 0;
+    }} catch (err) {{
+      return false;
+    }}
+  }}
+  function shouldIgnoreClick(event, link) {{
+    if (!link || event.defaultPrevented) return true;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return true;
+    if (link.target && link.target !== "_self") return true;
+    if (link.hasAttribute("download")) return true;
+    if (link.closest(".list-foot[data-partial]")) return true;
+    var href = link.getAttribute("href") || "";
+    if (!href || href.charAt(0) === "#" || href.indexOf("javascript:") === 0) return true;
+    return !sameOriginAdmin(link.href);
+  }}
+  document.addEventListener("click", function (event) {{
+    var link = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+    if (shouldIgnoreClick(event, link)) return;
+    start();
+  }}, true);
+  document.addEventListener("submit", function (event) {{
+    var form = event.target;
+    if (!form || event.defaultPrevented) return;
+    if (form.target && form.target !== "_self") return;
+    if (form.closest && form.closest(".list-foot[data-partial]")) return;
+    var action = form.getAttribute("action") || location.pathname;
+    if (!sameOriginAdmin(action)) return;
+    start();
+  }});
+  window.addEventListener("pageshow", function () {{ done(); }});
+  window.addEventListener("pagehide", function () {{ /* keep bar until next paint */ }});
+  function armEnter() {{
+    if (enterArmed) return;
+    enterArmed = true;
+    var content = document.querySelector("main .content");
+    if (content) content.classList.add("rogmem-enter");
+  }}
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", armEnter);
+  else armEnter();
+  return {{ start: start, done: done, list: list }};
+}})();
 async function post(url, body, thenUrl) {{
+  if (window.RogmemLoad) RogmemLoad.start();
   const response = await fetch(url, {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body || {{}})}});
   if (response.status === 401) location = '/admin/login';
   if (!response.ok) {{
@@ -2681,6 +2788,7 @@ async function post(url, body, thenUrl) {{
       const data = JSON.parse(text);
       if (data && data.error) message = data.error;
     }} catch (err) {{}}
+    if (window.RogmemLoad) RogmemLoad.done();
     alert(message || '没有完成');
     window.__costLeave = false;
     if (typeof window.__costResume === "function") window.__costResume();
@@ -3044,19 +3152,35 @@ _LIST_PARTIAL_SCRIPT = r"""
     if (nextBody && body) body.replaceWith(nextBody);
     if (nextFoot && current) current.replaceWith(nextFoot);
   }
+  function setBusy(root, on) {
+    if (window.RogmemLoad && typeof RogmemLoad.list === "function") RogmemLoad.list(root, on);
+    else if (root) {
+      root.classList.toggle("list-busy", !!on);
+      if (on) root.setAttribute("aria-busy", "true");
+      else root.removeAttribute("aria-busy");
+    }
+  }
   function refresh(foot, href) {
     var kind = foot.getAttribute("data-partial");
     if (!kind || !href) return;
+    var root = rootOf(foot);
     var url = new URL(href, location.href);
     url.searchParams.set("part", kind);
+    setBusy(root, true);
     fetch(url.pathname + url.search, {credentials: "same-origin", cache: "no-store", headers: {"X-Rogmem-List": "1"}})
       .then(function (response) {
         var type = response.headers.get("content-type") || "";
         if (!response.ok || type.indexOf("html") < 0) throw new Error("list");
         return response.text();
       })
-      .then(function (html) { paint(foot, html); })
-      .catch(function () { location.href = href; });
+      .then(function (html) {
+        paint(foot, html);
+        setBusy(root, false);
+      })
+      .catch(function () {
+        setBusy(root, false);
+        location.href = href;
+      });
   }
   document.addEventListener("click", function (event) {
     var link = event.target && event.target.closest ? event.target.closest(".list-foot[data-partial] a[href]") : null;
