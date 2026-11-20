@@ -218,14 +218,15 @@ def _statement_hits(
     Recency alone is the wrong predicate here — a hub neighbour may have dozens of
     statements, and the multi-hop question usually cares about the overlapping ones.
     """
+    # Relevance is the evidence predicate. Score the live set first; never
+    # pre-cut by created_at (or any ingest-order proxy) then hope overlap survived.
+    _ = scan  # kept for call-site compatibility; ceiling is ``limit`` after score.
     rows = con.execute(
         """SELECT s.id, s.field, s.text, s.source_id, c.name AS crystal
            FROM statements s
            JOIN crystallizations c ON c.id=s.crystal_id
-           WHERE s.crystal_id=? AND s.invalid_at IS NULL AND s.trust='written'
-           ORDER BY s.created_at DESC
-           LIMIT ?""",
-        (crystal_id, max(limit, scan)),
+           WHERE s.crystal_id=? AND s.invalid_at IS NULL AND s.trust='written'""",
+        (crystal_id,),
     ).fetchall()
     scored: list[tuple[float, str, dict]] = []
     for row in rows:
