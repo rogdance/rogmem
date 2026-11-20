@@ -2187,6 +2187,7 @@ button.peek:active {{ transform: none; }}
 .page-head {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 16px; }}
 .page-head h1 {{ margin: 0; }}
 .graph-count {{ margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-muted); font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+#graph > .graph-count {{ position: absolute; top: 12px; right: 14px; z-index: 12; color: #c8c8c8; text-shadow: 0 0 4px #111, 0 1px 2px #111; pointer-events: none; }}
 .local-mark {{ color: var(--brand); font-weight: 600; }}
 .modal-card.wide {{ width: min(720px, calc(100% - 32px)); }}
 .lamp {{ display: inline-flex; align-items: center; gap: 6px; }}
@@ -2226,12 +2227,8 @@ button.peek:active {{ transform: none; }}
 }}
 body.graph-screen {{ height: 100vh; overflow: hidden; display: flex; flex-direction: column; }}
 body.graph-screen header, body.graph-screen .channel-bar {{ flex: none; }}
-body.graph-screen main {{ flex: 1; min-height: 0; padding: 24px; overflow: hidden; align-items: stretch; }}
+body.graph-screen main {{ flex: 1; min-height: 0; padding: 0; overflow: hidden; align-items: stretch; gap: 0; }}
 body.graph-screen .content {{ display: flex; flex-direction: column; height: 100%; min-height: 0; }}
-body.graph-screen h1 {{ flex: none; margin: 0 0 16px; }}
-body.graph-screen .page-head {{ flex: none; }}
-body.graph-screen .page-head h1 {{ margin: 0; }}
-body.graph-screen .note {{ flex: none; margin: 0 0 8px; }}
 body.graph-screen #graph {{ flex: 1; width: 100%; height: auto; min-height: 0; }}
 .channel-bar {{ padding: 8px 16px; background: var(--notice-bg); color: var(--notice-text); border-bottom: 1px solid var(--notice-border); font-size: 13px; line-height: 1.5; }}
 form.inline {{ display: inline; }}
@@ -7236,17 +7233,15 @@ def shared_graph(
 
 
 def graph_page(auto_labels: bool = False, label_budget: int = 50) -> str:
-    head = (
-        "<div class='page-head'>"
-        "<h1>记忆图谱</h1>"
-        "<p class='graph-count' id='graph-count'></p>"
-        "</div>"
+    """沉浸式星空：主导航以下 edge-to-edge，活跃结晶计数叠在图谱内。"""
+    mount = shared_graph(auto_labels=auto_labels, label_budget=label_budget)
+    count = "<p class='graph-count' id='graph-count'></p>"
+    mount = mount.replace(
+        '<div id="graph" aria-busy="true">',
+        f'<div id="graph" aria-busy="true">{count}',
+        1,
     )
-    return page(
-        "记忆图谱",
-        "graph",
-        head + shared_graph(auto_labels=auto_labels, label_budget=label_budget),
-    )
+    return page("记忆图谱", "graph", mount)
 
 
 def _section_page(key: str, title: str, inner: str) -> str:
