@@ -56,6 +56,71 @@ def tone(ok: int, warn: int, down: int, unknown: int) -> tuple[str, float]:
     return "warn", warn / span
 
 
+def fill(kind: str, depth: float = 1.0) -> str:
+    """Charcoal-ember fill shared by the cost strip and the nav health mark.
+
+    Same formula as the chart's availFill: deeper when the state fills more of
+    the observed span. A single probe paints at depth 1.
+    """
+
+    if kind not in _STATES:
+        return ""
+    d = float(depth) if depth else 0.0
+    if d < 0:
+        d = 0.0
+    if d > 1:
+        d = 1.0
+    hue = 352 if kind == "down" else 152 if kind == "ok" else 42
+    sat = (48 if kind == "ok" else 70) + (22 if kind == "ok" else 25) * d
+    light = (78 if kind == "down" else 80 if kind == "ok" else 82) - (34 if kind == "down" else 38) * d
+    return f"hsl({hue} {sat:.1f}% {light:.1f}%)"
+
+
+def latest_probe(providers: list[dict], distill: str) -> dict:
+    """Last probe of the pipeline call target — not an hourly mix.
+
+    Returns tone/depth for the charcoal fill, plus labels for the nav mark.
+    """
+
+    picked = choose_target(providers if isinstance(providers, list) else [], distill or "")
+    if not picked:
+        return {
+            "tone": "unknown",
+            "depth": 0.0,
+            "health": "",
+            "detail": "未探活",
+            "at": "",
+            "name": "",
+            "model": "",
+        }
+    provider, model = picked
+    health = str(provider.get("health") or "")
+    name = str(provider.get("name") or provider.get("id") or "")
+    detail = str(provider.get("health_detail") or "").strip()
+    at = str(provider.get("health_at") or "")
+    if health not in _STATES:
+        return {
+            "tone": "unknown",
+            "depth": 0.0,
+            "health": "",
+            "detail": detail or "未探活",
+            "at": at,
+            "name": name,
+            "model": model,
+        }
+    if not detail:
+        detail = {"ok": "正常", "warn": "降级", "down": "异常"}.get(health, "未探活")
+    return {
+        "tone": health,
+        "depth": 1.0,
+        "health": health,
+        "detail": detail,
+        "at": at,
+        "name": name,
+        "model": model,
+    }
+
+
 def _parse(value: str) -> datetime | None:
     text = str(value or "").strip()
     if not text:

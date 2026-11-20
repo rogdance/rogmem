@@ -178,6 +178,41 @@ CREATE TABLE IF NOT EXISTS statement_sources (
   PRIMARY KEY (statement_id, source_id)
 );
 
+-- Belief units (Hindsight observation spirit): evidence set above statements.
+-- vec_json is near-dup probe only; never enters names_correspond / uniqueness.
+CREATE TABLE IF NOT EXISTS beliefs (
+  id TEXT PRIMARY KEY,
+  crystal_id TEXT NOT NULL,
+  place TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  quote TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  event_at TEXT,
+  created_at TEXT NOT NULL,
+  invalid_at TEXT,
+  merged_into TEXT,
+  vec_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS belief_sources (
+  belief_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  statement_id TEXT,
+  quote TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (belief_id, source_id)
+);
+
+CREATE TABLE IF NOT EXISTS belief_statements (
+  belief_id TEXT NOT NULL,
+  statement_id TEXT NOT NULL,
+  PRIMARY KEY (belief_id, statement_id)
+);
+
+CREATE INDEX IF NOT EXISTS beliefs_crystal_place
+  ON beliefs(crystal_id, place)
+  WHERE invalid_at IS NULL AND IFNULL(merged_into, '') = '';
+
 CREATE TABLE IF NOT EXISTS edges (
   id TEXT PRIMARY KEY,
   src TEXT NOT NULL,

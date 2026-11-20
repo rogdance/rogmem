@@ -1340,6 +1340,40 @@ def channel_bar() -> str:
     )
 
 
+def _nav_model_health() -> str:
+    """顶栏右侧：当前调用目标最近一次探活的炭火色，不是这一小时汇总。"""
+    from rogmem.availability import fill, latest_probe
+
+    mark = {
+        "tone": "unknown",
+        "depth": 0.0,
+        "detail": "未探活",
+        "at": "",
+        "name": "",
+        "model": "",
+    }
+    try:
+        from rogmem.engine import get_setting, public_providers
+
+        mark = latest_probe(public_providers(), get_setting("model_distill") or "")
+    except Exception:
+        pass
+    tone = str(mark.get("tone") or "unknown")
+    paint = fill(tone, float(mark.get("depth") or 0.0)) if tone in {"ok", "warn", "down"} else ""
+    words = {"ok": "可用", "warn": "降级", "down": "不可用"}.get(tone, "未探活")
+    who = " · ".join(part for part in (str(mark.get("name") or ""), str(mark.get("model") or "")) if part)
+    detail = str(mark.get("detail") or words)
+    title = f"{who} · {detail}" if who else detail
+    when = str(mark.get("at") or "").strip()
+    if when:
+        title = f"{title} · {when}"
+    style = f' style="background:{paint}"' if paint else ""
+    return (
+        f'<a href="/admin/costs" id="model-health" class="model-health" data-tone="{esc(tone)}"'
+        f'{style} aria-label="模型调用{esc(words)}" title="{esc(title)}"></a>'
+    )
+
+
 def page(title: str, active: str, body: str, sub: str = "", reader: bool = False) -> str:
     section, child = _locate(sub or active)
     if section is None:
@@ -1589,11 +1623,17 @@ header nav .nav-sub a:hover,
 header nav .nav-sub a:focus-visible {{ background: var(--surface-hover); color: var(--text-primary); text-decoration: none; }}
 header nav .nav-sub a.on {{ background: var(--surface-selected); color: var(--text-primary); font-weight: 400; }}
 header .ver {{ margin-left: auto; color: var(--text-muted); font-size: 12px; font-weight: 400; letter-spacing: 0; white-space: nowrap; }}
-header .theme {{ flex: none; width: 28px; height: 28px; min-height: 28px; padding: 0; color: var(--text-secondary); }}
-header .theme svg {{ display: block; width: 16px; height: 16px; }}
-header .theme .theme-sun {{ display: none; }}
-html[data-theme="dark"] header .theme .theme-moon {{ display: none; }}
-html[data-theme="dark"] header .theme .theme-sun {{ display: block; }}
+header .model-health {{
+  flex: none; box-sizing: border-box; width: 16px; height: 16px; min-height: 16px; margin: 6px 0;
+  padding: 0; border-radius: 3px; border: 1px solid transparent; text-decoration: none;
+  background: var(--surface-subtle); border-color: var(--border-strong);
+}}
+header .model-health[data-tone="ok"],
+header .model-health[data-tone="warn"],
+header .model-health[data-tone="down"] {{ border-color: transparent; }}
+header .model-health[data-tone="unknown"] {{ background: var(--surface-subtle); border-color: var(--border-strong); }}
+.theme-mode {{ display: inline-flex; gap: 8px; }}
+.theme-mode button[aria-pressed="true"] {{ background: var(--surface-selected); color: var(--text-primary); border-color: var(--border-strong); }}
 main {{ display: flex; gap: 20px; padding: 24px 24px 48px; align-items: flex-start; }}
 body.reader-screen {{ --page-pad: 24px; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }}
 body.reader-screen header, body.reader-screen .channel-bar {{ flex: none; }}
@@ -2478,7 +2518,6 @@ html.rogmem-loading #rogmem-progress .bar {{
   header .brand svg {{ height: 22px; }}
   header .ver {{ font-size: 11px; white-space: nowrap; margin-right: 4px; }}
   html.nav-drawer-ready header > nav {{ display: none; }}
-  html.nav-drawer-ready header #theme {{ display: none; }}
   html.nav-drawer-ready header #nav-toggle {{
     display: inline-flex; align-items: center; justify-content: center;
     width: 44px; height: 44px; min-height: 44px; padding: 0;
@@ -2544,32 +2583,25 @@ html.nav-drawer-open, html.nav-drawer-open body {{ overflow: hidden; }}
 }}
 .nav-drawer-list a:hover {{ background: var(--surface-hover); color: var(--text-primary); text-decoration: none; }}
 .nav-drawer-list a[aria-current="page"] {{ background: var(--surface-selected); color: var(--text-primary); font-weight: 500; }}
-.nav-drawer-sep {{ border: 0; border-top: 1px solid var(--border); margin: 8px 0; }}
-.nav-close, .nav-theme {{
+.nav-close {{
   display: inline-flex; align-items: center; justify-content: center;
   width: 44px; height: 44px; min-height: 44px; padding: 0;
   background: transparent; color: var(--text-secondary);
   border: 1px solid transparent; border-radius: 8px; cursor: pointer;
 }}
-.nav-close:hover, .nav-theme:hover {{ background: var(--surface-hover); color: var(--text-primary); }}
-.nav-close svg, .nav-theme svg {{ display: block; width: 18px; height: 18px; }}
-.nav-theme .theme-sun {{ display: none; }}
-html[data-theme="dark"] .nav-theme .theme-moon {{ display: none; }}
-html[data-theme="dark"] .nav-theme .theme-sun {{ display: block; }}
-.nav-theme-row {{ display: flex; align-items: center; justify-content: space-between; min-height: 44px; margin-top: 4px; color: var(--text-muted); font-size: 14px; }}
+.nav-close:hover {{ background: var(--surface-hover); color: var(--text-primary); }}
+.nav-close svg {{ display: block; width: 18px; height: 18px; }}
 @media (prefers-reduced-motion: reduce) {{
   #nav-drawer, #nav-drawer::backdrop {{ transition: none; }}
 }}
 </style></head><body class="{body_class}">
 <div id="rogmem-progress" aria-hidden="true"><span class="bar"></span></div>
 {channel_bar()}
-<header><a class="brand" href="/admin/crystals" aria-label="ROGMEM">{BRAND_LOCKUP_SVG}</a><nav>{links}</nav><span class="ver">{esc(product_version())}</span><button type="button" id="theme" class="quiet theme" aria-label="切换到日间" title="切换到日间"><svg class="theme-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg><svg class="theme-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg></button><button type="button" id="nav-toggle" class="nav-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="nav-drawer" hidden><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button></header>
+<header><a class="brand" href="/admin/crystals" aria-label="ROGMEM">{BRAND_LOCKUP_SVG}</a><nav>{links}</nav><span class="ver">{esc(product_version())}</span>{_nav_model_health()}<button type="button" id="nav-toggle" class="nav-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="nav-drawer" hidden><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button></header>
 <main class="{'reader' if reader else ''}">{side}<div class="content">{body}</div></main>
 <dialog id="nav-drawer" class="nav-drawer" aria-label="主导航">
 <div class="nav-drawer-head"><span>导航</span><button type="button" class="nav-close" aria-label="关闭导航"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button></div>
 <nav class="nav-drawer-list" aria-label="主导航">{drawer_links}</nav>
-<hr class="nav-drawer-sep">
-<div class="nav-theme-row"><span>主题</span><button type="button" id="nav-theme" class="nav-theme" aria-label="切换到暗夜" title="切换到暗夜"><svg class="theme-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg><svg class="theme-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg></button></div>
 </dialog>
 <div id="confirm-delete" class="modal" hidden>
 <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirm-delete-text">
@@ -2581,15 +2613,11 @@ html[data-theme="dark"] .nav-theme .theme-sun {{ display: block; }}
 </div></div>
 <script>
 (function () {{
-  var themeBtn = document.getElementById("theme");
-  var navThemeBtn = document.getElementById("nav-theme");
   function paintTheme() {{
     var dark = document.documentElement.getAttribute("data-theme") === "dark";
-    var label = dark ? "切换到日间" : "切换到暗夜";
-    [themeBtn, navThemeBtn].forEach(function (btn) {{
-      if (!btn) return;
-      btn.setAttribute("aria-label", label);
-      btn.title = label;
+    var mode = dark ? "dark" : "light";
+    document.querySelectorAll("[data-theme-pick]").forEach(function (btn) {{
+      btn.setAttribute("aria-pressed", btn.getAttribute("data-theme-pick") === mode ? "true" : "false");
     }});
   }}
   function applyTheme(mode) {{
@@ -2604,13 +2632,12 @@ html[data-theme="dark"] .nav-theme .theme-sun {{ display: block; }}
     }} catch (err) {{}}
     paintTheme();
   }}
-  function toggleTheme() {{
-    var dark = document.documentElement.getAttribute("data-theme") === "dark";
-    applyTheme(dark ? "light" : "dark");
-  }}
   paintTheme();
-  if (themeBtn) themeBtn.addEventListener("click", toggleTheme);
-  if (navThemeBtn) navThemeBtn.addEventListener("click", toggleTheme);
+  document.querySelectorAll("[data-theme-pick]").forEach(function (btn) {{
+    btn.addEventListener("click", function () {{
+      applyTheme(btn.getAttribute("data-theme-pick") === "light" ? "light" : "dark");
+    }});
+  }});
 
   document.querySelectorAll("header > nav .nav-item").forEach(function (item) {{
     var trigger = item.querySelector("a");
@@ -2666,7 +2693,7 @@ html[data-theme="dark"] .nav-theme .theme-sun {{ display: block; }}
     // 宿主不支持 <dialog>：保持原生 <nav> 横排与 ≤760px 横滚；汉堡保持 hidden。
     return;
   }}
-  // 进入增强状态：让 CSS 隐藏桌面 <nav>/#theme 并显示汉堡。
+  // 进入增强状态：让 CSS 隐藏桌面 <nav> 并显示汉堡。
   document.documentElement.classList.add("nav-drawer-ready");
   toggle.hidden = false;
   var closeBtn = nav.querySelector(".nav-close");
@@ -8008,6 +8035,7 @@ _AVAIL_JS = r"""
     if (down >= warn) return {tone: "down", depth: down / span};
     return {tone: "warn", depth: warn / span};
   }
+  // Same charcoal-ember formula as rogmem.availability.fill.
   function availFill(kind, depth) {
     var d = depth > 0 ? depth : 0;
     if (d > 1) d = 1;
@@ -9558,7 +9586,18 @@ def basic_page(cfg: dict) -> str:
 <input class="locked" aria-label="记忆数据文件" value="{esc(path)}" readonly tabindex="-1">
 </section>
 </section>"""
+    theme = """<section class="panel plate" id="theme-mode">
+<header class="setting-head"><h2>配色模式</h2></header>
+<section class="setting-row setting-line">
+<div><p class="setting-name">界面配色</p><p class="note">只保存在本机浏览器，不写入服务器。</p></div>
+<div class="theme-mode" role="group" aria-label="配色模式">
+<button type="button" class="quiet" data-theme-pick="light" aria-pressed="false">日间</button>
+<button type="button" class="quiet" data-theme-pick="dark" aria-pressed="false">暗夜</button>
+</div>
+</section>
+</section>"""
     inner = f"""<div class="settings-stack">
+{theme}
 {login_settings}
 {owner}
 {limits}

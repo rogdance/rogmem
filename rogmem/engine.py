@@ -891,6 +891,9 @@ def connect(data: Path, scan: Path) -> None:
     migrate_crystal_store(con)
     # 版本化迁移：新表/新约束只走这里；上面的幂等 ALTER 仍是版本 0 基线。
     schema_migrate.apply(con)
+    from rogmem.belief import ensure_belief_schema
+
+    ensure_belief_schema(con)
     _DB = con
     _LOCAL.con = con
     jieba.initialize()
@@ -9578,6 +9581,16 @@ def _deliver_page(source, catalog: list[dict], page: dict) -> None:
                     snapshot=incoming if body_changed else "",
                     gist=gist,
                 )
+            # Unified landing: material that re-cites a live quote reinforces
+            # statement_sources + belief proof (covers 并页「重复」without JSON特判).
+            from rogmem.belief import reinforce_restated_statements
+
+            reinforce_restated_statements(
+                con,
+                crystal_id=crystal.id,
+                source_id=source["id"],
+                body=source["body"] or "",
+            )
             saved.append(crystal.id)
         if unplaced:
             con.rollback()
@@ -10230,6 +10243,19 @@ def _write_field(source: sqlite3.Row, item: dict, rank: str, body: str, *, store
                 sid = _add_statement(con, *planned_add)
             if planned_link is not None:
                 _link_statement_source(con, *planned_link)
+                link_sid, link_src, link_quote = planned_link
+                _attach_belief_after_statement(
+                    con,
+                    statement_id=link_sid,
+                    crystal_id=crystal["id"],
+                    field=key,
+                    chapter=None,
+                    text=value,
+                    quote=link_quote,
+                    source_id=link_src,
+                    event_at=source["event_at"],
+                    trust="written",
+                )
             for kind, detail in planned_decisions:
                 con.execute(
                     "INSERT INTO decisions(created_at,kind,detail) VALUES(?,?,?)",
@@ -10441,7 +10467,38 @@ def _add_statement(con, crystal_id, field, chapter, text, quote, source_id, rank
             # (Hindsight proof_count). Search ranks by this evidence strength.
             con.execute("UPDATE statements SET valid_until=? WHERE id=?", (until, same["id"]))
             _link_statement_source(con, same["id"], source_id, quote)
+            _attach_belief_after_statement(
+                con,
+                statement_id=same["id"],
+                crystal_id=crystal_id,
+                field=field,
+                chapter=chapter,
+                text=text,
+                quote=quote,
+                source_id=source_id,
+                event_at=event_at,
+                trust=trust,
+            )
             return same["id"]
+        # Near-duplicate paraphrase of an existing belief: reuse the live statement
+        # so proof rises without inventing a parallel wording row.
+        near = _near_dup_statement_for_belief(con, crystal_id, field, chapter, text)
+        if near is not None:
+            con.execute("UPDATE statements SET valid_until=? WHERE id=?", (until, near))
+            _link_statement_source(con, near, source_id, quote)
+            _attach_belief_after_statement(
+                con,
+                statement_id=near,
+                crystal_id=crystal_id,
+                field=field,
+                chapter=chapter,
+                text=text,
+                quote=quote,
+                source_id=source_id,
+                event_at=event_at,
+                trust=trust,
+            )
+            return near
         con.execute(
             f"""UPDATE statements SET invalid_at=?
                WHERE crystal_id=? AND invalid_at IS NULL AND text!=?
@@ -10473,7 +10530,79 @@ def _add_statement(con, crystal_id, field, chapter, text, quote, source_id, rank
                 wanted = str(loc)
                 seqs = [int(row["seq"]) for row in rows if str(row.get("loc") or "") == wanted]
         mark_chunks_cited(con, source_id, seqs)
+    _attach_belief_after_statement(
+        con,
+        statement_id=sid,
+        crystal_id=crystal_id,
+        field=field,
+        chapter=chapter,
+        text=text,
+        quote=quote,
+        source_id=source_id,
+        event_at=event_at,
+        trust=trust,
+    )
     return sid
+
+
+def _attach_belief_after_statement(
+    con,
+    *,
+    statement_id,
+    crystal_id,
+    field,
+    chapter,
+    text,
+    quote,
+    source_id,
+    event_at,
+    trust,
+) -> None:
+    from rogmem.belief import attach_statement_belief
+
+    attach_statement_belief(
+        con,
+        statement_id=statement_id,
+        crystal_id=crystal_id,
+        field=field,
+        chapter=chapter,
+        text=text,
+        quote=quote,
+        source_id=source_id,
+        event_at=event_at,
+        trust=trust,
+    )
+
+
+def _near_dup_statement_for_belief(con, crystal_id, field, chapter, text) -> str | None:
+    """If a live belief near-matches ``text``, return one member statement id."""
+    from rogmem.belief import belief_place, probe_near_dup, should_merge
+
+    place = belief_place(field, chapter)
+    if not place or not text:
+        return None
+    twin, sim, threshold = probe_near_dup(
+        con, crystal_id=crystal_id, place=place, text=text
+    )
+    if twin is None or not should_merge(text, twin["text"], sim, threshold=threshold):
+        return None
+    row = con.execute(
+        """SELECT statement_id FROM belief_statements
+           WHERE belief_id=? LIMIT 1""",
+        (twin["id"],),
+    ).fetchone()
+    if row:
+        return str(row["statement_id"])
+    # Belief without membership yet: match by twin wording.
+    place_args = (place, place, place, place)
+    same = con.execute(
+        f"""SELECT id FROM statements
+           WHERE crystal_id=? AND invalid_at IS NULL AND text=?
+             AND {_PLACE_MATCH}
+           LIMIT 1""",
+        (crystal_id, twin["text"], *place_args),
+    ).fetchone()
+    return str(same["id"]) if same else None
 
 
 def _diff_blocks(text: str) -> list[str]:
@@ -11182,21 +11311,12 @@ def _pages_opened_by(query: str, limit: int) -> list[tuple[str, dict]]:
 def _statement_proof_count(con: sqlite3.Connection, statement_id: str) -> int:
     """Supporting-source count for one statement (Hindsight proof_count).
 
-    Prefer ``statement_sources``; fall back to the primary ``source_id`` so
-    legacy rows that predate multi-source links still count as one proof.
+    Uses the owning belief's evidence set when present (near-dup consolidation),
+    otherwise ``statement_sources``, then the primary ``source_id`` for legacy rows.
     """
-    sid = str(statement_id or "").strip()
-    if not sid or sid.startswith("page:"):
-        return 0
-    row = con.execute(
-        "SELECT COUNT(*) AS n FROM statement_sources WHERE statement_id=?",
-        (sid,),
-    ).fetchone()
-    n = int(row["n"] or 0) if row else 0
-    if n > 0:
-        return n
-    st = con.execute("SELECT source_id FROM statements WHERE id=?", (sid,)).fetchone()
-    return 1 if st and str(st["source_id"] or "").strip() else 0
+    from rogmem.belief import proof_count_for_statement
+
+    return proof_count_for_statement(con, statement_id)
 
 
 def _lane_trace(name: str, ranking: list[tuple[str, dict]], *, capped_from: int, cap: int) -> dict:

@@ -7,8 +7,37 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from rogmem.availability import choose_target, for_chart, measure, tenures, tone
+from rogmem.availability import choose_target, fill, for_chart, latest_probe, measure, tenures, tone
 from rogmem.ui import cost_page, queue_page
+
+
+def test_fill_matches_the_chart_charcoal_ember_formula():
+    assert fill("ok", 1.0) == "hsl(152 70.0% 42.0%)"
+    assert fill("warn", 1.0) == "hsl(42 95.0% 44.0%)"
+    assert fill("down", 1.0) == "hsl(352 95.0% 44.0%)"
+    assert fill("unknown", 1.0) == ""
+    assert fill("ok", 0.5) == "hsl(152 59.0% 61.0%)"
+
+
+def test_latest_probe_is_the_point_sample_not_an_hourly_mix():
+    providers = [
+        {
+            "id": "mini",
+            "name": "MiniMax",
+            "models": ["M3"],
+            "health": "warn",
+            "health_detail": "额度窗口",
+            "health_at": "2026-11-20T12:00:00+00:00",
+        }
+    ]
+    mark = latest_probe(providers, "mini|M3")
+    assert mark["tone"] == "warn"
+    assert mark["depth"] == 1.0
+    assert mark["detail"] == "额度窗口"
+    assert fill(mark["tone"], mark["depth"]) == fill("warn", 1.0)
+    blank = latest_probe([{"id": "mini", "name": "MiniMax", "models": ["M3"], "health": ""}], "mini|M3")
+    assert blank["tone"] == "unknown"
+    assert blank["depth"] == 0.0
 
 
 def test_a_probe_lasts_until_the_next_one_and_a_long_silence_stays_unknown():
