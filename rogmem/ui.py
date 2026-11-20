@@ -1911,6 +1911,11 @@ table.sources td.ops button.link {{ margin-left: 12px; }}
   .upload-meter .fill, .upload-meter.wait .fill, .upload-meter.hold .fill {{ animation: none; transition: none; }}
   .upload-meter.wait .fill {{ width: 42%; transform: none; opacity: 1; }}
 }}
+main .content.drop-ready {{
+  outline: 2px dashed color-mix(in srgb, var(--brand) 72%, transparent);
+  outline-offset: -6px;
+  background: color-mix(in srgb, var(--brand) 7%, transparent);
+}}
 .import-menu {{ position: relative; margin-left: auto; flex: none; }}
 .import-menu [role="menu"] {{ position: absolute; z-index: 40; right: 0; top: 100%; padding-top: 4px; background: transparent; border: 0; max-width: calc(100vw - 16px); }}
 .import-menu [role="menu"][hidden] {{ display: none; }}
@@ -3655,9 +3660,8 @@ function uploadFile(file, row, dupes, done, outcome) {
   });
   xhr.send(data);
 }
-function sendFiles(input) {
-  const files = Array.prototype.slice.call(input.files || []);
-  input.value = '';
+function queueFiles(files) {
+  files = Array.prototype.slice.call(files || []);
   if (!files.length) return;
   const rows = revealFiles(files);
   const dupes = [];
@@ -3679,6 +3683,55 @@ function sendFiles(input) {
     showDuplicates(dupes, outcome.imported);
   }
   next();
+}
+function sendFiles(input) {
+  const files = Array.prototype.slice.call(input.files || []);
+  input.value = '';
+  queueFiles(files);
+}
+function knowledgeDropHasFiles(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer || !transfer.types) return false;
+  return Array.prototype.indexOf.call(transfer.types, 'Files') >= 0;
+}
+function bindKnowledgeDrop() {
+  if (!document.getElementById('import-files')) return;
+  const surface = document.querySelector('main .content');
+  if (!surface) return;
+  let depth = 0;
+  function paint(on) {
+    surface.classList.toggle('drop-ready', !!on);
+  }
+  surface.addEventListener('dragenter', function (event) {
+    if (!knowledgeDropHasFiles(event)) return;
+    event.preventDefault();
+    depth += 1;
+    paint(true);
+  });
+  surface.addEventListener('dragover', function (event) {
+    if (!knowledgeDropHasFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  });
+  surface.addEventListener('dragleave', function (event) {
+    if (!knowledgeDropHasFiles(event)) return;
+    depth = Math.max(0, depth - 1);
+    if (!depth) paint(false);
+  });
+  surface.addEventListener('drop', function (event) {
+    if (!knowledgeDropHasFiles(event)) return;
+    event.preventDefault();
+    depth = 0;
+    paint(false);
+    const dialog = document.getElementById('nas-import');
+    if (dialog && dialog.open) return;
+    queueFiles(event.dataTransfer && event.dataTransfer.files);
+  });
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bindKnowledgeDrop);
+} else {
+  bindKnowledgeDrop();
 }
 </script>
 <script>
