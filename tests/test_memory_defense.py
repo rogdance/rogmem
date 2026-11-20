@@ -38,16 +38,23 @@ def test_parse_policy_allow_redact_block():
         parse_policy({"enabled": True, "rules": [{"on": "sensitive_data", "action": "drop"}]})
 
 
-def test_default_policy_redacts_sensitive_data():
+def test_default_policy_is_opt_in():
     policy = default_policy()
-    assert policy.enabled is True
+    assert policy.enabled is False
     assert policy.rules[0].on == "sensitive_data"
     assert policy.rules[0].action is DefenseAction.REDACT
+    # 未显式启用时，入库路径不得因默认策略改写正文
+    decision = screen("令牌是 sk-abc123DEF456", policy)
+    assert decision.action is DefenseAction.ALLOW
+    assert decision.redacted_content is None
 
 
 def test_screen_redact_scrubs_and_fingerprints():
     text = "令牌是 sk-abc123DEF456 然后普通中文"
-    decision = screen(text, default_policy())
+    policy = parse_policy(
+        {"enabled": True, "rules": [{"on": "sensitive_data", "action": "redact"}]}
+    )
+    decision = screen(text, policy)
     assert decision.action is DefenseAction.REDACT
     assert decision.detector == "sensitive_data"
     assert "sk-abc123DEF456" not in (decision.redacted_content or "")
@@ -85,12 +92,51 @@ def test_screen_disabled_is_allow():
     assert decision.action is DefenseAction.ALLOW
 
 
+def _ensure_agent(engine):
+    agent = engine.db().execute("SELECT * FROM agents LIMIT 1").fetchone()
+    if agent is None:
+        engine.db().execute(
+            """INSERT INTO agents(id, device_id, device_name, program, display_name, status, pubkey, created_at)
+               VALUES('a1','d1','本机','cursor','Cursor','active','pub',?)""",
+            (engine.utcnow(),),
+        )
+        engine.db().commit()
+        agent = engine.db().execute("SELECT * FROM agents WHERE id='a1'").fetchone()
+    return agent
+
+
+def test_submit_text_default_keeps_body(tmp_path, monkeypatch):
+    """默认策略关闭：密钥仍可入库；出站脱敏另由 redact_text 负责。"""
+    monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
+    monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    from rogmem import engine
+
+    engine.connect(tmp_path, tmp_path / "scan")
+    agent = _ensure_agent(engine)
+    secret = "sk-abc123DEF456"
+    result = engine.submit_text(
+        kind="user",
+        text=f"请记住 {secret}",
+        session_id="s0",
+        turn_id="t0",
+        seq=1,
+        agent=agent,
+        event_at=None,
+        project=None,
+    )
+    assert result["ok"] is True
+    row = engine.db().execute("SELECT body, redacted FROM sources WHERE id=?", (result["id"],)).fetchone()
+    assert secret in row["body"]
+    assert int(row["redacted"] or 0) == 0
+
+
 def test_submit_text_honours_block_policy(tmp_path, monkeypatch):
     monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
     monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
     monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
     from rogmem import engine
-    from rogmem.memory_defense import DefenseAction, parse_policy
+    from rogmem.memory_defense import DefenseAction
 
     engine.connect(tmp_path, tmp_path / "scan")
     engine.set_setting(
@@ -100,16 +146,7 @@ def test_submit_text_honours_block_policy(tmp_path, monkeypatch):
             ensure_ascii=False,
         ),
     )
-    agent = engine.db().execute("SELECT * FROM agents LIMIT 1").fetchone()
-    if agent is None:
-        # Minimal agent row for submit_text
-        engine.db().execute(
-            """INSERT INTO agents(id, device_id, device_name, program, display_name, status, pubkey, created_at)
-               VALUES('a1','d1','本机','cursor','Cursor','active','pub',?)""",
-            (engine.utcnow(),),
-        )
-        engine.db().commit()
-        agent = engine.db().execute("SELECT * FROM agents WHERE id='a1'").fetchone()
+    agent = _ensure_agent(engine)
 
     result = engine.submit_text(
         kind="user",
