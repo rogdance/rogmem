@@ -228,7 +228,7 @@ def graph_lane(
     identity_crystal_ids: list[str],
     statement_crystal_ids: list[str],
     budget: int,
-) -> list[tuple[str, dict]]:
+) -> tuple[list[tuple[str, dict]], int]:
     """Return (ranked hits, pre-budget count) from edge expansion."""
     seeds = graph_seed_ids(
         con,
@@ -269,8 +269,12 @@ def temporal_lane(
     budget: int,
     reference_date: datetime | None = None,
     parse_event: Callable[[object], datetime | None] | None = None,
-) -> list[tuple[str, dict]]:
-    """Return (ranked hits, pre-budget count) whose ``event_at`` is in-window."""
+) -> tuple[list[tuple[str, dict]], int]:
+    """Return (ranked hits, in-window candidate count) for trace truncation.
+
+    The count is the full in-window pool size (before TEMPORAL_POOL / coverage /
+    budget cuts), so ``truncated`` stays meaningful when many dated hits exist.
+    """
     window = extract_temporal_window(query, reference_date)
     if window is None:
         return [], 0
@@ -352,4 +356,5 @@ def temporal_lane(
     # Re-sort selected by similarity for RRF rank positions.
     selected.sort(key=lambda r: float(r["similarity"]), reverse=True)
     hits = [(row["id"], row["payload"]) for row in selected]
-    return hits[:budget], len(hits)
+    # Report full in-window pool size — coverage/budget already shrink ``hits``.
+    return hits[:budget], len(pool)

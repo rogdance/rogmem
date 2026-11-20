@@ -113,3 +113,30 @@ def test_search_trace_exposes_lanes_and_rrf(tmp_path, monkeypatch):
     assert isinstance(found["trace"]["rrf"], list)
     plain = engine.search("雾季课题", limit=5)
     assert "trace" not in plain
+
+
+def test_temporal_trace_count_is_full_in_window_pool(tmp_path, monkeypatch):
+    """Trace count must reflect all in-window candidates, not the post-budget slice."""
+    engine = _open(tmp_path, monkeypatch)
+    con = engine.db()
+    con.execute(
+        "INSERT INTO crystallizations(id,type,name,status,summary_json,chapters_json) VALUES('c1','概念','雾季课题','active','{}','{}')"
+    )
+    for i in range(25):
+        src = f"s{i}"
+        con.execute(
+            """INSERT INTO sources(id,kind,event_at,event_basis,ingested_at,content_hash,body,status,lane)
+               VALUES(?,?, '2025-02-10T00:00:00+00:00','utterance','2026-11-01T00:00:00+00:00',?, 'x','已萃取','fast')""",
+            (src, "user", f"h{i}"),
+        )
+        con.execute(
+            """INSERT INTO statements(id,crystal_id,field,text,quote,source_id,trust,rank,event_at,created_at)
+               VALUES(?,?, '概述',?,?,?,'written','user','2025-02-10T00:00:00+00:00','2026-11-01T00:00:00+00:00')""",
+            (f"st{i}", "c1", f"雾季课题事项{i}", f"雾季课题事项{i}", src),
+        )
+    con.commit()
+    found = engine.search("去年春天雾季课题", limit=5, trace=True)
+    temporal = next(lane for lane in found["trace"]["lanes"] if lane["name"] == "temporal")
+    assert temporal["count"] == 25
+    assert temporal["capped_to"] <= temporal["cap"]
+    assert temporal["truncated"] is True
