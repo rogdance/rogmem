@@ -59,9 +59,13 @@ def fingerprint_value(value: str) -> str:
 
 
 def default_policy() -> DefensePolicy:
-    """默认与现行「检出即脱敏」对齐：启用 + sensitive_data → redact。"""
+    """默认关闭（对齐 Hindsight）。
+
+    出站脱敏仍由 ``redact.redact_text`` 在送模型前执行；入库侧的 allow/redact/block
+    须显式写入 ``settings.memory_defense``，避免默认 redact 静默改写已存正文。
+    """
     return DefensePolicy(
-        enabled=True,
+        enabled=False,
         rules=(PolicyRule(on=DETECTOR_SENSITIVE, action=DefenseAction.REDACT),),
     )
 
