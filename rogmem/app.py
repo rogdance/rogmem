@@ -1583,9 +1583,12 @@ async def core(budget: int = 0, project: str = "", before: str = "") -> str:
 
 @mcp.tool()
 @off_loop
-def search(query: str, limit: int = 5) -> str:
-    """检索结晶和原文。三路按相关度合并。问密钥、法条或字段值时只返回原文。"""
-    payload = engine.search(query, limit)
+def search(query: str, limit: int = 5, trace: bool = False) -> str:
+    """检索结晶和原文。身份/全文/图谱/时间多路按相关度合并；问密钥、法条或字段值时只返回原文。
+
+    trace=True 时附带各路命中、cap 与 RRF/证据计数诊断，默认关闭。
+    """
+    payload = engine.search(query, limit, trace=bool(trace))
     _count_memory_read()
     return json.dumps(payload, ensure_ascii=False)
 
