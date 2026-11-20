@@ -125,9 +125,11 @@ def test_session_list_hides_the_device_column_and_keeps_the_filter():
     }
     session = sources_page([_row()], "session", {}, facets)
     head = session.split("<table class='sources'>", 1)[1].split("</tr>", 1)[0]
-    assert head.count("<th") == 9
+    assert head.count("<th") == 11
     assert "设备名称" not in head
     assert "智能体" in head
+    assert "Token" in head
+    assert "金额" in head
     device = session.split("<select name='device'>", 1)[1].split("</select>", 1)[0]
     assert "独有设备甲" in device
     style = " ".join(session.split("</style>", 1)[0].split())
@@ -140,7 +142,9 @@ def test_session_list_hides_the_device_column_and_keeps_the_filter():
     files = sources_page([_row(kind="file")], "file", {}, facets)
     file_head = files.split("<table class='sources'>", 1)[1].split("</tr>", 1)[0]
     assert "设备名称" in file_head
-    assert file_head.count("<th") == 10
+    assert file_head.count("<th") == 12
+    assert "Token" in file_head
+    assert "金额" in file_head
     detail = source_detail(_row(), [], None, "session")
     assert "设备名称" in detail
     assert "独有设备甲" in detail
