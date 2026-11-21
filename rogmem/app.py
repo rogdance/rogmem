@@ -1604,9 +1604,7 @@ _GRAPH_AUDIO_ROOT = (Path(__file__).parent / "vendor" / "audio").resolve()
 
 @mcp.custom_route("/admin/static/audio/{name}", methods=["GET"])
 async def graph_audio(request: Request) -> Response:
-    """记忆图谱随包自带的 BGM。白名单之外一律不给，避免把 vendor 当文件服务器。"""
-    from rogmem import ui
-
+    """记忆图谱随包自带的 BGM：白名单 + 本地缓存，曲目不变就不再回传整首。"""
     name = str(request.path_params.get("name") or "")
     if name not in ui.GRAPH_AUDIO_FILES:
         return Response(status_code=404)
@@ -1616,11 +1614,24 @@ async def graph_audio(request: Request) -> Response:
         return Response(status_code=404)
     if not target.is_file() or not target.is_relative_to(_GRAPH_AUDIO_ROOT):
         return Response(status_code=404)
-    return Response(
-        target.read_bytes(),
-        media_type="audio/mpeg",
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    etag, last_modified, _ = ui.graph_audio_fingerprint()
+    if not etag:
+        etag = '"' + hashlib.sha256(target.read_bytes()).hexdigest() + '"'
+        last_modified = ""
+    headers = {
+        "Cache-Control": "private, max-age=31536000, immutable",
+        "ETag": etag,
+    }
+    if last_modified:
+        headers["Last-Modified"] = last_modified
+    # 协商缓存：内容没变就只回 304，不重传整首曲子。
+    none_match = request.headers.get("if-none-match", "")
+    if none_match == etag or (
+        not none_match and last_modified
+        and request.headers.get("if-modified-since") == last_modified
+    ):
+        return Response(status_code=304, headers=headers)
+    return Response(target.read_bytes(), media_type="audio/mpeg", headers=headers)
 
 
 def _count_memory_read() -> None:

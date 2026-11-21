@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import contextvars
+import email.utils
+import hashlib
 import html
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlencode
 
 from rogmem.device_identity import display_device_name
@@ -7331,17 +7334,58 @@ def shared_graph(
 # 只播这一首随包自带的 BGM。不加载第三方音频，不加交互音效，也不做音频处理。
 GRAPH_AUDIO_BGM = "bgm.mp3"
 GRAPH_AUDIO_FILES = frozenset({GRAPH_AUDIO_BGM})
+_GRAPH_AUDIO_FILE = Path(__file__).with_name("vendor") / "audio" / GRAPH_AUDIO_BGM
+_GRAPH_AUDIO_FINGERPRINT: dict[tuple[int, int], tuple[str, str, int]] = {}
+
+
+def graph_audio_fingerprint() -> tuple[str, str, int]:
+    """内容指纹 (ETag, Last-Modified, 字节数)。按 mtime+size 缓存，换曲自动失效。"""
+    try:
+        stat = _GRAPH_AUDIO_FILE.stat()
+    except OSError:
+        return "", "", 0
+    key = (stat.st_mtime_ns, stat.st_size)
+    cached = _GRAPH_AUDIO_FINGERPRINT.get(key)
+    if cached is not None:
+        return cached
+    digest = hashlib.sha256()
+    with _GRAPH_AUDIO_FILE.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    value = (
+        '"' + digest.hexdigest() + '"',
+        email.utils.formatdate(stat.st_mtime, usegmt=True),
+        stat.st_size,
+    )
+    _GRAPH_AUDIO_FINGERPRINT.clear()
+    _GRAPH_AUDIO_FINGERPRINT[key] = value
+    return value
+
+
+def graph_audio_src() -> str:
+    """URL 带内容指纹：曲目不变，浏览器就一直用本地副本，不必重新下载。"""
+    etag, _, _ = graph_audio_fingerprint()
+    version = etag.strip('"')[:12]
+    return "/admin/static/audio/" + GRAPH_AUDIO_BGM + ("?v=" + version if version else "")
 
 _GRAPH_AUDIO_CSS = """<style>
-.rga{position:fixed;right:20px;bottom:20px;z-index:80}
-.rga-toggle{display:flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid rgba(180,205,255,.22);border-radius:999px;background:rgba(14,20,38,.62);backdrop-filter:blur(12px);color:#e6ecf8;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;cursor:pointer;box-shadow:0 6px 24px rgba(0,0,0,.28)}
+.rga{position:fixed;right:18px;bottom:18px;z-index:80}
+.rga-toggle{display:grid;place-items:center;width:34px;height:34px;padding:0;border:1px solid rgba(180,205,255,.22);border-radius:50%;background:rgba(14,20,38,.62);backdrop-filter:blur(12px);color:#cfe0ff;cursor:pointer;box-shadow:0 6px 24px rgba(0,0,0,.28)}
 .rga-toggle:hover{border-color:rgba(180,205,255,.45);background:rgba(20,30,54,.78)}
-.rga-glyph{font-size:15px;color:#a9c8ff}
+.rga-disc{display:block;width:20px;height:20px;animation:rga-spin 3.2s linear infinite;transform-origin:50% 50%}
+.rga-toggle[aria-pressed="false"] .rga-disc{animation-play-state:paused;opacity:.45}
+@keyframes rga-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 </style>"""
 
 _GRAPH_AUDIO_PANEL = """<div class="rga">
-  <button type="button" class="rga-toggle" id="rga-toggle" aria-pressed="true">
-    <span class="rga-glyph">&#9834;</span><span id="rga-badge">背景音乐</span>
+  <button type="button" class="rga-toggle" id="rga-toggle" aria-pressed="true" aria-label="暂停背景音乐" title="暂停背景音乐">
+    <svg class="rga-disc" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/>
+      <circle cx="12" cy="12" r="6.4" stroke="currentColor" stroke-width="1" opacity=".55"/>
+      <path d="M12 2a10 10 0 0 1 8.7 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+      <circle cx="12" cy="12" r="2.6" fill="currentColor"/>
+      <circle cx="12" cy="12" r=".9" fill="#0e1426"/>
+    </svg>
   </button>
 </div>
 <audio id="rogmem-graph-bgm" loop preload="none" src="__BGM_SRC__"></audio>"""
@@ -7352,18 +7396,20 @@ _GRAPH_AUDIO_JS = """<script>
   var STORE = "rogmem-graph-bgm-v1";
   var bgm = document.getElementById("rogmem-graph-bgm");
   var toggle = document.getElementById("rga-toggle");
-  var badge = document.getElementById("rga-badge");
-  var enabled = true;
+  var playing = true;
   var unlocked = false;
-  try { enabled = localStorage.getItem(STORE) !== "off"; } catch (e) {}
+  try { playing = localStorage.getItem(STORE) !== "off"; } catch (e) {}
   if (bgm) bgm.volume = 0.45;
 
   function paint() {
-    if (badge) badge.textContent = enabled ? "背景音乐" : "已关闭";
-    if (toggle) toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+    if (!toggle) return;
+    toggle.setAttribute("aria-pressed", playing ? "true" : "false");
+    var label = playing ? "暂停背景音乐" : "播放背景音乐";
+    toggle.setAttribute("aria-label", label);
+    toggle.setAttribute("title", label);
   }
   function play() {
-    if (!bgm || !enabled || !unlocked) return;
+    if (!bgm || !playing || !unlocked) return;
     if (bgm.paused) {
       var pending = bgm.play();
       if (pending && pending.catch) pending.catch(function () {});
@@ -7378,9 +7424,9 @@ _GRAPH_AUDIO_JS = """<script>
   document.addEventListener("pointerdown", unlock, {passive: true});
   document.addEventListener("keydown", unlock);
   if (toggle) toggle.addEventListener("click", function () {
-    enabled = !enabled;
-    try { localStorage.setItem(STORE, enabled ? "on" : "off"); } catch (e) {}
-    if (enabled) { unlock(); play(); } else if (bgm) bgm.pause();
+    playing = !playing;
+    try { localStorage.setItem(STORE, playing ? "on" : "off"); } catch (e) {}
+    if (playing) { unlock(); play(); } else if (bgm) bgm.pause();
     paint();
   });
   paint();
@@ -7390,10 +7436,9 @@ _GRAPH_AUDIO_JS = """<script>
 
 def graph_audio_layer() -> str:
     """图谱页专属背景音乐。别的页面一个字节都不发。"""
-    src = "/admin/static/audio/" + GRAPH_AUDIO_BGM
     return (
         _GRAPH_AUDIO_CSS
-        + _GRAPH_AUDIO_PANEL.replace("__BGM_SRC__", src)
+        + _GRAPH_AUDIO_PANEL.replace("__BGM_SRC__", graph_audio_src())
         + _GRAPH_AUDIO_JS
     )
 
