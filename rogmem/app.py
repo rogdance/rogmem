@@ -1604,11 +1604,11 @@ _GRAPH_AUDIO_ROOT = (Path(__file__).parent / "vendor" / "audio").resolve()
 
 @mcp.custom_route("/admin/static/audio/{name}", methods=["GET"])
 async def graph_audio(request: Request) -> Response:
-    """记忆图谱自带的成品音频。白名单之外一律不给，避免把 vendor 当文件服务器。"""
+    """记忆图谱随包自带的 BGM。白名单之外一律不给，避免把 vendor 当文件服务器。"""
     from rogmem import ui
 
     name = str(request.path_params.get("name") or "")
-    if name not in ui.GRAPH_AUDIO_SOURCES:
+    if name not in ui.GRAPH_AUDIO_FILES:
         return Response(status_code=404)
     try:
         target = (_GRAPH_AUDIO_ROOT / name).resolve()

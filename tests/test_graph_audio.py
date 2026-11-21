@@ -1,9 +1,7 @@
-"""记忆图谱音景：随包的成品音频、白名单静态路由、结晶点击的发声交接点。
+"""记忆图谱背景音乐：只播随包自带的一首 BGM。
 
-The audio files are downloaded, finished recordings (Mixkit Free License).
-This test freezes that the page carries the player, that only whitelisted files
-are served, and that a crystal click hands off to the audio layer at the same
-moment the shader pulse starts.
+不放交互音效、不加载第三方音频、不在任何页面留下许可或署名文字。
+测试冻结了资源清单、单曲播放、白名单静态路由，以及结晶点击不再发声。
 """
 
 from __future__ import annotations
@@ -24,48 +22,31 @@ def _mp3(data: bytes) -> bool:
     )
 
 
-def _channel_mode(data: bytes) -> int | None:
-    """MP3 frame header: 00 stereo / 01 joint-stereo / 11 mono."""
-    i = 0
-    if data[:3] == b"ID3":
-        size = ((data[6] & 0x7F) << 21) | ((data[7] & 0x7F) << 14) | ((data[8] & 0x7F) << 7) | (data[9] & 0x7F)
-        i = 10 + size
-    while i + 4 < len(data) and i < 200000:
-        if data[i] == 0xFF and (data[i + 1] & 0xE0) == 0xE0:
-            return (data[i + 3] >> 6) & 3
-        i += 1
-    return None
+def test_only_one_bgm_is_bundled():
+    assert ui.GRAPH_AUDIO_BGM == "bgm.mp3"
+    assert ui.GRAPH_AUDIO_FILES == frozenset({"bgm.mp3"})
+    files = {path.name for path in AUDIO.iterdir() if path.is_file()}
+    assert files == {"bgm.mp3"}
+    data = (AUDIO / ui.GRAPH_AUDIO_BGM).read_bytes()
+    assert _mp3(data)
+    assert len(data) > 100_000
 
 
-def test_bundled_audio_is_real_and_the_bgm_is_stereo():
-    assert ui.GRAPH_AUDIO_BGM == "vastness.mp3"
-    assert ui.GRAPH_AUDIO_CHIMES[0] == "crystal-chime.mp3"
-    assert set(ui.GRAPH_AUDIO_CHIMES) <= set(ui.GRAPH_AUDIO_SOURCES)
-    for name in ui.GRAPH_AUDIO_SOURCES:
-        data = (AUDIO / name).read_bytes()
-        assert _mp3(data), name
-        assert len(data) > 1000, name
-    bgm = (AUDIO / ui.GRAPH_AUDIO_BGM).read_bytes()
-    assert _channel_mode(bgm) in (0, 1), "BGM 必须是立体声"
-
-
-def test_graph_page_carries_the_audio_layer():
+def test_graph_page_plays_only_the_bgm():
     html = ui.graph_page()
-    assert "/admin/static/audio/vastness.mp3" in html
-    assert "rogmemGraphAudio" in html
-    assert "crystal-chime.mp3" in html
-    for element in ("rga-toggle", "rga-bgm", "rga-sfx", "rga-volume"):
-        assert element in html
-    # 图谱页不放任何授权署名；许可只在关于页的致谢里留一行。
-    assert "Mixkit" not in html
-    assert "license" not in html.lower()
-    assert "Vastness" not in html
-    assert "Andrew Ev" not in html
-    assert "Crystal chime" not in html
-    assert "rga-credit" not in html
-    assert "AudioContext" in html
-    assert "createStereoPanner" in html  # 立体声空间感
+    assert "/admin/static/audio/bgm.mp3" in html
+    assert 'id="rogmem-graph-bgm" loop' in html
+    assert "rga-toggle" in html
     assert "pointerdown" in html  # 浏览器自动播放策略：首次交互解锁
+    # 旧音景、第三方素材和授权文字，一个字节都不留在页面上。
+    for gone in (
+        "Mixkit", "license", "Vastness", "Andrew Ev", "Crystal chime",
+        "vastness", "crystal-chime", "fairy-", "sparkle-touch", "bell-chime",
+        "rga-sfx", "rga-volume", "rga-bgm", "rga-panel", "rga-credit",
+        "rogmemGraphAudio", "chime(", "AudioContext", "createStereoPanner",
+        "decodeAudioData", "结晶轻响", "星空音效", "音效", "致谢",
+    ):
+        assert gone not in html, gone
 
 
 def test_audio_layer_is_exclusive_to_the_graph_page():
@@ -74,25 +55,26 @@ def test_audio_layer_is_exclusive_to_the_graph_page():
     assert "/admin/static/audio/" not in plain
 
 
-def test_audio_credit_is_one_line_in_the_about_page_only():
+def test_no_audio_credit_anywhere_in_the_about_page():
     from rogmem.ui import about_page
 
     about = about_page("V1-test")
-    assert "致谢" in about
-    assert "<span>音效</span><span class='about-credit-meta'>Mixkit Free License</span>" in about
-    # 致谢里不铺开曲名、作者或许可全文。
-    for text in ("Vastness", "Andrew Ev", "Crystal chime", "mixkit.co/license"):
-        assert text not in about
+    assert "致谢" in about  # 项目原有的致谢区块仍在，只是不含音频条目
+    for gone in (
+        "音效", "Mixkit", "license", "Vastness", "Andrew Ev",
+        "Crystal chime", "Floating Pulse", "bgm.mp3", "背景音乐",
+    ):
+        assert gone not in about, gone
 
 
-def test_a_crystal_click_hands_off_to_the_audio_layer():
+def test_a_crystal_click_no_longer_plays_sound():
     script = ui._GRAPH_3D_JS_TEMPLATE
     assert "pulseAt(hits[0].point)" in script
-    assert "rogmemGraphAudio.chime" in script
-    assert "window.innerWidth" in script  # 按点击横坐标做左右声像
+    for gone in ("rogmemGraphAudio", "chime", "GraphAudio"):
+        assert gone not in script, gone
 
 
-def test_audio_route_serves_only_whitelisted_files(tmp_path, monkeypatch):
+def test_audio_route_serves_only_the_bgm(tmp_path, monkeypatch):
     monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
     monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
     monkeypatch.setenv("ROGMEM_EMBED", "off")
@@ -102,10 +84,9 @@ def test_audio_route_serves_only_whitelisted_files(tmp_path, monkeypatch):
 
     engine.connect(tmp_path, tmp_path / "scan")
     client = TestClient(build_app())
-    for name in ui.GRAPH_AUDIO_SOURCES:
-        response = client.get("/admin/static/audio/" + name)
-        assert response.status_code == 200, name
-        assert response.headers["content-type"].startswith("audio/mpeg"), name
-        assert _mp3(response.content), name
-    assert client.get("/admin/static/audio/not-a-track.mp3").status_code == 404
-    assert client.get("/admin/static/audio/app.py").status_code == 404
+    response = client.get("/admin/static/audio/" + ui.GRAPH_AUDIO_BGM)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/mpeg")
+    assert _mp3(response.content)
+    for name in ("vastness.mp3", "crystal-chime.mp3", "not-a-track.mp3", "app.py"):
+        assert client.get("/admin/static/audio/" + name).status_code == 404, name
