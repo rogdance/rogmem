@@ -56,7 +56,13 @@ def test_graph_page_carries_the_audio_layer():
     assert "crystal-chime.mp3" in html
     for element in ("rga-toggle", "rga-bgm", "rga-sfx", "rga-volume"):
         assert element in html
-    assert "Mixkit" in html and "license" in html  # 来源与许可
+    # 图谱页不放任何授权署名；许可只在关于页的致谢里留一行。
+    assert "Mixkit" not in html
+    assert "license" not in html.lower()
+    assert "Vastness" not in html
+    assert "Andrew Ev" not in html
+    assert "Crystal chime" not in html
+    assert "rga-credit" not in html
     assert "AudioContext" in html
     assert "createStereoPanner" in html  # 立体声空间感
     assert "pointerdown" in html  # 浏览器自动播放策略：首次交互解锁
@@ -66,6 +72,17 @@ def test_audio_layer_is_exclusive_to_the_graph_page():
     plain = ui.page("结晶记忆", "crystals", "<p>hello</p>")
     assert "rga-toggle" not in plain
     assert "/admin/static/audio/" not in plain
+
+
+def test_audio_credit_is_one_line_in_the_about_page_only():
+    from rogmem.ui import about_page
+
+    about = about_page("V1-test")
+    assert "致谢" in about
+    assert "<span>音效</span><span class='about-credit-meta'>Mixkit Free License</span>" in about
+    # 致谢里不铺开曲名、作者或许可全文。
+    for text in ("Vastness", "Andrew Ev", "Crystal chime", "mixkit.co/license"):
+        assert text not in about
 
 
 def test_a_crystal_click_hands_off_to_the_audio_layer():

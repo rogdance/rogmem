@@ -7332,9 +7332,8 @@ def shared_graph(
 
 
 # ---- 记忆图谱音景 -----------------------------------------------------------
-# 这里全部是网上找来的现成成品音频，代码不生成任何声音。文件随包自带，不走 CDN。
-# Mixkit Free License：商业 / 非商业项目均可免费使用、无需署名；不得把原始素材
-# 单独当作可下载资源再分发或转售。许可全文 https://mixkit.co/license/ 。
+# 网上找来的现成成品音频，代码不生成任何声音；文件随包自带，不走 CDN。
+# 来源与许可只在关于页的「致谢」里留一行，曲目级元数据见 GRAPH_AUDIO_SOURCES。
 GRAPH_AUDIO_BGM = "vastness.mp3"
 GRAPH_AUDIO_CHIMES = (
     "crystal-chime.mp3",
@@ -7367,8 +7366,6 @@ _GRAPH_AUDIO_CSS = """<style>
 .rga-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:9px 0;color:#c8d5ec}
 .rga-row input[type=checkbox]{accent-color:#8fb4ff;width:15px;height:15px;cursor:pointer}
 .rga-row input[type=range]{accent-color:#8fb4ff;width:104px;cursor:pointer}
-.rga-credit{margin:10px 0 0;padding-top:9px;border-top:1px solid rgba(180,205,255,.14);font-size:10.5px;line-height:1.55;color:#8b9fbf}
-.rga-credit a{color:#9fbcff;text-decoration:none}
 </style>"""
 
 _GRAPH_AUDIO_PANEL = """<div class="rga">
@@ -7376,11 +7373,10 @@ _GRAPH_AUDIO_PANEL = """<div class="rga">
     <span class="rga-glyph">&#9834;</span><span id="rga-badge">点一下开启星空音效</span>
   </button>
   <div class="rga-panel" id="rga-panel" hidden>
-    <div class="rga-head"><b>星空音效</b><span>Vastness · 结晶轻响</span></div>
+    <div class="rga-head"><b>星空音效</b><span>背景音乐 · 结晶轻响</span></div>
     <label class="rga-row"><span>背景音乐</span><input type="checkbox" id="rga-bgm" checked></label>
     <label class="rga-row"><span>结晶轻响</span><input type="checkbox" id="rga-sfx" checked></label>
     <label class="rga-row"><span>音量</span><input type="range" id="rga-volume" min="0" max="100" value="45"></label>
-    <p class="rga-credit">成品音频来自 Mixkit（Free License，可商用、无需署名）：BGM「Vastness」Andrew Ev；音效「Crystal chime」「Fairy magic sparkle」等。<a href="https://mixkit.co/license/" target="_blank" rel="noopener">许可说明</a></p>
   </div>
 </div>
 <audio id="rogmem-graph-bgm" loop preload="none" src="__BGM_SRC__"></audio>"""
@@ -10192,6 +10188,7 @@ def about_page(version: str, release: dict | None = None) -> str:
 <ul>
 <li><span>WeKnora</span><span class='about-credit-meta'>Tencent · <a href='https://github.com/Tencent/WeKnora' target='_blank' rel='noopener'>https://github.com/Tencent/WeKnora</a></span></li>
 <li><span>Techartist</span><span class='about-credit-meta'>Techartist · <a href='https://codepen.io/VoXelo/pen/dPMeGze' target='_blank' rel='noopener'>https://codepen.io/VoXelo/pen/dPMeGze</a></span></li>
+<li><span>音效</span><span class='about-credit-meta'>Mixkit Free License</span></li>
 </ul>
 </div>
 </section>
