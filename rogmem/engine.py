@@ -870,6 +870,13 @@ def connect(data: Path, scan: Path) -> None:
         con.execute("ALTER TABLE chunks ADD COLUMN parent_id INTEGER")
     if "embed_text" not in chunk_columns:
         con.execute("ALTER TABLE chunks ADD COLUMN embed_text TEXT")
+    # 读路径要问「有没有可检索的 parent 文本」。当前写入模型里 parent 行从不写
+    # embed_text，所以这个部分索引几乎总是空的：一次 O(1) 的存在性判断就能替掉
+    # 对大文本列的前缀通配全表扫描。老库若真写过，索引也只收那几行，代价恒定。
+    con.execute(
+        """CREATE INDEX IF NOT EXISTS chunks_parent_embed
+             ON chunks(role) WHERE embed_text IS NOT NULL"""
+    )
     crystal_columns = {row[1] for row in con.execute("PRAGMA table_info(crystallizations)")}
     if "vec_json" not in crystal_columns:
         con.execute("ALTER TABLE crystallizations ADD COLUMN vec_json TEXT")
@@ -13708,10 +13715,19 @@ def read_section(name: str, section: str) -> dict:
     if chapter == "概述" and text in {None, ""}:
         text = _overview_from_row(row)
     missing = text in {None, "", "暂无来源", "尚无来源"}
-    parents = db().execute(
-        "SELECT text, embed_text FROM chunks WHERE role='parent' AND embed_text LIKE ? ORDER BY seq LIMIT 3",
-        (f"%标题：{chapter}%",),
-    ).fetchall()
+    # 能力探测先于昂贵工作：当前写入模型下 parent chunk 不带 embed_text，
+    # 这段遗留的「按标题找父块」查询结果恒为空，却要对 chunks 的大文本列做
+    # 前缀通配全表扫描。先问一个走部分索引的 O(1) 问题，再决定要不要付扫描代价；
+    # 老库里真的写过 parent 检索文本时，行为与原来完全一致。
+    searchable = db().execute(
+        "SELECT 1 FROM chunks WHERE role='parent' AND embed_text IS NOT NULL LIMIT 1"
+    ).fetchone()
+    parents = []
+    if searchable is not None:
+        parents = db().execute(
+            "SELECT text, embed_text FROM chunks WHERE role='parent' AND embed_text LIKE ? ORDER BY seq LIMIT 3",
+            (f"%标题：{chapter}%",),
+        ).fetchall()
     return {
         "crystal": row["name"],
         "section": chapter,
