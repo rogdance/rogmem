@@ -6996,6 +6996,10 @@ function rogmem3dBuild(el, ctx) {
     }
     applyFocus(idx);
     pulseAt(hits[0].point);
+    // 结晶亮起来的同一刻轻轻碰一下水晶；横坐标决定声音落在左耳还是右耳。
+    if (window.rogmemGraphAudio && typeof window.rogmemGraphAudio.chime === 'function') {
+      try { window.rogmemGraphAudio.chime(e.clientX / (window.innerWidth || 1)); } catch (err) {}
+    }
     if (typeof el.rogmemOnFocus === 'function') { try { el.rogmemOnFocus(idx); } catch (err) {} }
   });
 
@@ -7327,6 +7331,240 @@ def shared_graph(
     )
 
 
+# ---- 记忆图谱音景 -----------------------------------------------------------
+# 这里全部是网上找来的现成成品音频，代码不生成任何声音。文件随包自带，不走 CDN。
+# Mixkit Free License：商业 / 非商业项目均可免费使用、无需署名；不得把原始素材
+# 单独当作可下载资源再分发或转售。许可全文 https://mixkit.co/license/ 。
+GRAPH_AUDIO_BGM = "vastness.mp3"
+GRAPH_AUDIO_CHIMES = (
+    "crystal-chime.mp3",
+    "fairy-sparkle.mp3",
+    "fairy-glitter.mp3",
+    "sparkle-touch.mp3",
+    "bell-chime.mp3",
+)
+GRAPH_AUDIO_SOURCES = {
+    # 宁静深邃的宇宙氛围，Ambient，3:50，立体声，配器很薄，适合垫在星图底下。
+    "vastness.mp3": ("Vastness — Andrew Ev", "https://mixkit.co/free-stock-music/space/"),
+    # 主音是水晶碰撞；其余四枚是空灵短闪光，用来叠出「布灵布灵」的余响。
+    "crystal-chime.mp3": ("Crystal chime", "https://mixkit.co/free-sound-effects/crystal/"),
+    "fairy-sparkle.mp3": ("Fairy magic sparkle", "https://mixkit.co/free-sound-effects/magic/"),
+    "fairy-glitter.mp3": ("Fairy glitter", "https://mixkit.co/free-sound-effects/magic/"),
+    "sparkle-touch.mp3": ("Magic sparkle touch", "https://mixkit.co/free-sound-effects/sparkle/"),
+    "bell-chime.mp3": ("Relaxing bell chime", "https://mixkit.co/free-sound-effects/chime/"),
+}
+
+_GRAPH_AUDIO_CSS = """<style>
+.rga{position:fixed;right:20px;bottom:20px;z-index:80;color:#e6ecf8;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.rga-toggle{display:flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid rgba(180,205,255,.22);border-radius:999px;background:rgba(14,20,38,.62);backdrop-filter:blur(12px);color:#e6ecf8;cursor:pointer;letter-spacing:.02em;box-shadow:0 6px 24px rgba(0,0,0,.28)}
+.rga-toggle:hover{border-color:rgba(180,205,255,.45);background:rgba(20,30,54,.78)}
+.rga-glyph{font-size:15px;color:#a9c8ff}
+.rga-panel{position:absolute;right:0;bottom:46px;width:236px;padding:14px 15px 12px;border:1px solid rgba(180,205,255,.2);border-radius:14px;background:rgba(12,18,34,.9);backdrop-filter:blur(18px);box-shadow:0 12px 40px rgba(0,0,0,.4)}
+.rga-panel[hidden]{display:none}
+.rga-head{display:flex;flex-direction:column;gap:2px;margin-bottom:10px}
+.rga-head b{font-weight:600;letter-spacing:.04em}
+.rga-head span{font-size:11px;color:#8fa2c4}
+.rga-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:9px 0;color:#c8d5ec}
+.rga-row input[type=checkbox]{accent-color:#8fb4ff;width:15px;height:15px;cursor:pointer}
+.rga-row input[type=range]{accent-color:#8fb4ff;width:104px;cursor:pointer}
+.rga-credit{margin:10px 0 0;padding-top:9px;border-top:1px solid rgba(180,205,255,.14);font-size:10.5px;line-height:1.55;color:#8b9fbf}
+.rga-credit a{color:#9fbcff;text-decoration:none}
+</style>"""
+
+_GRAPH_AUDIO_PANEL = """<div class="rga">
+  <button type="button" class="rga-toggle" id="rga-toggle" aria-expanded="false" aria-controls="rga-panel">
+    <span class="rga-glyph">&#9834;</span><span id="rga-badge">点一下开启星空音效</span>
+  </button>
+  <div class="rga-panel" id="rga-panel" hidden>
+    <div class="rga-head"><b>星空音效</b><span>Vastness · 结晶轻响</span></div>
+    <label class="rga-row"><span>背景音乐</span><input type="checkbox" id="rga-bgm" checked></label>
+    <label class="rga-row"><span>结晶轻响</span><input type="checkbox" id="rga-sfx" checked></label>
+    <label class="rga-row"><span>音量</span><input type="range" id="rga-volume" min="0" max="100" value="45"></label>
+    <p class="rga-credit">成品音频来自 Mixkit（Free License，可商用、无需署名）：BGM「Vastness」Andrew Ev；音效「Crystal chime」「Fairy magic sparkle」等。<a href="https://mixkit.co/license/" target="_blank" rel="noopener">许可说明</a></p>
+  </div>
+</div>
+<audio id="rogmem-graph-bgm" loop preload="none" src="__BGM_SRC__"></audio>"""
+
+_GRAPH_AUDIO_JS = """<script>
+(function () {
+  'use strict';
+  var BGM_SRC = "__BGM_SRC__";
+  var CHIMES = __CHIMES__;
+  var MAIN = "__MAIN__";
+  var STORE = "rogmem-graph-audio-v1";
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem(STORE) || "{}") || {}; } catch (e) { saved = {}; }
+  var state = {
+    bgm: saved.bgm !== false,
+    sfx: saved.sfx !== false,
+    volume: (typeof saved.volume === "number" && saved.volume >= 0 && saved.volume <= 1) ? saved.volume : 0.45,
+    unlocked: false
+  };
+  var ctx = null, bgmGain = null, bgmPan = null, buffers = {}, driftTimer = null, lastChime = -1;
+  var bgm = document.getElementById("rogmem-graph-bgm");
+  var toggle = document.getElementById("rga-toggle");
+  var panel = document.getElementById("rga-panel");
+  var badge = document.getElementById("rga-badge");
+  var bgmBox = document.getElementById("rga-bgm");
+  var sfxBox = document.getElementById("rga-sfx");
+  var volBox = document.getElementById("rga-volume");
+
+  function save() {
+    try {
+      localStorage.setItem(STORE, JSON.stringify({bgm: state.bgm, sfx: state.sfx, volume: state.volume}));
+    } catch (e) {}
+  }
+  function paint() {
+    if (bgmBox) bgmBox.checked = state.bgm;
+    if (sfxBox) sfxBox.checked = state.sfx;
+    if (volBox) volBox.value = Math.round(state.volume * 100);
+    if (badge) badge.textContent = state.unlocked
+      ? ((state.bgm || state.sfx) ? "星空音效" : "已静音")
+      : "点一下开启星空音效";
+  }
+  // BGM 本身是立体声文件；这里只做极缓慢的左右漂移，让星图有「无垠」的空间感。
+  function drift() {
+    if (!bgmPan || !ctx) return;
+    bgmPan.pan.setTargetAtTime(Math.sin(Date.now() / 21000) * 0.22, ctx.currentTime, 0.7);
+  }
+  function ensureContext() {
+    if (ctx) return true;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC || !bgm) return false;
+    try {
+      ctx = new AC();
+      bgmGain = ctx.createGain();
+      bgmGain.gain.value = 0.0001;
+      if (ctx.createStereoPanner) {
+        bgmPan = ctx.createStereoPanner();
+        bgmGain.connect(bgmPan);
+        bgmPan.connect(ctx.destination);
+      } else {
+        bgmGain.connect(ctx.destination);
+      }
+      ctx.createMediaElementSource(bgm).connect(bgmGain);
+    } catch (e) { ctx = null; return false; }
+    return true;
+  }
+  function startBgm() {
+    if (!ctx || !bgmGain || !state.bgm || !bgm) return;
+    var now = ctx.currentTime;
+    bgmGain.gain.cancelScheduledValues(now);
+    bgmGain.gain.setTargetAtTime(Math.max(0.0001, state.volume * 0.24), now, 0.7);
+    if (bgm.paused) {
+      var playing = bgm.play();
+      if (playing && playing.catch) playing.catch(function () {});
+    }
+    if (!driftTimer) driftTimer = setInterval(drift, 180);
+  }
+  function stopBgm() {
+    if (!ctx || !bgmGain) return;
+    bgmGain.gain.cancelScheduledValues(ctx.currentTime);
+    bgmGain.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.15);
+    var el = bgm;
+    setTimeout(function () { if (!state.bgm && el) el.pause(); }, 700);
+  }
+  function preload() {
+    CHIMES.forEach(function (name) {
+      if (buffers[name]) return;
+      fetch("/admin/static/audio/" + name)
+        .then(function (r) { if (!r.ok) throw new Error("audio"); return r.arrayBuffer(); })
+        .then(function (raw) { return ctx.decodeAudioData(raw); })
+        .then(function (buf) { buffers[name] = buf; })
+        .catch(function () {});
+    });
+  }
+  function playOne(name, at, peak, rate, xRatio) {
+    var buf = buffers[name];
+    if (!buf || !ctx) return;
+    var source = ctx.createBufferSource();
+    source.buffer = buf;
+    source.playbackRate.value = rate;
+    var gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), at + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + 1.25);
+    var tail = gain;
+    if (ctx.createStereoPanner) {
+      var pan = ctx.createStereoPanner();
+      var base = Math.max(-0.7, Math.min(0.7, ((xRatio || 0.5) - 0.5) * 1.4));
+      pan.pan.value = Math.max(-0.85, Math.min(0.85, base + (Math.random() - 0.5) * 0.3));
+      gain.connect(pan);
+      tail = pan;
+    }
+    source.connect(gain);
+    tail.connect(ctx.destination);
+    source.start(at);
+    source.stop(at + 1.3);
+  }
+  // 主音水晶碰撞 + 一声更轻、更高、稍晚的闪光，像玻璃轻轻碰了两下。
+  function chime(xRatio) {
+    if (!state.sfx || !ctx) return;
+    var now = ctx.currentTime;
+    if (now - lastChime < 0.055) return;
+    lastChime = now;
+    playOne(MAIN, now, state.volume * 0.30, 0.94 + Math.random() * 0.12, xRatio);
+    var others = CHIMES.filter(function (name) { return name !== MAIN; });
+    var second = others[Math.floor(Math.random() * others.length)];
+    playOne(second, now + 0.07 + Math.random() * 0.06, state.volume * 0.13,
+            1.02 + Math.random() * 0.18, xRatio);
+  }
+  // 浏览器不允许无交互出声：第一次点页面 / 按键时解锁，之后 BGM 淡入。
+  function unlock() {
+    if (state.unlocked) return;
+    if (!ensureContext()) return;
+    state.unlocked = true;
+    if (ctx.state === "suspended" && ctx.resume) {
+      var resumed = ctx.resume();
+      if (resumed && resumed.catch) resumed.catch(function () {});
+    }
+    preload();
+    if (state.bgm) startBgm();
+    paint();
+  }
+  document.addEventListener("pointerdown", unlock, {passive: true});
+  document.addEventListener("keydown", unlock);
+  if (toggle) toggle.addEventListener("click", function () {
+    var open = !!panel && panel.hidden;
+    if (panel) panel.hidden = !open;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    unlock();
+  });
+  if (bgmBox) bgmBox.addEventListener("change", function () {
+    state.bgm = bgmBox.checked;
+    save();
+    if (state.bgm) { unlock(); startBgm(); } else stopBgm();
+    paint();
+  });
+  if (sfxBox) sfxBox.addEventListener("change", function () {
+    state.sfx = sfxBox.checked;
+    save();
+    paint();
+  });
+  if (volBox) volBox.addEventListener("input", function () {
+    state.volume = Math.max(0, Math.min(1, Number(volBox.value) / 100));
+    save();
+    if (ctx && bgmGain && state.bgm) {
+      bgmGain.gain.setTargetAtTime(Math.max(0.0001, state.volume * 0.24), ctx.currentTime, 0.2);
+    }
+  });
+  paint();
+  window.rogmemGraphAudio = {chime: chime, unlock: unlock, state: state};
+})();
+</script>"""
+
+
+def graph_audio_layer() -> str:
+    """图谱页专属音景。别的页面一个字节都不发。"""
+    src = "/admin/static/audio/" + GRAPH_AUDIO_BGM
+    script = (
+        _GRAPH_AUDIO_JS.replace("__BGM_SRC__", src)
+        .replace("__CHIMES__", json.dumps(list(GRAPH_AUDIO_CHIMES)))
+        .replace("__MAIN__", GRAPH_AUDIO_CHIMES[0])
+    )
+    return _GRAPH_AUDIO_CSS + _GRAPH_AUDIO_PANEL.replace("__BGM_SRC__", src) + script
+
+
 def graph_page(auto_labels: bool = False, label_budget: int = 50) -> str:
     """沉浸式星空：主导航以下 edge-to-edge，活跃结晶计数叠在图谱内。"""
     mount = shared_graph(auto_labels=auto_labels, label_budget=label_budget)
@@ -7336,7 +7574,7 @@ def graph_page(auto_labels: bool = False, label_budget: int = 50) -> str:
         f'<div id="graph" aria-busy="true">{count}',
         1,
     )
-    return page("记忆图谱", "graph", mount)
+    return page("记忆图谱", "graph", mount + graph_audio_layer())
 
 
 def _section_page(key: str, title: str, inner: str) -> str:

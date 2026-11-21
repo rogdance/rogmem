@@ -1599,6 +1599,30 @@ async def three_module(request: Request) -> Response:
     return Response(target.read_bytes(), media_type=media, headers={"Cache-Control": "no-cache"})
 
 
+_GRAPH_AUDIO_ROOT = (Path(__file__).parent / "vendor" / "audio").resolve()
+
+
+@mcp.custom_route("/admin/static/audio/{name}", methods=["GET"])
+async def graph_audio(request: Request) -> Response:
+    """记忆图谱自带的成品音频。白名单之外一律不给，避免把 vendor 当文件服务器。"""
+    from rogmem import ui
+
+    name = str(request.path_params.get("name") or "")
+    if name not in ui.GRAPH_AUDIO_SOURCES:
+        return Response(status_code=404)
+    try:
+        target = (_GRAPH_AUDIO_ROOT / name).resolve()
+    except OSError:
+        return Response(status_code=404)
+    if not target.is_file() or not target.is_relative_to(_GRAPH_AUDIO_ROOT):
+        return Response(status_code=404)
+    return Response(
+        target.read_bytes(),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 def _count_memory_read() -> None:
     agent = CURRENT.get()
     if agent is None:
