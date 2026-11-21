@@ -155,8 +155,12 @@ def test_fleet_lists_every_device_and_marks_only_the_viewer(tmp_path, monkeypatc
     assert "添加宿主" in page
     assert "复制提示" in page
     assert "___ROGMEM_GRANT___" in page
-    assert "fillGrant" in page
-    assert page.index("fillGrant") < page.index("/admin/api/enroll-grants")
+    assert "___ROGMEM_TICKET___" in page
+    # The browser no longer stitches location.origin into the prompt: the hub
+    # renders one final prompt and the page uses it verbatim.
+    assert "data.prompt" in page
+    assert "fillGrant" not in page
+    assert "/admin/api/enroll-grants" in page
     assert "AAAA（本机）" in page
     assert "BBB（本机）" not in page
     assert "data-device-id='dev-b'" in page

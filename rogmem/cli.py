@@ -27,7 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("serve", help="启动记忆中枢（NAS / 容器；无子命令时也走这里）")
     channel = sub.add_parser("channel", help="把中枢接到本机 18780。能直接访问时，这扇门交给本次登录")
-    channel.add_argument("--origin", default="", help="添加宿主提示里的入口。入口会变，身份不变")
+    channel.add_argument("--origin", default="", help="登录门口已经记住的入口。入口会变，身份不变")
+    channel.add_argument("--ticket", default="", help="添加宿主签发的接入票据：按身份从入口清单里挑一扇能开的门")
     channel.add_argument("--hub", default="", help="这份中枢的身份。省略时读 ROGMEM_HUB")
     channel.add_argument("--session", action="store_true", help=argparse.SUPPRESS)
     _add_home(channel)
@@ -43,7 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--confirm", action="store_true", help="确认写入配置；真实主目录仍默认拒绝")
     connect.add_argument("--program", action="append", dest="programs", help="只接入这些宿主，可重复。不传则接入全部已发现且受支持的宿主")
     connect.add_argument("--base-url", default="http://127.0.0.1:18780", help="中枢基址，配置写 /mcp")
-    connect.add_argument("--grant", default="", help="添加宿主签发的短时准入凭证")
+    connect.add_argument("--grant", default="", help="添加宿主签发的短时准入凭证（旧客户端）")
+    connect.add_argument("--ticket", default="", help="添加宿主签发的接入票据，CLI 从中取准入凭证并让中枢复核签名")
     update = hosts_sub.add_parser("update", help="把已支持宿主的全局规则与 hook 更新到最新；未 --confirm 只出形状")
     _add_home(update)
     _add_dry_run(update)
@@ -291,8 +293,14 @@ def _remember_hub(home: Path, hub: str) -> None:
 
 
 def _channel_closed_text(refused: str, hub: str) -> str:
+    if refused == "bad-ticket":
+        return "这段接入票据不完整。回宿主管理再点一次「添加宿主」，复制整段提示里的票据。"
+    if refused == "ticket-expired":
+        return "这张接入票据已经过期。回宿主管理再点一次「添加宿主」，拿一张新的。"
     if refused == "login-wall":
         return "这个地址把 /healthz 转到了别处。把已经打开它的浏览器会话放进 ROGMEM_HUB_COOKIE 再试。不会在这台电脑上另存一份记忆。"
+    if refused in {"no-matching-hub", "no-entrance"}:
+        return "票据里的入口都没有回答这份中枢的身份。确认中枢在线、极空间远程访问开着，或让运维设置 ROGMEM_PUBLIC_ORIGIN 后再签发一张。不会在这台电脑上另存一份记忆。"
     if hub:
         return "没有找到这份中枢。不会在这台电脑上另存一份记忆。"
     return "这个地址没有返回 rogmem。不会在这台电脑上另存一份记忆。"
@@ -304,7 +312,29 @@ def channel_main(args: argparse.Namespace) -> int:
     home = _home(args)
     origin = str(getattr(args, "origin", "") or "").strip()
     hub = str(getattr(args, "hub", "") or "").strip() or os.environ.get("ROGMEM_HUB", "").strip()
-    if not origin and not hub:
+    ticket_text = str(getattr(args, "ticket", "") or "").strip() or os.environ.get("ROGMEM_TICKET", "").strip()
+    if ticket_text:
+        # The ticket is the authority: it carries the identity and an ordered
+        # entrance policy signed by the hub. The address that opened the admin
+        # console never takes part in this decision.
+        resolved = inst.resolve_ticket(ticket_text, cookie=os.environ.get("ROGMEM_HUB_COOKIE", ""))
+        if not resolved.get("ok"):
+            _note_closed_gap(home)
+            refused = str(resolved.get("refused") or "no-matching-hub")
+            return _emit(
+                _base_result(
+                    "channel",
+                    False,
+                    ok=False,
+                    refused=refused,
+                    hub=str(resolved.get("hub") or ""),
+                    tried=resolved.get("tried") or [],
+                    text=_channel_closed_text(refused, str(resolved.get("hub") or hub)),
+                )
+            )
+        origin = str(resolved.get("origin") or "")
+        hub = str(resolved.get("hub") or hub)
+    if not origin and not hub and not ticket_text:
         hub = _remembered_hub(home)
     if origin or hub:
         plan = inst.plan_channel(origin, hub)
@@ -842,6 +872,33 @@ def hosts_connect(args: argparse.Namespace) -> int:
     home = _home(args)
     dry = _dry_run(args)
     programs = list(args.programs) if args.programs else None
+    ticket_text = str(getattr(args, "ticket", "") or "").strip()
+    grant = str(args.grant or "").strip()
+
+    if ticket_text:
+        # One capability instead of two. The ticket carries the same short-lived
+        # secret the hub minted; the hub also re-checks the ticket's signature
+        # when the client redeems it, so a swapped credential is refused.
+        from rogmem import admission
+
+        ticket = admission.decode(ticket_text)
+        if ticket is None or ticket.expired():
+            return _emit(
+                _base_result(
+                    "hosts.connect",
+                    dry,
+                    ok=False,
+                    refused="bad-ticket" if ticket is None else "ticket-expired",
+                    text="接入票据无效或已过期。回宿主管理再点一次「添加宿主」。",
+                )
+            )
+        if grant and grant != ticket.secret:
+            return _emit(
+                _base_result("hosts.connect", dry, ok=False, refused="grant-mismatch",
+                             text="--grant 与 --ticket 里的凭证不一致。只传其中一个。")
+            )
+        grant = ticket.secret
+
     plan = inst.connect_hosts(home, args.base_url, programs, confirm=not dry, allow_real=True)
     payload = _base_result(
         "hosts.connect",
@@ -851,21 +908,23 @@ def hosts_connect(args: argparse.Namespace) -> int:
         refused=plan.get("refused") or "",
         written=plan.get("written") or [],
         wrote=bool(plan.get("written")),
-        grant_used=bool(str(args.grant or "").strip()),
+        grant_used=bool(grant),
         ok=bool(plan.get("ok")) if not dry else True,
     )
     if dry:
         payload["ok"] = True
         payload["wrote"] = False
         payload["written"] = []
-    elif str(args.grant or "").strip() and payload["written"]:
+    elif grant and payload["written"]:
         redeemed = []
 
         def post(body: dict, _base: str = args.base_url) -> dict:
+            if ticket_text:
+                body = {**body, "ticket": ticket_text}
             return _post_json(f"{_base.rstrip('/')}/enroll/redeem", body)
 
         for program in payload["written"]:
-            item = inst.redeem_grant(home, args.base_url, args.grant, program, post, allow_real=True)
+            item = inst.redeem_grant(home, args.base_url, grant, program, post, allow_real=True)
             redeemed.append(
                 {
                     "program": program,

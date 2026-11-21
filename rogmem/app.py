@@ -303,6 +303,19 @@ async def enroll_reclaim(request: Request) -> Response:
 @mcp.custom_route("/enroll/redeem", methods=["POST"])
 async def enroll_redeem(request: Request) -> Response:
     data = await request.json()
+    presented = str(data.get("ticket") or "").strip()
+    if presented:
+        # A new client redeems with the whole ticket. The hub re-checks its own
+        # signature and binds the grant to that ticket, so a forged entrance
+        # policy or a swapped credential cannot be replayed here. Legacy clients
+        # still post only the bare grant, which the engine validates by hash.
+        from rogmem import admission
+
+        ticket = admission.verify(presented, admission.hub_key())
+        if ticket is None:
+            return JSONResponse({"ok": False, "error": "票据无效或已过期"}, status_code=403)
+        if ticket.secret != str(data.get("grant") or "").strip():
+            return JSONResponse({"ok": False, "error": "凭证与票据不一致"}, status_code=403)
     result = engine.redeem_enroll_grant(
         str(data.get("grant") or ""),
         str(data.get("device_id") or ""),
@@ -315,14 +328,40 @@ async def enroll_redeem(request: Request) -> Response:
 
 @mcp.custom_route("/admin/api/enroll-grants", methods=["POST"])
 async def admin_enroll_grant(request: Request) -> Response:
+    """Mint one self-contained admission ticket, rendered once, on the hub.
+
+    The entrance policy is derived here — from the request that reached the
+    hub, an operator-declared public origin and the local door — and signed.
+    The browser no longer contributes ``location.origin``: that address
+    describes the computer which opened this page, not the one being enrolled.
+    """
     if not _admin_ok(request):
         return JSONResponse({"error": "未登录"}, status_code=401)
-    from rogmem.onboard import HUB_MARK, onboard_prompt
+    if not _same_origin_or_safe(request):
+        return JSONResponse({"error": "跨站请求"}, status_code=403)
+    from rogmem import admission
+    from rogmem.onboard import onboard_prompt
 
     minted = await asyncio.to_thread(engine.create_enroll_grant)
     identity = await asyncio.to_thread(engine.hub_id)
-    prompt = await asyncio.to_thread(onboard_prompt, minted["secret"])
-    prompt = prompt.replace(HUB_MARK, identity)
+    entrances = admission.derive_entrances(str(request.base_url))
+    ticket = admission.AdmissionTicket(
+        hub=identity,
+        secret=minted["secret"],
+        expires_at=minted["expires_at"],
+        grant_id=minted["id"],
+        entrances=entrances,
+    )
+    token = admission.encode(ticket, admission.hub_key())
+    canonical = entrances[0].url if entrances else str(request.base_url).rstrip("/")
+    prompt = admission.render_prompt(
+        onboard_prompt(minted["secret"]),
+        token,
+        identity,
+        minted["secret"],
+        canonical,
+        entrances,
+    )
     return JSONResponse(
         {
             "ok": True,
@@ -330,6 +369,8 @@ async def admin_enroll_grant(request: Request) -> Response:
             "secret": minted["secret"],
             "expires_at": minted["expires_at"],
             "hub": identity,
+            "ticket": token,
+            "entrances": [item.url for item in entrances],
             "prompt": prompt,
         }
     )

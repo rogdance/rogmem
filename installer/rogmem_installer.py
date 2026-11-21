@@ -201,14 +201,38 @@ def _ports_from_listen_table(text: str) -> set[int]:
 
 
 def _netstat_text() -> str:
+    """Read the listen table without assuming the OS speaks UTF-8.
+
+    A Chinese Windows ``netstat`` emits the local code page (cp936/GBK). Asking
+    ``subprocess`` for ``text=True`` decodes with UTF-8, raises inside its
+    reader thread and silently yields no stdout — which makes every local-door
+    fallback look like there is no listener at all. Decode bytes ourselves and
+    tolerate undecodable bytes: the table we parse is ASCII regardless.
+    """
+    import locale
     import subprocess
 
     command = ["netstat", "-an", "-p", "tcp"] if platform.system() == "Windows" else ["netstat", "-an"]
     try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=3)
+        result = subprocess.run(command, check=False, capture_output=True, timeout=3)
     except (OSError, subprocess.TimeoutExpired):
         return ""
-    return result.stdout or ""
+    raw = result.stdout or b""
+    if not raw:
+        return ""
+    # On Windows netstat writes the system ANSI code page, not the interpreter
+    # locale. Python may report UTF-8 even when the bytes are cp936/GBK.
+    if platform.system() == "Windows":
+        encoding = "mbcs"
+    else:
+        try:
+            encoding = locale.getpreferredencoding(False) or "utf-8"
+        except Exception:
+            encoding = "utf-8"
+    try:
+        return raw.decode(encoding, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
 
 
 def listening_ports() -> list[int]:
@@ -259,6 +283,42 @@ def find_binding(hub: str, *, allow_door: bool = True, skip: set[int] | None = N
     if not hits:
         return ""
     return f"http://127.0.0.1:{min(hits)}"
+
+
+def resolve_ticket(token: str, *, cookie: str = "") -> dict:
+    """Negotiate a live entrance from a hub-signed admission ticket.
+
+    Addresses are candidates, never authorities. Each is probed and accepted
+    only when it answers with the identity written in the ticket. This is what
+    makes one copied prompt work on a different computer, behind a reverse
+    proxy sub-path, or after the entrance has moved.
+    """
+    from rogmem import admission
+
+    ticket = admission.decode(token)
+    if ticket is None:
+        return {"ok": False, "origin": "", "hub": "", "refused": "bad-ticket", "tried": []}
+    if ticket.expired():
+        return {"ok": False, "origin": "", "hub": ticket.hub, "refused": "ticket-expired", "tried": []}
+
+    def probe(url: str) -> dict:
+        return probe_origin(url, cookie or None, timeout=_ENTRANCE_TIMEOUT)
+
+    answer = admission.resolve_entrance(ticket, probe)
+    if answer.get("ok"):
+        return {"ok": True, "origin": answer["origin"], "hub": ticket.hub, "refused": "", "tried": answer["tried"]}
+    # A remembered door on this computer is the last resort, but it still has
+    # to answer with the ticket's identity.
+    bound = find_binding(ticket.hub, allow_door=True)
+    if bound and same_hub(ticket.hub, str(probe_origin(bound, cookie or None, timeout=_ENTRANCE_TIMEOUT).get("hub") or "")):
+        return {"ok": True, "origin": bound, "hub": ticket.hub, "refused": "", "tried": answer["tried"]}
+    return {
+        "ok": False,
+        "origin": "",
+        "hub": ticket.hub,
+        "refused": str(answer.get("refused") or "no-matching-hub"),
+        "tried": answer["tried"],
+    }
 
 
 def _channel_shape(origin: str, hub: str) -> dict:
@@ -1214,18 +1274,30 @@ def redeem_grant(home: Path, base_url: str, grant: str, program: str, post, allo
 
 
 def connect_prompt(program: str) -> str:
-    """Prompt the named host can follow after the user copies it from 添加宿主."""
-    from rogmem.onboard import host_client_instruction
+    """Prompt the named host can follow after the user copies it from 添加宿主.
+
+    This is the legacy single-host scan prompt, not a server-rendered ticket.
+    The shared instruction carries ticket marks; here they become plain words so
+    no unfilled placeholder ever reaches a user.
+    """
+    from rogmem.admission import ENTRANCES_MARK, TICKET_MARK
+    from rogmem.onboard import HUB_MARK, host_client_instruction
 
     name = (program or "").strip()
     if name not in SUPPORTED:
         return ""
+    instruction = (
+        host_client_instruction()
+        .replace(TICKET_MARK, "（宿主管理里「添加宿主」复制出来的接入票据）")
+        .replace(ENTRANCES_MARK, "（票据里带的入口清单）")
+        .replace(HUB_MARK, "（宿主列表里这份中枢的身份）")
+    )
     return (
         f"请把这台电脑上的 {name} 接入 rogmem。用户已经在宿主管理里点过添加宿主，并复制了这段提示，就是同意只接入 {name}。\n\n"
         "不要寻找或安装 Windows、macOS 安装包。记忆只在极空间上，不要在这台电脑另存一份。\n\n"
         "先确认本机 Python 是 3.12 或更高。极空间远程访问要开着，NAS 上的 rogmem 固定听 18080，不要改这个端口。\n\n"
         "使用 python -m rogmem hosts 子命令。客户端里的库是 installer/rogmem_installer.py，不要再当独立安装器跑。\n"
-        + host_client_instruction()
+        + instruction
         + f"用户这次点名的是 {name}。调用 connect_hosts、authorize_host、claim_host、verify_host 时传入 allow_real=True，"
         "因为这是用户刚刚确认要接入的这台电脑。只处理点名的宿主；用户没有点名时才接入全部已发现且受支持的宿主。\n"
         f"connect_hosts 把 {name} 指到记忆中枢，写入它的全局规则，并安装客户端里的同一份 hook。"

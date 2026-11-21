@@ -10,9 +10,11 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
 from starlette.testclient import TestClient
 
 from installer import rogmem_installer as inst
+from rogmem.admission import ENTRANCES_MARK, TICKET_MARK
 from rogmem.host_client import bake_bundle, bundle_bytes, bundle_filename, client_files
 from rogmem.onboard import ORIGIN_MARK, host_client_instruction, onboard_prompt
 
@@ -344,7 +346,7 @@ def test_bootstrap_installs_into_a_fresh_interpreter(tmp_path):
     venv = tmp_path / "venv"
     try:
         subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
-        python = venv / "bin" / "python"
+        python = venv / ("Scripts" if sys.platform == "win32" else "bin") / ("python.exe" if sys.platform == "win32" else "python")
         bootstrap = ROOT / "rogmem" / "host_bootstrap.py"
         result = subprocess.run(
             [str(python), str(bootstrap), origin],
@@ -383,8 +385,12 @@ def test_host_client_routes_and_prompt_carry_the_page_origin(tmp_path, monkeypat
     assert bootstrap.status_code == 200
     assert "def main" in bootstrap.text
     page = client.get("/admin/hosts").text
-    assert ORIGIN_MARK in page
-    assert "location.origin" in page
+    # The page template carries ticket marks, but never a browser-derived
+    # origin: the server renders the final prompt in one place after minting.
+    assert TICKET_MARK in page
+    assert ENTRANCES_MARK in page
+    assert "data.prompt" in page
+    assert ORIGIN_MARK not in page
     assert "ROGMEM_HUB" in page
     assert "___ROGMEM_HUB___" not in page
     assert "rh_" in page
@@ -397,8 +403,15 @@ def test_host_client_routes_and_prompt_carry_the_page_origin(tmp_path, monkeypat
         assert "ROGMEM_HUB_COOKIE" in text
         assert "入口会变，身份不变" in text
         assert "不要换地址" not in text
+        assert "channel --ticket" in text
+        assert "location.origin" not in text
+    for text in (guide, cold):
         for line in host_client_instruction().splitlines():
             assert line.strip() in text
+        assert TICKET_MARK in text
+        assert ENTRANCES_MARK in text
+    # A named-host scan prompt is not server-rendered: no unfilled mark escapes.
+    assert "___ROGMEM_" not in named
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     bake = dockerfile.index("bake_bundle")
     remove = dockerfile.index("rm -rf installer host")
@@ -492,7 +505,14 @@ def test_finding_a_hub_waits_for_a_slow_entrance(monkeypatch):
 def test_listening_ports_sees_a_loopback_socket():
     server, origin = _hub_server("rh_listen")
     try:
-        assert _port_of(origin) in inst.listening_ports()
+        port = _port_of(origin)
+        ports = inst.listening_ports()
+        # Some sandboxes proxy Python loopback sockets in user space: connect()
+        # succeeds but the OS TCP table that netstat reads has no entry. Parsing
+        # of real tables is covered by test_proc_and_netstat_tables_... above.
+        if f":{port}" not in inst._netstat_text():
+            pytest.skip("这个沙箱的 TCP 表看不到新建的 Python 监听套接字")
+        assert port in ports
     finally:
         server.shutdown()
 

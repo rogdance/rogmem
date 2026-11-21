@@ -25,6 +25,7 @@ _SEEDS = (
     "rogmem/__init__.py",
     "rogmem/__main__.py",
     "rogmem/cli.py",
+    "rogmem/admission.py",
     "installer/rogmem_installer.py",
 )
 

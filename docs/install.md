@@ -86,16 +86,21 @@ curl -sS "$ORIGIN/healthz"
 
 本机需要 Python 3.12 或更高，并且已经安装了至少一个支持的程序（Cursor、Hermes、Codex、WorkBuddy、CodeBuddy、DSH）。
 
+中枢签发一张接入票据 `$TICKET`（管理台「添加宿主」复制的那一整段里的票据）。它自带身份和候选入口，客户端按身份挑一扇能开的门，不需要这台电脑猜地址：
+
 ```bash
-python3.12 -m rogmem channel --origin "$ORIGIN"
+python3.12 host_bootstrap.py "$TICKET"
+python3.12 -m rogmem channel --ticket "$TICKET"
 python3.12 -m rogmem hosts scan
 ```
 
 用户从扫描结果里点名程序之后，才：
 
 ```bash
-python3.12 -m rogmem hosts connect --confirm --grant "$GRANT"
+python3.12 -m rogmem hosts connect --confirm --ticket "$TICKET"
 ```
+
+旧客户端没有 `--ticket` 时，仍可 `--origin "$ORIGIN"` 打通门口、`--grant "$GRANT"` 兑换钥匙。中枢对新客户端会额外校验票据签名与凭证是否一致。反代或 NAS 远程访问场景建议设置 `ROGMEM_PUBLIC_ORIGIN`，让票据的第一候选入口就是新电脑真正可达的地址。
 
 `18780` 上如果已经是另一个 `hub`，停下来让用户关掉占用进程。不要改这个端口。用户没点名程序，就不要默认全部接上。
 

@@ -5673,9 +5673,10 @@ _HOST_FLEET_SCRIPT = r"""
 <script>
 (function () {
   var origin = "__ORIGIN__";
-  var template = __PROMPT_TEMPLATE__;
+  var pending = __PROMPT_TEMPLATE__;
   var grantMark = "___ROGMEM_GRANT___";
-  var originMark = "___ROGMEM_ORIGIN___";
+  var ticketMark = "___ROGMEM_TICKET___";
+  var entrancesMark = "___ROGMEM_ENTRANCES___";
   var button = document.getElementById("add-host");
   var modal = document.getElementById("add-host-modal");
   var status = document.getElementById("add-host-status");
@@ -5696,27 +5697,30 @@ _HOST_FLEET_SCRIPT = r"""
     document.getElementById("add-host-close").onclick = function () { modal.hidden = true; };
     var copy = document.getElementById("add-host-copy");
     var prompt = document.getElementById("add-host-prompt");
-    function fillGrant(secret) {
-      return template.split(grantMark).join(secret).split(originMark).join(location.origin);
+    function pendingText() {
+      return pending
+        .split(grantMark).join("（这一次的准入凭证正在签发）")
+        .split(ticketMark).join("（接入票据正在签发）")
+        .split(entrancesMark).join("（入口清单正在签发）");
     }
     button.onclick = function () {
       modal.hidden = false;
-      if (prompt) prompt.value = fillGrant("（这一次的准入凭证正在生成）");
+      if (prompt) prompt.value = pendingText();
       if (copy) {
         copy.disabled = true;
         copy.textContent = "复制提示";
       }
-      if (status) status.textContent = "提示已经在上面。准入凭证还在写入，写好之前先不要复制。";
+      if (status) status.textContent = "提示已经在上面。准入票据还在签发，写好之前先不要复制。";
       fetch("/admin/api/enroll-grants", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"}).then(function (response) {
-        if (!response.ok) throw new Error("grant");
+        if (!response.ok) throw new Error("ticket");
         return response.json();
       }).then(function (data) {
-        if (!data || !data.secret) throw new Error("grant");
-        if (prompt) prompt.value = fillGrant(data.secret);
+        if (!data || !data.ticket || !data.prompt) throw new Error("ticket");
+        if (prompt) prompt.value = data.prompt;
         if (copy) copy.disabled = false;
-        if (status) status.textContent = "贴给本机任意一个已安装的宿主。已经接入的不会重发钥匙。";
+        if (status) status.textContent = "贴给本机任意一个已安装的宿主。票据自带入口清单，已经接入的不会重发钥匙。";
       }).catch(function () {
-        if (status) status.textContent = "提示在上面，但这一次的准入凭证没有生成，请再试一次。";
+        if (status) status.textContent = "提示在上面，但这一次的准入票据没有签发成功，请再试一次。";
       });
     };
     if (copy && prompt) {
@@ -5733,7 +5737,6 @@ _HOST_FLEET_SCRIPT = r"""
   }
   var bundleRev = __HOST_BUNDLE_REV__;
   var updateTemplate = __UPDATE_TEMPLATE__;
-  var updateOriginMark = "___ROGMEM_ORIGIN___";
   var updateNote = document.getElementById("update-hosts-note");
   var updateButton = document.getElementById("update-hosts");
   var updateModal = document.getElementById("update-hosts-modal");
@@ -5750,7 +5753,7 @@ _HOST_FLEET_SCRIPT = r"""
     var updatePrompt = document.getElementById("update-hosts-prompt");
     var updateCopy = document.getElementById("update-hosts-copy");
     var updateStatusEl = document.getElementById("update-hosts-status");
-    function fillUpdate() { return updateTemplate.split(updateOriginMark).join(location.origin); }
+    function fillUpdate() { return updateTemplate; }
     updateButton.onclick = function () {
       if (updatePrompt) updatePrompt.value = fillUpdate();
       updateModal.hidden = false;
