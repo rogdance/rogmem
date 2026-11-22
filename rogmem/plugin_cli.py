@@ -150,34 +150,47 @@ def write_door_launcher(home: Path, python: str) -> Path | None:
     return path
 
 
-def _restart_door(home: Path, python: str) -> bool:
-    """Put the new code behind 18780. The old door process keeps the old code until it is replaced."""
+def _restart_door(home: Path, python: str) -> str:
+    """Put the new plugin behind 18780 without ever leaving this computer with no door.
+
+    - A door new enough to hand over sees the new manifest and replaces itself. That copy is
+      not our child, so it outlives an agent shell that kills its children on exit.
+    - A door too old to hand over keeps running the old code: it still forwards, and the
+      Startup launcher written by this update brings the new code at the next login. Killing
+      it from here would leave a replacement that dies with this shell.
+    - No door at all: start one, best effort.
+    Returns "handed-over", "next-login", "started" or "down".
+    """
     from installer import rogmem_installer as inst
 
-    pid = _door_pid()
-    if pid:
-        _stop(pid)
-        for _ in range(50):
-            if not inst.probe_origin(DOOR, "").get("ok"):
-                break
-            time.sleep(0.1)
+    before = _door_pid()
+    if before:
+        for _ in range(150):
+            time.sleep(0.2)
+            now = _door_pid()
+            if now and now != before and inst.probe_origin(DOOR, "").get("ok"):
+                return "handed-over"
+        return "next-login"
     command = _door_command(home, python)
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(
-        command,
-        cwd=str(home),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=flags,
-        close_fds=True,
-        start_new_session=os.name != "nt",
-    )
+    try:
+        subprocess.Popen(
+            command,
+            cwd=str(home),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+            close_fds=True,
+            start_new_session=os.name != "nt",
+        )
+    except OSError:
+        return "down"
     for _ in range(100):
         if inst.probe_origin(DOOR, "").get("ok"):
-            return True
+            return "started"
         time.sleep(0.2)
-    return False
+    return "down"
 
 
 def _door_pid() -> int:
@@ -260,6 +273,12 @@ def update(home: Path, door: str = DOOR, restart_door: bool = True) -> dict:
     after = str(plugin.installed(home).get("version") or written.get("version") or "")
     verify = written.get("verify") or {}
     done = bool(written.get("ok")) and (not latest or after == latest) and not verify.get("broken")
+    door_note = {
+        "handed-over": "本机门口已换成新插件。",
+        "next-login": "本机门口还在用旧插件转发，下次登录自动换新，不影响使用。",
+        "started": "本机门口已启动。",
+        "down": "本机门口没有起来：重新登录一次，或运行 python -m rogmem channel --session。",
+    }.get(str(door_ok or ""), "")
     return {
         "ok": done,
         "command": "plugin.update",
@@ -268,11 +287,11 @@ def update(home: Path, door: str = DOOR, restart_door: bool = True) -> dict:
         "latest": latest,
         "programs": written.get("programs") or [],
         "hooks": [{"program": row.get("program"), "ok": row.get("ok")} for row in verify.get("hooks") or []],
-        "door_restarted": door_ok,
+        "door": door_ok,
         "door_launcher": str(launcher) if launcher else "",
         "human_actions": verify.get("human_actions") or [],
         "text": (
-            f"{plugin.NAME}已从 {before or '未知'} 更新到 {after}，本机 {len(written.get('programs') or [])} 个宿主的钩子都能跑。"
+            f"{plugin.NAME}已从 {before or '未知'} 更新到 {after}，本机 {len(written.get('programs') or [])} 个宿主的钩子都能跑。{door_note}"
             if done
             else "更新没有完成：" + (written.get("text") or "钩子复核没过")
         ),

@@ -331,3 +331,30 @@ def test_the_door_launcher_follows_the_plugin_interpreter(tmp_path, monkeypatch)
     assert path.as_posix().endswith("Startup/rogmem-channel.vbs")
     assert "channel" in text and "--session" in text and "rh_mine" in text
     assert ", 0, False" in text and "schtasks" not in text and "rm_" not in text
+
+
+def test_a_running_door_hands_over_when_the_plugin_changes(tmp_path):
+    import rogmem.cli as cli
+
+    home = tmp_path / "home"
+    (home / ".rogmem").mkdir(parents=True)
+    manifest = home / ".rogmem" / "plugin.json"
+    manifest.write_text(json.dumps({"version": "2.aaaaaaaaaaaa"}), encoding="utf-8")
+    started = cli._installed_plugin(home)
+    assert started == "2.aaaaaaaaaaaa"
+    assert cli._door_should_hand_over(home, started) is False
+    manifest.write_text(json.dumps({"version": "2.bbbbbbbbbbbb"}), encoding="utf-8")
+    assert cli._door_should_hand_over(home, started) is True
+    # A door started before any manifest existed never hands over on its own.
+    assert cli._door_should_hand_over(home, "") is False
+
+
+def test_an_update_never_stops_a_door_it_cannot_replace(monkeypatch, tmp_path):
+    from rogmem import plugin_cli
+
+    monkeypatch.setattr(plugin_cli, "_door_pid", lambda: 4242)
+    monkeypatch.setattr(plugin_cli.time, "sleep", lambda _s: None)
+    stopped = []
+    monkeypatch.setattr(plugin_cli, "_stop", lambda pid: stopped.append(pid))
+    assert plugin_cli._restart_door(tmp_path, "python") == "next-login"
+    assert stopped == []

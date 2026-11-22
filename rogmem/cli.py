@@ -464,8 +464,15 @@ def channel_main(args: argparse.Namespace) -> int:
         server = inst.forward(inst.FIXED_FORWARD_PORT, found, home=home, hub=identity)
     from rogmem.host_hook import drain_outbox
 
+    started_with = _installed_plugin(home)
     try:
         while True:
+            if _door_should_hand_over(home, started_with):
+                # A plugin update landed while this door ran. The door outlives whoever ran the
+                # update (an agent shell kills its children), so the door replaces itself.
+                server.shutdown()
+                server.server_close()
+                _reexec_door()
             try:
                 drain_outbox(home)
                 try:
@@ -485,9 +492,41 @@ def channel_main(args: argparse.Namespace) -> int:
                     pass
             except Exception:
                 pass
-            time.sleep(30)
+            time.sleep(10)
     finally:
         server.shutdown()
+
+
+def _installed_plugin(home: Path) -> str:
+    try:
+        from rogmem import plugin
+    except ImportError:
+        return ""
+    return str(plugin.installed(home).get("version") or "")
+
+
+def _door_should_hand_over(home: Path, started_with: str) -> bool:
+    """The manifest names a different plugin than the one this process loaded."""
+    now = _installed_plugin(home)
+    return bool(started_with and now and now != started_with)
+
+
+def _reexec_door() -> None:
+    """Start the same door command from the freshly installed code, then leave."""
+    import subprocess
+
+    command = [sys.executable, "-m", "rogmem", *sys.argv[1:]]
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+        close_fds=True,
+        start_new_session=os.name != "nt",
+    )
+    os._exit(0)
 
 
 def _note_presence(home: Path) -> None:
