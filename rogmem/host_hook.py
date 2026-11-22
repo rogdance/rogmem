@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -236,6 +237,18 @@ def _trae_mcp_path(home: Path) -> Path:
     return base / "User" / "mcp.json"
 
 
+def _hermes_config(home: Path) -> Path:
+    """Hermes keeps its home under %LOCALAPPDATA% on Windows, not in the dotfile dir."""
+    dot = home / ".hermes" / "config.yaml"
+    if os.name == "nt" and home == Path.home():
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        if local:
+            candidate = Path(local) / "hermes" / "config.yaml"
+            if candidate.exists():
+                return candidate
+    return dot
+
+
 def _endpoint(home: Path, program: str) -> tuple[str, str, str]:
     if program == "Cursor":
         return _mcp_endpoint(home / ".cursor" / "mcp.json", home)
@@ -257,7 +270,7 @@ def _endpoint(home: Path, program: str) -> tuple[str, str, str]:
         return str(data.get("url") or "").strip(), str(data.get("token") or "").strip(), device
     if program == "Codex":
         return _toml_rogmem(home / ".codex" / "config.toml", home)
-    path = home / ".hermes" / "config.yaml"
+    path = _hermes_config(home)
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:

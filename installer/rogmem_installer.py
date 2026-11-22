@@ -414,6 +414,22 @@ def trae_mcp_path(home: Path) -> Path:
     return _preferred_app_dir(home, "Trae") / "User" / "mcp.json"
 
 
+def hermes_home(home: Path) -> Path:
+    """Hermes' own home. Windows keeps it under %LOCALAPPDATA%, not in the dotfile dir.
+
+    A simulated or test home still wins when it already has `.hermes`, so fixtures
+    keep working; only a real user home falls through to the platform location.
+    """
+    dot = home / ".hermes"
+    if os.name == "nt" and _real_user_home(home):
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        if local:
+            candidate = Path(local) / "hermes"
+            if candidate.is_dir():
+                return candidate
+    return dot
+
+
 SUPPORTED = ("Cursor", "Trae", "Hermes", "Codex", "WorkBuddy", "CodeBuddy", "DSH")
 
 
@@ -421,7 +437,7 @@ def detect_programs(home: Path) -> list[dict]:
     known = {
         "Cursor": [*_cursor_app_dirs(home), home / ".cursor"],
         "Trae": [home / ".trae", *_vscode_app_dirs(home, "Trae")],
-        "Hermes": [home / ".hermes"],
+        "Hermes": [hermes_home(home)],
         "Codex": [home / ".codex"],
         "WorkBuddy": [home / ".workbuddy"],
         "CodeBuddy": [home / ".codebuddy"],
@@ -441,7 +457,7 @@ def _host_config(home: Path, program: str) -> Path | None:
         "Trae": trae_mcp_path(home),
         "WorkBuddy": home / ".workbuddy" / "mcp.json",
         "Codex": home / ".codex" / "config.toml",
-        "Hermes": home / ".hermes" / "config.yaml",
+        "Hermes": hermes_home(home) / "config.yaml",
         "CodeBuddy": home / ".codebuddy" / "mcp.json",
         "DSH": home / ".rogmem" / "hosts" / "DSH.json",
     }
@@ -1136,9 +1152,9 @@ def install_host_hooks(home: Path, programs: list[str] | None = None, allow_real
                 version=1,
             )
         elif program == "Hermes":
-            script = home / ".hermes" / "agent-hooks" / "rogmem.py"
+            script = hermes_home(home) / "agent-hooks" / "rogmem.py"
             _install_hook_script(script)
-            _merge_hermes_hooks(home / ".hermes" / "config.yaml", str(script))
+            _merge_hermes_hooks(hermes_home(home) / "config.yaml", str(script))
         elif program == "Codex":
             script = home / ".codex" / "hooks" / "rogmem.py"
             _install_hook_script(script)
@@ -2289,7 +2305,7 @@ def _session_files(program: str, root: Path) -> list[Path]:
 def _history_roots(home: Path) -> dict[str, list[Path]]:
     return {
         "Cursor": [*_cursor_app_dirs(home), home / ".cursor" / "projects"],
-        "Hermes": [home / ".hermes" / "sessions"],
+        "Hermes": [hermes_home(home) / "sessions"],
         "Codex": [home / ".codex" / "sessions"],
         "WorkBuddy": [home / ".workbuddy" / "projects"],
         "CodeBuddy": [home / ".codebuddy" / "projects"],
@@ -2318,7 +2334,7 @@ def read_program_history(home: Path, program: str, allow_real: bool = False):
     if _real_user_home(home) and not allow_real:
         return
     if program == "Hermes":
-        ledger = _read_hermes_ledger(home / ".hermes" / "state.db")
+        ledger = _read_hermes_ledger(hermes_home(home) / "state.db")
         if ledger is not None:
             turns = _stamp_turns(program, ledger.get("turns") or [])
             if turns:
@@ -2385,7 +2401,7 @@ def collect_history(
         program_files = 0
         ledger_done = False
         if program == "Hermes":
-            ledger = _read_hermes_ledger(home / ".hermes" / "state.db")
+            ledger = _read_hermes_ledger(hermes_home(home) / "state.db")
             if ledger is not None:
                 ledger_done = True
                 program_files += 1
@@ -2770,18 +2786,18 @@ def _install_hermes_memory(home: Path, url: str = "", token: str = "", device_id
     manifest = (
         "name: rogmem\nversion: 1.0.0\ndescription: ROGMEM memory for Hermes\nprotocol_version: 1\nruntime: hermes_memory_provider\n"
     )
-    root = home / ".hermes"
+    root = hermes_home(home)
     _retire_other_memory_accounts(root)
     homes = [root]
     profiles = root / "profiles"
     if profiles.is_dir():
         homes.extend(sorted(path for path in profiles.iterdir() if (path / "config.yaml").is_file()))
-    for hermes_home in homes:
-        dest = hermes_home / "plugins" / "rogmem"
+    for profile_home in homes:
+        dest = profile_home / "plugins" / "rogmem"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "__init__.py").write_text(plugin_text, encoding="utf-8")
         (dest / "plugin.yaml").write_text(manifest, encoding="utf-8")
-        config = hermes_home / "config.yaml"
+        config = profile_home / "config.yaml"
         _set_memory_provider(config, "rogmem")
         if url and token:
             _merge_yaml_mcp(config, url, token, device_id)
@@ -2801,7 +2817,7 @@ def write_configs(home: Path, base_url: str, token: str = "", programs: list[str
         "CodeBuddy": lambda: _merge_mcp_json(home / ".codebuddy" / "mcp.json", url, supplied, device_id),
         "DSH": lambda: _merge_dsh_mcp(home, url, supplied, device_id),
         "Codex": lambda: _merge_toml_mcp(home / ".codex" / "config.toml", url, supplied),
-        "Hermes": lambda: _merge_yaml_mcp(home / ".hermes" / "config.yaml", url, supplied, device_id),
+        "Hermes": lambda: _merge_yaml_mcp(hermes_home(home) / "config.yaml", url, supplied, device_id),
     }
     chosen = chosen_hosts(home, programs)
     written = []
