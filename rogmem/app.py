@@ -271,7 +271,9 @@ async def plugin_manifest(_request: Request) -> Response:
 
     from rogmem.host_client import bundle_bytes
 
-    manifest = plugin.hub_manifest(engine.health_snapshot().get("hub") or "")
+    manifest = plugin.hub_manifest(
+        engine.health_snapshot().get("hub") or "", engine.current_plugin_label(), engine.plugin_known_labels()
+    )
     wheel = await asyncio.to_thread(bundle_bytes)
     if wheel:
         import hashlib
@@ -1029,7 +1031,7 @@ async def admin_about(request: Request) -> Response:
     denied = _guard(request)
     if denied:
         return denied
-    return HTMLResponse(ui.about_page(product_version(), engine.release_view()))
+    return HTMLResponse(ui.about_page(product_version(), engine.release_view(), engine.current_plugin_label()))
 
 
 @mcp.custom_route("/admin/settings/models", methods=["GET"])
@@ -1714,14 +1716,17 @@ def _with_plugin_verdict(result: str) -> str:
         return result
     if not isinstance(payload, dict):
         return result
-    latest = plugin.version()
-    status = plugin.compare(reported, latest)
+    status = plugin.compare(reported, plugin.version())
+    installed = engine.plugin_label_of(reported) or plugin.OLD_LABEL
+    latest = engine.current_plugin_label()
     payload["plugin"] = {
-        "installed": reported,
+        "installed": installed,
         "latest": latest,
+        "installed_id": reported,
+        "latest_id": plugin.version(),
         "status": status,
         "update": plugin.UPDATE_COMMAND,
-        "notice": plugin.notice(status, reported, latest, str(agent["program"] or "")),
+        "notice": plugin.notice(status, installed, latest, str(agent["program"] or "")),
     }
     return json.dumps(payload, ensure_ascii=False)
 

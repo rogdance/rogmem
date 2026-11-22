@@ -35,7 +35,7 @@ CONSOLE = (
         ("/admin/hosts", "宿主管理", "hosts"),
         ("/admin/settings/models", "模型管理", "models"),
         ("/admin/settings/pipeline", "管线设置", "pipeline"),
-        ("/admin/settings/about", "关于ROGMEM", "about"),
+        ("/admin/settings/about", "关于我们", "about"),
     )),
 )
 NAV = tuple(item[:3] for item in CONSOLE)
@@ -2292,7 +2292,11 @@ tr.draft input {{ width: 100%; }}
 .about-lead {{ margin: 0; font-size: 16px; line-height: 1.65; color: var(--text-secondary); }}
 .about-versions {{ display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--border); }}
 .about-versions > div {{ padding: 18px 28px 16px; }}
-.about-versions > div + div {{ border-left: 1px solid var(--border); }}
+.about-versions > div:nth-child(even) {{ border-left: 1px solid var(--border); }}
+.about-versions > div:nth-child(n+3) {{ border-top: 1px solid var(--border); }}
+.about-versions .about-hint {{ margin-top: 8px; }}
+.about-versions .about-hint code {{ font-size: 12px; }}
+.about-note {{ line-height: 1.7; }}
 .about-label {{ margin: 0; font-size: 12px; letter-spacing: 0; color: var(--text-muted); font-weight: 500; }}
 .about-value {{ margin: 8px 0 0; font-size: 18px; line-height: 1.5; font-weight: 600; font-variant-numeric: tabular-nums; }}
 .about-value code, .about-line code {{ font-size: 18px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: none; padding: 0; }}
@@ -2506,7 +2510,7 @@ html.rogmem-loading #rogmem-progress .bar {{
   .side {{ width: 100%; box-sizing: border-box; }}
   .side a {{ padding: 10px 12px; }}
   .about-versions {{ grid-template-columns: 1fr; }}
-  .about-versions > div + div {{ border-left: 0; border-top: 1px solid var(--border); }}
+  .about-versions > div + div, .about-versions > div:nth-child(even) {{ border-left: 0; border-top: 1px solid var(--border); }}
   .about-hero {{ padding: 20px 16px 16px; }}
   .about-versions > div {{ padding: 14px 16px; }}
   .about-links {{ padding: 0 16px; }}
@@ -6091,7 +6095,7 @@ _HOST_COLUMNS = (
 
 
 _HOST_TIPS = {
-    "插件版本": "这台电脑上这个宿主最近一次调用时报上来的 rogmem 插件版本（钩子、规则、Hermes 记忆、本机门口是同一个版本）。和中枢不一致就是落后，点「更新宿主插件」把提示贴给那台电脑上的任意宿主。「未上报」是旧插件，或钩子在那台电脑上没跑起来。",
+    "插件版本": "这台电脑上这个宿主最近一次调用时报上来的 rogmem 插件版本，形如 P-V1-打包时间-DEV（钩子、规则、Hermes 记忆、本机门口是同一个版本）。打包时间是插件内容最后一次变化的那次发版；只改服务器不改插件时，插件版本不变。和中枢不一致就是落后，点「更新宿主插件」把提示贴给那台电脑上的任意宿主。「未上报」是旧插件，或钩子在那台电脑上没跑起来。",
     "设备名": "按设备名筛选各台电脑上的宿主。列表里设备名写在智能体名中。当前电脑上的宿主，智能体名后面会标（本机），只用于显示，不会写进设备名。认不出当前电脑时，仍然全部列出，只是不加这个标识。",
     "接入状态": "未安装、已发现未接入、待确认、待授权、已接入；已经在列表里的显示待放行、待领取、启用或停用。确认之前不会写入。没领到密钥不算连上。申请授权后，在这一行通过授权。",
     "接入时间": "接入时间是该智能体第一次领取授权的时间。更早启用、当时没单独记下的，先显示申请时间。",
@@ -6119,9 +6123,12 @@ def _plugin_cell(row: dict) -> str:
     status = str(row.get("plugin_status") or "unreported")
     label = _PLUGIN_LABELS.get(status, status)
     reported = str(row.get("plugin_version") or "")
+    label = str(row.get("plugin_label") or "") or ("旧版本" if reported else "")
     seen = str(row.get("plugin_seen_at") or "")
-    title = f" title='最近上报 {esc(seen)}'" if seen else ""
-    shown = f"<code>{esc(reported)}</code> " if reported else ""
+    hint = "；".join(part for part in (f"最近上报 {seen}" if seen else "", f"内容编号 {reported}" if reported else "") if part)
+    title = f" title='{esc(hint)}'" if hint else ""
+    shown = f"<code>{esc(label)}</code> " if label else ""
+    label = _PLUGIN_LABELS.get(status, status)
     return f"<td class='plugin plugin-{esc(status)}'{title}>{shown}<span class='badge'>{esc(label)}</span></td>"
 
 
@@ -6335,7 +6342,9 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
     from rogmem.plugin import version as plugin_version
     from rogmem.onboard import GRANT_MARK, HUB_MARK, host_update_prompt, onboard_prompt
 
-    HOST_BUNDLE_REV = plugin_version()
+    from rogmem.engine import current_plugin_label
+
+    HOST_BUNDLE_REV = current_plugin_label() or plugin_version()
     summary = plugin_fleet_summary(fleet.get("rows") or [])
 
     hub = hub_id()
@@ -10081,7 +10090,14 @@ window.refreshRelease = async function(event){
 })();</script>"""
 
 
-def about_page(version: str, release: dict | None = None) -> str:
+_VERSION_NOTE = (
+    "版本号写法：<code>S-V1-打包时间-后缀</code> 是服务器，<code>P-V1-打包时间-后缀</code> 是 rogmem 插件。"
+    "打包时间是北京时间年月日时分（10 位）；后缀 DEV 为私有仓生产、PUB 为公开仓生产、PRE 为预发布。"
+    "插件的打包时间是它内容最后一次变化的那次发版，只改服务器时插件版本不变。"
+)
+
+
+def about_page(version: str, release: dict | None = None, plugin: str = "") -> str:
     release = release or {
         "display": "未核对", "relation": "", "detail": "", "checked_at": "",
         "error_kind": "never_checked", "last_fail_at": "", "last_success_at": "",
@@ -10095,8 +10111,12 @@ def about_page(version: str, release: dict | None = None) -> str:
 <p class='about-lead'>ROGMEM 是可在极空间 NAS 或私人服务器部署的私人记忆中枢，可通过 MCP 为用户在不同设备上的不同 Agent 提供一站式记忆和知识管理服务，致力于解决跨设备、跨 Agent 工作时的记忆、知识和技能孤岛问题。</p>
 </div>
 <div class='about-versions'>
-<div><p class='about-label'>本地版本</p><p class='about-value'><code>{esc(version)}</code></p></div>
-<div><p class='about-label'>最新版本</p><p class='about-line'>{line_html}</p></div>
+<div><p class='about-label'>服务器版本 · 本机运行</p><p class='about-value'><code>{esc(version)}</code></p>
+<p class='about-hint'>记忆中枢本身：管理台、MCP、萃取，跑在这台 NAS 的容器里。</p></div>
+<div><p class='about-label'>服务器版本 · 最新发布</p><p class='about-line'>{line_html}</p></div>
+<div><p class='about-label'>插件版本 · 中枢当前提供</p><p class='about-value'><code>{esc(plugin or "—")}</code></p>
+<p class='about-hint'>装在每台电脑上的 rogmem 插件：钩子、全局规则、Hermes 记忆、本机门口。各电脑装的是哪一版，看<a href='/admin/hosts'>宿主管理</a>的「插件版本」列；落后的电脑运行 <code>python -m rogmem plugin update</code>。</p></div>
+<div><p class='about-label'>版本号怎么读</p><p class='about-hint about-note'>{_VERSION_NOTE}</p></div>
 </div>
 <ul class='about-links'>
 <li><span>GitHub</span><a href='https://github.com/rogdance/rogmem' target='_blank' rel='noopener'>https://github.com/rogdance/rogmem</a></li>
@@ -10110,7 +10130,7 @@ def about_page(version: str, release: dict | None = None) -> str:
 </div>
 </section>
 {about_release_script()}"""
-    return _section_page("about", "关于ROGMEM", inner)
+    return _section_page("about", "关于我们", inner)
 
 
 def _queue_spans() -> tuple[tuple[str, str], ...]:

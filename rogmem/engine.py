@@ -909,6 +909,7 @@ def connect(data: Path, scan: Path) -> None:
     ensure_registry(con)
     _DB = con
     _LOCAL.con = con
+    _LOCAL.data = data
     jieba.initialize()
     _ensure_owner(con)
     _ensure_default_minimax()
@@ -944,6 +945,10 @@ def connect(data: Path, scan: Path) -> None:
     except Exception:
         pass
     _remember_liveness()
+    try:
+        _register_plugin_release()
+    except Exception:
+        pass
     # The writes above (instant columns, the liveness index, lease cleanup) run
     # after the last commit. Left open, this connection holds the single writer
     # slot for the life of the process, and every other thread is refused with
@@ -1010,16 +1015,20 @@ def db() -> sqlite3.Connection:
     if _DATA is None:
         raise RuntimeError("database is not open")
     current = getattr(_LOCAL, "con", None)
-    if current is not None:
+    # A pool thread outlives a connect(): its cached connection may belong to the database
+    # that was open before. Reuse it only while it is still the current database.
+    if current is not None and getattr(_LOCAL, "data", None) == _DATA:
         return current
     global _DB
     if threading.current_thread() is threading.main_thread():
         if _DB is None:
             _DB = _open_connection(_DATA / "rogmem.sqlite")
         _LOCAL.con = _DB
+        _LOCAL.data = _DATA
         return _DB
     current = _open_connection(_DATA / "rogmem.sqlite")
     _LOCAL.con = current
+    _LOCAL.data = _DATA
     return current
 
 
@@ -1357,6 +1366,59 @@ def _plugin_status(reported: str) -> str:
     return plugin.compare(reported, plugin.version())
 
 
+# Plugin id -> pack time of the server release that first shipped it. Loaded at connect,
+# read without the database afterwards (healthz and every MCP call use it).
+_PLUGIN_LEDGER: dict[str, str] = {}
+
+
+def _register_plugin_release() -> None:
+    """Give this image's plugin a P- pack time, once, the first time a packed server runs it.
+
+    A server-only release ships the same plugin id, finds it already in the ledger and keeps
+    the earlier pack time; only a release that changed the plugin gets a new P- version.
+    """
+    from rogmem import plugin
+    from rogmem.version import pack_stamp
+
+    global _PLUGIN_LEDGER
+    try:
+        loaded = json.loads(get_setting("plugin_releases") or "{}")
+    except ValueError:
+        loaded = {}
+    ledger = {str(k): str(v) for k, v in loaded.items()} if isinstance(loaded, dict) else {}
+    current, stamp = plugin.version(), pack_stamp()
+    if current and stamp and current not in ledger:
+        ledger[current] = stamp
+        set_setting("plugin_releases", json.dumps(ledger, ensure_ascii=False))
+    _PLUGIN_LEDGER = ledger
+
+
+def plugin_label_of(plugin_id: str) -> str:
+    """The P- version for a plugin id. Empty when no packed server here ever shipped it."""
+    from rogmem import plugin
+    from rogmem.version import pack_stamp, plugin_label
+
+    plugin_id = (plugin_id or "").strip()
+    if not plugin_id:
+        return ""
+    stamp = _PLUGIN_LEDGER.get(plugin_id, "")
+    if not stamp and plugin_id == plugin.version() and not pack_stamp():
+        return plugin_label("")  # a checkout that was never packed: P-V1-未打包
+    return plugin_label(stamp) if stamp else ""
+
+
+def current_plugin_label() -> str:
+    from rogmem import plugin
+
+    return plugin_label_of(plugin.version())
+
+
+def plugin_known_labels() -> dict[str, str]:
+    from rogmem.version import plugin_label
+
+    return {key: plugin_label(stamp) for key, stamp in _PLUGIN_LEDGER.items()}
+
+
 def health_snapshot() -> dict:
     """Process liveness. No database, no thread pool, so a slow core cannot hide this answer."""
     from rogmem import plugin
@@ -1373,7 +1435,8 @@ def health_snapshot() -> dict:
         "distill_concurrency": _LIVE_CONCURRENCY or _concurrency_from_env(),
         "distill_paused": _LIVE_PAUSED,
         "distill_leased": 0,
-        "plugin": plugin.version(),
+        "plugin": current_plugin_label(),
+        "plugin_id": plugin.version(),
     }
 
 
@@ -13319,6 +13382,7 @@ def _discard_connection(con) -> None:
     _DB = fresh
     if threading.current_thread() is threading.main_thread() and getattr(_LOCAL, "con", None) is None:
         _LOCAL.con = fresh
+        _LOCAL.data = _DATA
 
 
 def _rollback_write(con) -> None:
@@ -15198,6 +15262,7 @@ def list_connected_hosts(
                 "plugin_version": item.get("plugin_version") or "",
                 "plugin_seen_at": item.get("plugin_seen_at") or "",
                 "plugin_status": _plugin_status(item.get("plugin_version") or ""),
+                "plugin_label": plugin_label_of(item.get("plugin_version") or ""),
             }
         )
     facets = {

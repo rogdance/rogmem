@@ -56,8 +56,8 @@ def test_fallback_is_the_shanghai_clock_not_the_local_one():
 def test_a_declared_stamp_produces_a_new_product_version(monkeypatch):
     monkeypatch.setenv("ROGMEM_BUILD_STAMP", "2611220830")
     monkeypatch.setenv("ROGMEM_RELEASE", "DEV")
-    assert version.product_version() == "V1-2611220830-DEV"
-    assert version.product_version() != "V1-2611211429-DEV"  # 昨天下午那一版
+    assert version.product_version() == "S-V1-2611220830-DEV"
+    assert version.product_version() != "S-V1-2611211429-DEV"  # 昨天下午那一版
 
 
 # ---------- Dockerfile 契约 ----------
@@ -119,7 +119,7 @@ def test_preflight_rejects_an_image_from_a_previous_pack(smoke_module, monkeypat
     _fake_docker_run(monkeypatch, "2611211429")
     monkeypatch.setattr(smoke_module, "check_model_files", lambda entries: [])
     monkeypatch.setattr(smoke_module, "version_for",
-                        lambda stamp, lane="": f"V1-{stamp}-DEV")
+                        lambda stamp, lane="": f"S-V1-{stamp}-DEV")
     errors = smoke_module.preflight_image("rogmem:local", "2611220830")
     assert any("不一致" in item and "缓存" in item for item in errors), errors
 
@@ -128,7 +128,7 @@ def test_preflight_accepts_the_image_that_matches_this_pack(smoke_module, monkey
     _fake_docker_run(monkeypatch, "2611220830")
     monkeypatch.setattr(smoke_module, "check_model_files", lambda entries: [])
     monkeypatch.setattr(smoke_module, "version_for",
-                        lambda stamp, lane="": f"V1-{stamp}-DEV")
+                        lambda stamp, lane="": f"S-V1-{stamp}-DEV")
     assert smoke_module.preflight_image("rogmem:local", "2611220830") == []
 
 

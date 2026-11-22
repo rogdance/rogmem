@@ -51,15 +51,22 @@ def status(home: Path, door: str = DOOR, verify: bool = True) -> dict:
 
     local = plugin.installed(home)
     hub = hub_plugin(door)
-    latest = str(hub.get("version") or "")
-    installed = str(local.get("version") or "")
-    verdict = plugin.compare(installed, latest) if latest else "hub-unknown"
+    latest_id = _hub_id(hub)
+    installed_id = str(local.get("version") or "")
+    verdict = plugin.compare(installed_id, latest_id) if latest_id else "hub-unknown"
+    latest = _hub_label(hub, latest_id)
+    installed = _hub_label(hub, installed_id) or str(local.get("label") or "")
+    if installed:
+        plugin.remember_label(home, installed)
+    installed = installed or (plugin.OLD_LABEL if installed_id else "")
     report = {
         "ok": True,
         "command": "plugin.status",
         "name": plugin.NAME,
         "installed": installed,
         "latest": latest,
+        "installed_id": installed_id,
+        "latest_id": latest_id,
         "status": verdict,
         "programs": local.get("programs") or [],
         "installed_at": local.get("installed_at") or "",
@@ -128,6 +135,27 @@ def fetch_verified_wheel(door: str, manifest: dict, attempts: int = 3) -> tuple[
             continue
         return wheel, ""
     return None, last
+
+
+def _hub_id(hub: dict) -> str:
+    """The plugin id the hub serves. A hub before P- labels published only the id, as version."""
+    value = str(hub.get("id") or "")
+    if value:
+        return value
+    legacy = str(hub.get("version") or "")
+    return "" if legacy.startswith("P-") else legacy
+
+
+def _hub_label(hub: dict, plugin_id: str) -> str:
+    """The P- version the hub gives a plugin id, or empty."""
+    if not plugin_id:
+        return ""
+    known = hub.get("known") if isinstance(hub.get("known"), dict) else {}
+    if plugin_id in known:
+        return str(known[plugin_id])
+    if plugin_id == str(hub.get("id") or "") and str(hub.get("version") or "").startswith("P-"):
+        return str(hub["version"])
+    return ""
 
 
 def _install_wheel(wheel: bytes, python: str) -> tuple[bool, str]:
@@ -276,9 +304,11 @@ def _stop(pid: int) -> None:
 def update(home: Path, door: str = DOOR, restart_door: bool = True) -> dict:
     from rogmem import plugin
 
-    before = str(plugin.installed(home).get("version") or "")
+    before_id = str(plugin.installed(home).get("version") or "")
     hub = hub_plugin(door)
-    latest = str(hub.get("version") or "")
+    latest_id = _hub_id(hub)
+    latest = _hub_label(hub, latest_id) or latest_id
+    before = _hub_label(hub, before_id) or (plugin.OLD_LABEL if before_id else "")
     identity = _hub_identity(door)
     remembered = ""
     try:
@@ -313,9 +343,12 @@ def update(home: Path, door: str = DOOR, restart_door: bool = True) -> dict:
     if restart_door:
         launcher = write_door_launcher(home, python)
         door_ok = _restart_door(home, python)
-    after = str(plugin.installed(home).get("version") or written.get("version") or "")
+    after_id = str(plugin.installed(home).get("version") or written.get("version") or "")
+    after = _hub_label(hub, after_id) or after_id
+    if after.startswith("P-"):
+        plugin.remember_label(home, after)
     verify = written.get("verify") or {}
-    done = bool(written.get("ok")) and (not latest or after == latest) and not verify.get("broken")
+    done = bool(written.get("ok")) and (not latest_id or after_id == latest_id) and not verify.get("broken")
     door_note = {
         "handed-over": "本机门口已换成新插件。",
         "next-login": "本机门口还在用旧插件转发，下次登录自动换新，不影响使用。",
@@ -328,6 +361,7 @@ def update(home: Path, door: str = DOOR, restart_door: bool = True) -> dict:
         "from": before,
         "to": after,
         "latest": latest,
+        "id": after_id,
         "programs": written.get("programs") or [],
         "hooks": [{"program": row.get("program"), "ok": row.get("ok")} for row in verify.get("hooks") or []],
         "door": door_ok,

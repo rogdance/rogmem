@@ -117,7 +117,7 @@ def test_set_source_then_refresh_pipes_into_view_and_html(client, monkeypatch):
 def test_about_page_renders_config_missing_before_url_is_set(client):
     page = client.get("/admin/settings/about").text
     assert "尚未配置发布核对源" in page
-    assert "关于ROGMEM" in page
+    assert "关于我们" in page
     assert "refreshRelease" in page
     assert "已是最新" not in page
     assert "请求失败" not in page

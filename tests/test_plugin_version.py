@@ -61,8 +61,10 @@ def test_compare_names_where_a_host_stands():
     # A hand-made rev from the old content-id scheme has no series: it is not compatible.
     assert plugin.compare("0a1b2c3d4e5f", latest) == plugin.INCOMPATIBLE
     assert plugin.notice(plugin.CURRENT, latest, latest) == ""
-    told = plugin.notice(plugin.OUTDATED, "2.x", latest, "Cursor")
-    assert "Cursor" in told and plugin.UPDATE_COMMAND in told and "不换钥匙" in told
+    told = plugin.notice(plugin.OUTDATED, "P-V1-2611220948-DEV", "P-V1-2611221408-DEV", "Cursor")
+    assert "Cursor" in told and "P-V1-2611220948-DEV" in told and "P-V1-2611221408-DEV" in told
+    assert plugin.UPDATE_COMMAND in told and "不换钥匙" in told
+    assert "旧版本" in plugin.notice(plugin.OUTDATED, "", "P-V1-2611221408-DEV")
 
 
 # ---- the computer records what it installed, and the hook reports it ----------------------
@@ -155,6 +157,8 @@ def hub(tmp_path, monkeypatch):
     monkeypatch.setenv("ROGMEM_EMBED", "off")
     monkeypatch.setenv("ROGMEM_POLL", "3600")
     monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    monkeypatch.setenv("ROGMEM_BUILD_STAMP", "2611221408")
+    monkeypatch.setenv("ROGMEM_RELEASE", "DEV")
     engine.connect(data, data / "scan")
     engine.hub_id()
     token = "rm_plugin_test"
@@ -206,7 +210,9 @@ def _core(hub, reported: str) -> dict:
 def test_the_hub_publishes_the_plugin_it_serves(hub):
     with urllib.request.urlopen(hub["base"] + "/plugin.json", timeout=5) as resp:
         manifest = json.loads(resp.read())
-    assert manifest["version"] == plugin.version()
+    assert manifest["id"] == plugin.version()
+    assert manifest["version"] == "P-V1-2611221408-DEV"
+    assert manifest["known"] == {plugin.version(): "P-V1-2611221408-DEV"}
     assert manifest["min_series"] == plugin.MIN_SERIES
     assert manifest["update"] == plugin.UPDATE_COMMAND
     with urllib.request.urlopen(hub["base"] + "/host-client.whl", timeout=20) as resp:
@@ -216,7 +222,9 @@ def test_the_hub_publishes_the_plugin_it_serves(hub):
     assert manifest["wheel_sha256"] == hashlib.sha256(wheel).hexdigest()
     assert manifest["wheel_bytes"] == len(wheel)
     with urllib.request.urlopen(hub["base"] + "/healthz", timeout=5) as resp:
-        assert json.loads(resp.read())["plugin"] == plugin.version()
+        health = json.loads(resp.read())
+    assert health["plugin"] == "P-V1-2611221408-DEV" and health["plugin_id"] == plugin.version()
+    assert health["version"] == "S-V1-2611221408-DEV"
 
 
 def test_the_hub_remembers_each_hosts_version_and_judges_it_in_core(hub):
@@ -224,13 +232,14 @@ def test_the_hub_remembers_each_hosts_version_and_judges_it_in_core(hub):
     behind = f"{plugin.SERIES}.000000000000"
     packet = _core(hub, behind)
     assert packet["plugin"]["status"] == "outdated"
-    assert packet["plugin"]["latest"] == plugin.version()
-    assert "Cursor" in packet["plugin"]["notice"]
+    assert packet["plugin"]["latest"] == "P-V1-2611221408-DEV"
+    assert packet["plugin"]["installed"] == "旧版本"
+    assert "Cursor" in packet["plugin"]["notice"] and "P-V1-2611221408-DEV" in packet["plugin"]["notice"]
     row = engine.db().execute("SELECT plugin_version, plugin_seen_at FROM agents WHERE id='agent-p'").fetchone()
     assert row["plugin_version"] == behind and row["plugin_seen_at"]
     fleet = engine.list_connected_hosts()
     mine = next(item for item in fleet["rows"] if item["id"] == "agent-p")
-    assert mine["plugin_status"] == "outdated"
+    assert mine["plugin_status"] == "outdated" and mine["plugin_label"] == ""
     now = _core(hub, plugin.version())
     assert now["plugin"]["status"] == "current" and now["plugin"]["notice"] == ""
     # An agent's own MCP call carries no plugin header and gets no verdict.
@@ -252,15 +261,17 @@ def test_the_host_page_shows_each_version_and_a_banner_only_when_someone_is_behi
         "agent_name": "电脑B · Cursor", "program": "Cursor", "status": "启用", "code": "",
         "connected_at": "", "last_used": "", "session_count": 0, "history_count": 0, "call_count": 1,
         "plugin_version": "2.000000000000", "plugin_seen_at": "2026-11-22T00:00:00+00:00", "plugin_status": "outdated",
+        "plugin_label": "P-V1-2611220948-DEV",
     }
     fleet = {"rows": [row], "facets": {"devices": [], "agents": []}, "viewer_known": False}
     page = hosts_page([], fleet, {})
     assert "插件版本" in page
-    assert "2.000000000000" in page and "落后" in page
+    assert "P-V1-2611220948-DEV" in page and "落后" in page
+    assert "内容编号 2.000000000000" in page  # the id stays a tooltip, not the label
     banner = page.split('id="update-hosts-note"', 1)[1].split("</div>", 1)[0]
     assert " hidden" not in banner.split(">", 1)[0]
     assert "电脑B" in banner and "python -m rogmem plugin update" in banner
-    current = {**row, "plugin_version": plugin.version(), "plugin_status": "current"}
+    current = {**row, "plugin_version": plugin.version(), "plugin_status": "current", "plugin_label": "P-V1-2611221408-DEV"}
     quiet = hosts_page([], {**fleet, "rows": [current]}, {})
     assert quiet.split('id="update-hosts-note"', 1)[1].split(">", 1)[0].endswith(" hidden")
     assert plugin_fleet_summary([current, {**row, "status": "停用"}]) == {"enabled": 1, "behind": 0, "devices": []}
@@ -283,12 +294,21 @@ def test_plugin_status_compares_this_computer_with_the_hub(tmp_path, monkeypatch
 
     home = tmp_path / "home"
     _enroll(home)
-    monkeypatch.setattr(plugin_cli, "hub_plugin", lambda door=plugin_cli.DOOR: {"version": "2.ffffffffffff"})
+    newer = {"version": "P-V1-2611221500-DEV", "id": "2.ffffffffffff",
+             "known": {"2.ffffffffffff": "P-V1-2611221500-DEV", plugin.version(): "P-V1-2611221408-DEV"}}
+    monkeypatch.setattr(plugin_cli, "hub_plugin", lambda door=plugin_cli.DOOR: newer)
     behind = plugin_cli.status(home, verify=False)
     assert behind["status"] == "unreported" and behind["ok"] is False
     inst.refresh_host_bundle(home, ["WorkBuddy"])
     still = plugin_cli.status(home, verify=False)
     assert still["status"] == "outdated" and plugin.UPDATE_COMMAND in still["text"]
+    assert still["installed"] == "P-V1-2611221408-DEV" and still["latest"] == "P-V1-2611221500-DEV"
+    same = {"version": "P-V1-2611221408-DEV", "id": plugin.version(), "known": {plugin.version(): "P-V1-2611221408-DEV"}}
+    monkeypatch.setattr(plugin_cli, "hub_plugin", lambda door=plugin_cli.DOOR: same)
+    now = plugin_cli.status(home, verify=False)
+    assert now["status"] == "current" and "P-V1-2611221408-DEV" in now["text"]
+    assert plugin.installed(home)["label"] == "P-V1-2611221408-DEV"
+    # A hub from before P- labels published only the id as version; status still compares.
     monkeypatch.setattr(plugin_cli, "hub_plugin", lambda door=plugin_cli.DOOR: {"version": plugin.version()})
     assert plugin_cli.status(home, verify=False)["status"] == "current"
 
@@ -314,9 +334,12 @@ def test_the_release_machine_must_run_the_plugin_it_ships():
     spec = importlib.util.spec_from_file_location("smoke_for_plugin", path)
     smoke = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(smoke)
-    assert smoke.check_plugin({"plugin": "2.a"}, "2.a") == []
-    errors = smoke.check_plugin({"plugin": "2.a"}, "2.b")
-    assert errors and "plugin update" in errors[0]
+    good = {"plugin": "P-V1-2611221408-DEV", "plugin_id": "2.a"}
+    assert smoke.check_plugin(good, "2.a") == []
+    errors = smoke.check_plugin(good, "2.b")
+    assert errors and "plugin update" in errors[0] and "P-V1-2611221408-DEV" in errors[0]
+    assert smoke.check_plugin({"plugin": "2.a.b", "plugin_id": "2.a"}, "2.a") == []
+    assert smoke.check_plugin({"plugin": "P-V1-bad", "plugin_id": "2.a"}, "2.a")
     assert smoke.bringup_pending(errors) is False
     assert smoke.check_plugin({}, "2.a") == ["中枢没有公布插件版本（healthz 缺 plugin）"]
 
@@ -381,3 +404,29 @@ def test_a_wheel_damaged_in_transit_is_fetched_again_and_never_installed(monkeyp
     assert wheel == good and why == ""
     monkeypatch.setattr(plugin_cli, "_get", lambda url, timeout=10: damaged)
     assert plugin_cli.fetch_verified_wheel("http://door", manifest) == (None, "corrupt")
+
+
+def test_a_server_only_release_keeps_the_plugin_version(tmp_path, monkeypatch):
+    """P- moves only when the plugin's content moves; the server's S- moves every release."""
+    from rogmem import engine
+
+    data = tmp_path / "data"
+    monkeypatch.setenv("ROGMEM_EMBED", "off")
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    monkeypatch.setenv("ROGMEM_RELEASE", "DEV")
+    monkeypatch.setenv("ROGMEM_BUILD_STAMP", "2611221408")
+    engine.connect(data, data / "scan")
+    assert engine.current_plugin_label() == "P-V1-2611221408-DEV"
+    # Next release, same plugin files: the server label moves, the plugin label does not.
+    monkeypatch.setenv("ROGMEM_BUILD_STAMP", "2611230900")
+    engine.connect(data, data / "scan")
+    from rogmem.version import product_version
+
+    assert product_version() == "S-V1-2611230900-DEV"
+    assert engine.current_plugin_label() == "P-V1-2611221408-DEV"
+    # A release that changes the plugin gets its own pack time.
+    monkeypatch.setattr(plugin, "_cached", "2.cccccccccccc")
+    engine.connect(data, data / "scan")
+    assert engine.current_plugin_label() == "P-V1-2611230900-DEV"
+    assert engine.plugin_label_of(f"{plugin.SERIES}.0123456789ab") == ""
+    monkeypatch.setattr(plugin, "_cached", None)

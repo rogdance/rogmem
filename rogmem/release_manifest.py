@@ -37,8 +37,8 @@ MAX_RESPONSE_BYTES = 256 * 1024
 MAX_RELEASE_ENTRIES = 500
 MAX_URL_LENGTH = 2048
 
-_TAG_PUB = re.compile(r"^V([1-9]\d*)-(\d{10})-PUB$")
-_TAG_ANY = re.compile(r"^V([1-9]\d*)-(\d{10})-(PUB|PRE)$")
+_TAG_PUB = re.compile(r"^(?:S-)?V([1-9]\d*)-(\d{10})-PUB$")
+_TAG_ANY = re.compile(r"^(?:S-)?V([1-9]\d*)-(\d{10})-(PUB|PRE)$")
 _UTC_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
@@ -165,7 +165,7 @@ def parse_manifest(body: bytes) -> Manifest:
     _check_channel_consistency("stable", stable_latest, _TAG_PUB, releases)
     if prerelease_latest:
         _check_channel_consistency(
-            "prerelease", prerelease_latest, re.compile(r"^V([1-9]\d*)-(\d{10})-PRE$"), releases
+            "prerelease", prerelease_latest, re.compile(r"^(?:S-)?V([1-9]\d*)-(\d{10})-PRE$"), releases
         )
     return Manifest(
         schema=schema,

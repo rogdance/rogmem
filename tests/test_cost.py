@@ -404,7 +404,7 @@ def test_a_page_key_places_itself_in_its_section():
     assert side.index("基础设置") < side.index("宿主管理") < side.index("模型管理")
     assert "运行日志" not in side and "队列状态" not in side
     assert "采集管理" not in side
-    assert "模型管理" in side and "管线设置" in side and "关于ROGMEM" in side
+    assert "模型管理" in side and "管线设置" in side and "关于我们" in side
     hosts = render("宿主", "hosts", "<p></p>")
     header = hosts.split("<header>", 1)[1].split("</header>", 1)[0]
     assert "class='on' href='/admin/settings/basic'>系统设置" in header

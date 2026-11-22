@@ -1,8 +1,17 @@
-"""One product version for the server and the admin pages.
+"""Version labels a person can read: S- for the server, P- for the rogmem plugin.
 
-They ship in the same image, so a second client number would only repeat the
-same pack time. V1 moves only when the product owner asks for an architecture
-bump. The ten digits are the pack time in Shanghai, YYMMDDHHmm.
+    S-V1-2611221408-DEV   the server (hub, admin pages, MCP, distill) in this image
+    P-V1-2611221408-DEV   the rogmem plugin installed on each computer
+
+- S / P says which of the two it is.
+- V1 moves only when the product owner asks for an architecture bump.
+- The ten digits are a pack time in Shanghai, YYMMDDHHmm. For S it is this image's
+  pack. For P it is the pack in which the plugin's content last changed, so P stays
+  put across server-only releases and no computer is told to update for nothing.
+- The suffix is where it runs: DEV (private-repo production), PUB (public-repo
+  production), PRE (pre-release). It comes from ROGMEM_RELEASE at run time.
+
+Tags registered before the S- prefix existed (V1-...) are still read as server tags.
 """
 
 from __future__ import annotations
@@ -13,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MAJOR = "V1"
+SERVER_PREFIX = "S"
+PLUGIN_PREFIX = "P"
 SHANGHAI = timezone(timedelta(hours=8))
 STAMP_RE = re.compile(r"\d{10}")
 UNPACKED = "未打包"
@@ -102,11 +113,18 @@ def release_channel() -> str:
     return ""
 
 
+def version_label(prefix: str, stamp: str, channel: str = "") -> str:
+    """`<prefix>-V1-<stamp>[-<channel>]`. An empty stamp is a build that was never packed."""
+    body = stamp if STAMP_RE.fullmatch(stamp or "") else UNPACKED
+    label = f"{prefix}-{MAJOR}-{body}"
+    return f"{label}-{channel}" if channel and body != UNPACKED else label
+
+
 def product_version() -> str:
-    stamp = pack_stamp()
-    if not stamp:
-        return f"{MAJOR}-{UNPACKED}"
-    channel = release_channel()
-    if not channel:
-        return f"{MAJOR}-{stamp}"
-    return f"{MAJOR}-{stamp}-{channel}"
+    """The server version this process runs."""
+    return version_label(SERVER_PREFIX, pack_stamp(), release_channel())
+
+
+def plugin_label(stamp: str) -> str:
+    """The plugin version for a pack time, on the channel this process runs."""
+    return version_label(PLUGIN_PREFIX, stamp, release_channel())

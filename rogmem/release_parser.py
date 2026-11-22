@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import re
 
-RELEASE_TAG = re.compile(r"^V([1-9]\d*)-(\d{10})-PUB$")
-LOCAL_TAG = re.compile(r"^V([1-9]\d*)-(\d{10})(?:-(?:DEV|PUB|PRE))?$")
+RELEASE_TAG = re.compile(r"^(?:S-)?V([1-9]\d*)-(\d{10})-PUB$")
+LOCAL_TAG = re.compile(r"^(?:S-)?V([1-9]\d*)-(\d{10})(?:-(?:DEV|PUB|PRE))?$")
 
 ERROR_MESSAGES = {
     "ok": "",

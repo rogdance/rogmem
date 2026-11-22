@@ -5,13 +5,19 @@ plugin, the local client (`python -m rogmem`) and the local door's autostart. Th
 together in /host-client.whl and are installed together by `rogmem plugin update`, so
 they carry one version.
 
-The version is ``<series>.<content id>``. The content id is a digest of exactly the files
-in the wheel, so it moves by itself whenever any of them changes; nobody has to remember
-to bump it. The series is bumped by hand only when an older plugin must not keep running
-against this hub (a changed contract), and ``MIN_SERIES`` says which series still work.
+Two names for one plugin build:
 
-The hub is the only authority. A computer whose plugin differs from the hub's is behind,
-even if it was built from a newer checkout: it updates to what the hub serves.
+- The **version** people read is ``P-V1-<pack time>-<channel>``, e.g. ``P-V1-2611221408-DEV``.
+  The pack time is the server pack in which the plugin's content last changed, so a
+  server-only release keeps the same P- version and no computer is asked to update.
+  The hub assigns it (see ``engine.plugin_label_of``); it is never computed on a computer.
+- The **id** machines compare is ``<series>.<12 hex>``: a digest of exactly the files in
+  the wheel. It moves by itself on any change. Hooks report it, the hub stores it, the
+  update compares it. The series is bumped by hand only when an older plugin must not
+  keep running against this hub, and ``MIN_SERIES`` says which series still work.
+
+The hub is the only authority. A computer whose plugin id differs from the hub's is
+behind, even if it was built from a newer checkout: it updates to what the hub serves.
 
 Stdlib only. This module ships in the wheel and is read by the hook's installer.
 """
@@ -39,7 +45,7 @@ _cached: str | None = None
 
 
 def version() -> str:
-    """The plugin version this code is. A built wheel or image carries it; a checkout computes it."""
+    """The plugin **id** this code is (``<series>.<12 hex>``). For the P- label, ask the hub."""
     global _cached
     if _cached is not None:
         return _cached
@@ -106,6 +112,7 @@ def record_installed(home: Path, programs: list[str], python: str = "") -> dict:
     data = {
         "name": NAME,
         "version": version(),
+        "label": str(current.get("label") or "") if current.get("version") == version() else "",
         "series": SERIES,
         "programs": merged,
         "installed_at": datetime.now(timezone.utc).isoformat(),
@@ -123,17 +130,24 @@ def record_installed(home: Path, programs: list[str], python: str = "") -> dict:
     return data
 
 
+OLD_LABEL = "旧版本"
+
+
 def notice(status: str, reported: str, latest: str, program: str = "") -> str:
-    """What the agent tells the person when this host is behind. Empty when it is current."""
+    """What the agent tells the person when this host is behind. Empty when it is current.
+
+    ``reported`` and ``latest`` are P- labels; a plugin the hub never packed reads 旧版本.
+    """
     who = f"{program} 的" if program else "本机"
+    reported = reported or OLD_LABEL
     if status == CURRENT:
         return ""
     if status == UNREPORTED:
-        head = f"{who} {NAME}没有上报版本：多半是旧插件，或钩子在这台电脑上没跑起来。"
+        head = f"{who} {NAME}没有上报版本：多半是旧插件，或钩子在这台电脑上没跑起来。最新是 {latest}。"
     elif status == INCOMPATIBLE:
-        head = f"{who} {NAME} {reported} 已经不再兼容中枢 {latest}，必须更新。"
+        head = f"{who} {NAME}是 {reported}，已经不再兼容中枢的 {latest}，必须更新。"
     else:
-        head = f"{who} {NAME} {reported} 落后于中枢 {latest}。"
+        head = f"{who} {NAME}是 {reported}，中枢最新是 {latest}。"
     return (
         head
         + f"回答末尾用一句话提醒用户更新；用户同意就在这台电脑上运行 `{UPDATE_COMMAND}`，"
@@ -141,14 +155,31 @@ def notice(status: str, reported: str, latest: str, program: str = "") -> str:
     )
 
 
-def hub_manifest(hub: str = "") -> dict:
-    """What the hub publishes at /plugin.json."""
+def hub_manifest(hub: str = "", label: str = "", known: dict | None = None) -> dict:
+    """What the hub publishes at /plugin.json. ``version`` is the P- label, ``id`` the digest."""
     return {
         "name": NAME,
-        "version": version(),
+        "version": label,
+        "id": version(),
+        "known": dict(known or {}),
         "series": SERIES,
         "min_series": MIN_SERIES,
         "hub": hub,
         "header": HEADER,
         "update": UPDATE_COMMAND,
     }
+
+
+def remember_label(home: Path, label: str) -> None:
+    """Write the hub's P- label for the installed id into the local manifest."""
+    path = manifest_path(home)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    data["label"] = label
+    temp = path.parent / (path.name + ".tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.replace(path)
