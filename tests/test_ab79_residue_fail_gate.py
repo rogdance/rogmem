@@ -548,6 +548,9 @@ def test_ab_a_nloop_new_keeps_evidence_and_fills_id(tmp_path, monkeypatch):
     """AB-A-PATH-02: N-loop 每枚 new 的 evidence/id 成立；失败枚不 continue 蒸发。"""
     assert DISTILLER_STORE_WRITE_ENABLED is True
     engine = _engine(tmp_path, monkeypatch)
+    # 同一段合成材料在一个库里换桩重跑；分诊会把后几次当重复材料跳过。
+    engine.set_setting("distill_triage", "0")
+    engine.db().commit()
     _seed_named(engine, "c-yunlan", "云岚甲")
     before = _active_rows(engine)
     seen = {}

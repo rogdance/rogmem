@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from rogmem.pipeline_knobs import DEFAULTS as _KNOB_DEFAULTS
+
 import contextvars
 import difflib
 import email.utils
@@ -115,6 +117,8 @@ from rogmem.distill_gate import (
     stamp_integrate_payload,
 )
 from rogmem.distill_match import list_draft_crystals, match_integrate_parts
+from rogmem import distill_triage
+from rogmem import horizon_gate
 from rogmem.slot_chain import (
     origin_links,
     style_delta,
@@ -232,6 +236,8 @@ _CHUNK_SEQ: contextvars.ContextVar[int | None] = contextvars.ContextVar("rogmem_
 _ATTEMPT: contextvars.ContextVar[int | None] = contextvars.ContextVar("rogmem_attempt", default=None)
 # Rows leased together for the distill this thread is running.
 _EXCHANGE: contextvars.ContextVar[tuple] = contextvars.ContextVar("rogmem_exchange", default=())
+# Why triage skipped the unit this thread is running. Empty when it went to the model.
+_TRIAGE_SKIP: contextvars.ContextVar[str] = contextvars.ContextVar("rogmem_triage_skip", default="")
 _LIVE_LEASES: set[int] = set()
 _LIVE_LOCK = threading.Lock()
 COMMON = {"石头", "木头", "自行车"}
@@ -4025,6 +4031,7 @@ def _hold_units_behind_gate(qid: int, source_id: str, exc: ProviderRefused) -> s
 
 
 def _pump_leased(qid: int, source_id: str, source) -> str | None:
+    skip_token = _TRIAGE_SKIP.set("")
     try:
         finished = _distill(source, qid)
         if not finished:
@@ -4035,8 +4042,20 @@ def _pump_leased(qid: int, source_id: str, source) -> str | None:
                 return source_id
             from rogmem.publish_gate import coverage_state_for_source, set_source_distill_state
 
+            skipped = _TRIAGE_SKIP.get()
+            if skipped:
+                _finish_triage_skip(db(), qid, source_id, source, skipped)
+                db().commit()
+                return source_id
+            db().execute(
+                "UPDATE distill_fingerprints SET decision=?, at=? WHERE source_id=? AND decision=?",
+                (distill_triage.DECISION_DISTILLED, utcnow(), source_id, distill_triage.DECISION_PENDING),
+            )
             wrote = db().execute("SELECT 1 FROM statements WHERE source_id=? LIMIT 1", (source_id,)).fetchone()
             paged = db().execute("SELECT 1 FROM revisions WHERE source_id=? LIMIT 1", (source_id,)).fetchone()
+            if paged is None:
+                # 草稿停进了整理队列：页还没改，但这份材料已经落下，不是"无结晶"。
+                paged = db().execute("SELECT 1 FROM page_backlog WHERE source_id=? LIMIT 1", (source_id,)).fetchone()
             finished_at = utcnow()
             for member_qid in _member_qids(qid):
                 db().execute(
@@ -4114,6 +4133,125 @@ def _pump_leased(qid: int, source_id: str, source) -> str | None:
             )
             db().commit()
         return source_id
+    finally:
+        _TRIAGE_SKIP.reset(skip_token)
+
+
+def _finish_triage_skip(con, qid: int, source_id: str, source, reason: str) -> None:
+    """Every row in the unit finishes as nothing-to-land, with the reason on the run log."""
+    finished_at = utcnow()
+    for member_qid in _member_qids(qid):
+        con.execute(
+            "UPDATE queue SET state='done', last_error=NULL, finished_at=? WHERE id=?",
+            (finished_at, member_qid),
+        )
+    _mark_no_crystal(con, source_id)
+    _set_pipeline(con, source_id, "完成", "ok")
+    con.execute("UPDATE sources SET last_error=NULL WHERE id=?", (source_id,))
+    con.execute(
+        "UPDATE distill_fingerprints SET decision=?, reason=?, at=? WHERE source_id=?",
+        (distill_triage.DECISION_SKIPPED, reason, finished_at, source_id),
+    )
+    record_run(
+        con,
+        "萃取",
+        "跳过",
+        _source_subject(source),
+        f"萃取跳过：{reason}",
+        step="草稿",
+        ref_kind="source",
+        ref_id=source_id,
+    )
+    _mirror_exchange_outcome(con, source_id)
+
+
+def knob(key: str) -> int:
+    """A cost/quality knob from 管线设置. Unset or invalid falls back to its default."""
+    from rogmem import pipeline_knobs
+
+    return pipeline_knobs.value(get_setting, key)
+
+
+def _triage_enabled() -> bool:
+    return knob("distill_triage") == 1
+
+
+def _horizon_gate_enabled() -> bool:
+    return knob("horizon_gate") == 1
+
+
+def _triage_unit(source, text: str) -> str:
+    """Decide before any model call. Returns the skip reason, or empty to distill.
+
+    The fingerprint is written as pending; it becomes distilled only when the
+    queue row actually finishes, so a failed attempt never counts as a precedent.
+    """
+    if not _triage_enabled():
+        return ""
+    source_id = str(source["id"])
+    member_ids = _member_source_ids(source_id)
+    marks = ",".join("?" * len(member_ids))
+    rows = db().execute(
+        f"""SELECT id, kind, body, IFNULL(event_at,'') AS event_at, IFNULL(ingested_at,'') AS ingested_at
+            FROM sources WHERE id IN ({marks})""",
+        member_ids,
+    ).fetchall()
+    is_file = source["kind"] == "file"
+    user_text = "\n".join(str(row["body"] or "") for row in rows if row["kind"] == "user")
+    agent_text = "\n".join(str(row["body"] or "") for row in rows if row["kind"] == "agent")
+    clocks = [str(row["event_at"] or row["ingested_at"] or "") for row in rows]
+    unit_at = max(clocks, key=lambda value: _instant_key(value)) if clocks else ""
+    digest = distill_triage.unit_hash(text)
+    min_chars = knob("triage_template_min_chars")
+    template = "" if is_file else distill_triage.template_key(user_text, min_chars=min_chars)
+    duplicate = db().execute(
+        f"""SELECT 1 FROM distill_fingerprints
+            WHERE unit_hash=? AND decision=? AND source_id NOT IN ({marks}) LIMIT 1""",
+        (digest, distill_triage.DECISION_DISTILLED, *member_ids),
+    ).fetchone()
+    history: list[dict] = []
+    if template:
+        history = [
+            {key: row[key] for key in row.keys()}
+            for row in db().execute(
+                f"""SELECT decision, agent_sample, unit_at FROM distill_fingerprints
+                    WHERE template_key=? AND decision IN (?,?) AND source_id NOT IN ({marks})""",
+                (template, *distill_triage.FINISHED, *member_ids),
+            ).fetchall()
+        ]
+    reason = distill_triage.decide(
+        is_file=is_file,
+        user_text=user_text,
+        agent_text=agent_text,
+        unit_at=unit_at,
+        duplicate_of_distilled=duplicate is not None,
+        template_history=history,
+        min_chars=min_chars,
+        min_earlier=knob("triage_routine_min_earlier"),
+        window_hours=knob("triage_routine_window_hours"),
+        similarity=knob("triage_routine_similarity") / 100,
+    )
+    with LOCK:
+        db().execute(
+            """INSERT INTO distill_fingerprints(source_id,unit_hash,template_key,agent_sample,decision,reason,unit_at,at)
+               VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(source_id) DO UPDATE SET unit_hash=excluded.unit_hash,
+                 template_key=excluded.template_key, agent_sample=excluded.agent_sample,
+                 decision=excluded.decision, reason=excluded.reason,
+                 unit_at=excluded.unit_at, at=excluded.at""",
+            (
+                source_id,
+                digest,
+                template,
+                distill_triage.agent_sample(agent_text),
+                distill_triage.DECISION_PENDING,
+                reason,
+                unit_at,
+                utcnow(),
+            ),
+        )
+        db().commit()
+    return reason
 
 
 class AuthPause(RuntimeError):
@@ -4514,6 +4652,8 @@ def _stage_page(item: dict) -> dict:
         page["settled"] = True
     if item.get("landed"):
         page["landed"] = True
+    if item.get("parked"):
+        page["parked"] = str(item.get("parked"))
     crystal_id = str(item.get("crystal_id") or "").strip()
     if crystal_id:
         page["crystal_id"] = crystal_id
@@ -4533,7 +4673,7 @@ def _phase_for(pages: list) -> str:
 def _ids_from_pages(pages: list) -> list[str]:
     found: list[str] = []
     for page in pages:
-        if not isinstance(page, dict):
+        if not isinstance(page, dict) or page.get("parked"):
             continue
         crystal_id = str(page.get("crystal_id") or page.get("id") or "").strip()
         if crystal_id and crystal_id not in found:
@@ -4646,13 +4786,18 @@ def _stored_body(existing: str, contribution: str, *, fragment: bool) -> str:
     same run is joined only when it does not already contain that text. Calling
     this again with the same pair returns the same string.
     """
+    from rogmem.pages_md import strip_source_marks
+
     current = (existing or "").strip()
     piece = (contribution or "").strip()
     if not fragment:
         return piece
-    if not piece or piece == current or (current and piece in current):
+    # 〔源 …〕 marks are the program's, not words: a fragment already on the page stays one copy.
+    bare_current = strip_source_marks(current)
+    bare_piece = strip_source_marks(piece)
+    if not piece or bare_piece == bare_current or (current and bare_piece in bare_current):
         return current or piece
-    if current and current in piece:
+    if current and bare_current in bare_piece:
         return piece
     if not current:
         return piece
@@ -4790,6 +4935,10 @@ def _distill(source: sqlite3.Row, qid: int) -> bool:
     if _is_forget_request(body):
         return True
     text = _material_for_distill(source)
+    skip = _triage_unit(source, text)
+    if skip:
+        _TRIAGE_SKIP.set(skip)
+        return True
     inject = _prompt_injection(source)
     clock_at, clock_basis = _history_unit_clock(source)
     if clock_at:
@@ -4946,6 +5095,26 @@ def _chat_max_tokens(base: str, model: str) -> int:
 def _merge_max_tokens(base: str, model: str) -> int:
     """并页的额度与草稿一致：就是模型自己的输出上限。"""
     return _chat_max_tokens(base, model)
+
+
+# 一次并页的额度按要写回的规模给，模型上限只是天花板。生产 30 天：并页输出中位 1.9 万
+# token、p90 13 万，169 次撞满 131072/262144——那不是页大，是跑飞，按上限给额度只会让
+# 跑飞的那一次烧满。思考和正文共用 max_tokens，所以底座留 32k 给思考，正文按每字 2 token
+# 计（中文实际约每字 0.6～1 token，多出来的同样让给思考）。整页模式要写回旧页加草稿；
+# 分节模式只写回改动的小节：草稿本身，加上旧页最长的一节（改动的小节要整节交回）。
+MERGE_BUDGET_BASE_TOKENS = _KNOB_DEFAULTS["merge_budget_base_tokens"]
+MERGE_BUDGET_TOKENS_PER_CHAR = _KNOB_DEFAULTS["merge_budget_tokens_per_char"]
+
+
+def _merge_budget(base: str, model: str, old: str, new: str, *, partial: bool) -> int:
+    """One merge's max_tokens: room for thinking plus the text this merge must write back."""
+    if partial:
+        longest = max((sum(len(p) for p in paras) for _t, paras in _fact_sections(old or "")), default=0)
+        written = len(new or "") + longest
+    else:
+        written = len(old or "") + len(new or "")
+    want = knob("merge_budget_base_tokens") + knob("merge_budget_tokens_per_char") * written
+    return min(_merge_max_tokens(base, model), want)
 
 
 def _distill_system(kind: str) -> str:
@@ -6704,28 +6873,48 @@ def _valid_integrate_user_parts(draft_crystal, library_candidates) -> bool:
 
 
 def _distill_known_pages(kind: str, project_ref: str) -> str:
-    """A session about a repo sees that engineering page. Every call sees the owner page when it exists.
+    """The draft is told who the owner and this repo are, by their sketches, not their whole pages.
 
-    The model reconciles the new material with those pages while writing. A file does not
-    receive the engineering page. Other subjects are not preloaded.
+    The draft writes what this material adds. The merge that follows reads the stored page in
+    full and reconciles there, so the draft does not need it, and it does not rewrite it either:
+    a whole page in the draft is paid for again as the draft's output and as the merge's input.
+    A page that has no sketch yet is shown whole. A file does not receive the engineering page.
+    Other subjects are not preloaded.
+    The owner comes first: every draft shares it, so it is the longest stable prefix.
     """
     blocks = []
+    owner_brief = _owner_sketch_for_distill()
+    if owner_brief:
+        blocks.append("记忆主人速写：\n" + _dated_page("owner", owner_brief))
+    else:
+        owner_page = _owner_page_for_distill()
+        if owner_page:
+            blocks.append("已有记忆主人结晶：\n" + _dated_page("owner", owner_page))
     ref = (project_ref or "").strip()
     if kind in {"user", "agent", "summary"} and ref:
         try:
             row = _project_crystal(ref)
         except Exception:
             row = None
-        body = (hydrate(row).body_md or "").strip() if row is not None else ""
-        if body:
+        crystal = hydrate(row) if row is not None else None
+        body = (crystal.body_md or "").strip() if crystal is not None else ""
+        brief = (getattr(crystal, "sketch_md", "") or "").strip() if crystal is not None else ""
+        if brief and body:
+            blocks.append("工程速写：\n" + _dated_page(row["id"], brief))
+        elif body:
             blocks.append("已有工程结晶：\n" + _dated_page(row["id"], body))
-            sketch = _owner_brief_for_distill()
-            if sketch:
-                blocks.append("记忆主人速写：\n" + sketch)
-    owner_page = _owner_page_for_distill()
-    if owner_page:
-        blocks.append("已有记忆主人结晶：\n" + _dated_page("owner", owner_page))
     return "\n\n".join(blocks)
+
+
+def _owner_sketch_for_distill() -> str:
+    """The owner sketch alone. Empty when the owner page has no sketch yet."""
+    try:
+        row = db().execute("SELECT * FROM crystallizations WHERE id='owner'").fetchone()
+    except Exception:
+        return ""
+    if row is None:
+        return ""
+    return (getattr(hydrate(row), "sketch_md", "") or "").strip()
 
 
 def _latest_event_at(crystal_id: str) -> str:
@@ -6782,21 +6971,6 @@ def _owner_page_for_distill() -> str:
     return (hydrate(row).body_md or "").strip()
 
 
-def _owner_brief_for_distill() -> str:
-    """Owner sketch for an engineering session. The full page is the fallback."""
-    try:
-        row = db().execute("SELECT * FROM crystallizations WHERE id='owner'").fetchone()
-    except Exception:
-        return ""
-    if row is None:
-        return ""
-    crystal = hydrate(row)
-    sketch = (getattr(crystal, "sketch_md", "") or "").strip()
-    if sketch:
-        return sketch
-    return (crystal.body_md or "").strip()
-
-
 @charging("草稿")
 def _llm_draft(
     text: str,
@@ -6848,7 +7022,8 @@ def _llm_draft(
         session_id=session_id,
     )
     context = _distill_known_pages(kind, project_ref)
-    user = header + (("\n\n" + context) if context else "") + "\n\n" + redact_text(text)
+    # 稳定的速写在前，逐份变化的开头和材料在后：供应商按前缀缓存，前缀不变才命中。
+    user = ((context + "\n\n") if context else "") + header + "\n\n" + redact_text(text)
     base, key, model = target
     if not str(key or "").strip():
         raise AuthPause(MISSING_PROVIDER_KEY)
@@ -8416,9 +8591,12 @@ def _fold_repeated_page(text: str) -> str:
         para = "\n".join(lines).strip()
         if not para:
             continue
-        if len(para) >= PAGE_FOLD_MIN_PARA_CHARS and para in seen_paras:
+        from rogmem.pages_md import strip_source_marks
+
+        same = strip_source_marks(para).strip()
+        if len(same) >= PAGE_FOLD_MIN_PARA_CHARS and same in seen_paras:
             continue
-        seen_paras.add(para)
+        seen_paras.add(same)
         out.append(para)
     folded = "\n\n".join(out).strip()
     return folded or raw
@@ -8437,7 +8615,9 @@ def _is_notation_only(line: str) -> bool:
     stripped = (line or "").strip()
     if not stripped or _is_note_definition(stripped):
         return False
-    leftover = re.sub(r"\[\[[^\[\]\n]+\]\]", "", re.sub(r"\[\^[^\]]+\]", "", stripped))
+    from rogmem.pages_md import strip_source_marks
+
+    leftover = re.sub(r"\[\[[^\[\]\n]+\]\]", "", re.sub(r"\[\^[^\]]+\]", "", strip_source_marks(stripped)))
     return _WORD_CHAR.search(leftover) is None
 
 
@@ -8634,17 +8814,36 @@ def _shape_merged_page(old: str, new: str, *, keep_missing: bool = False) -> str
         insert_after.setdefault(preceding, []).append((title, list(paras)))
     ordered: list[tuple[str, list[str]]] = []
     ordered.extend(insert_after.get(sentinel, []))
+    inserted = [para for group in insert_after.values() for _title, paras in group for para in paras]
     for title in old_keys:
         paras = new_map.get(title)
         if paras is None and keep_missing:
-            # 超页这次只交回改动的小节：没交回的小节按字节留着，不是"删掉"。
-            paras = old_map.get(title, [])
+            # 分节并页只交回改动的小节：没交回的小节按字节留着，不是"删掉"。
+            # 但旧小节的正文已大半搬进一个新标题下，就是改了名，旧标题不再留一份。
+            kept = old_map.get(title, [])
+            paras = [] if _section_moved(kept, inserted) else kept
         ordered.append((title, list(paras or [])))
         ordered.extend(insert_after.get(title, []))
     bound, used = _bind_paragraph_notes(ordered, old, new)
     # A reply that carried no usable paragraph leaves the page as it was. Returning an
     # empty body here would write a blank page and park the source on a blank checkpoint.
     return _assemble_page(bound, used) or (old or "").strip()
+
+
+def _section_moved(kept: list[str], inserted: list[str]) -> bool:
+    """At least half of an old section's paragraphs reappear under a heading the old page lacked."""
+    try:
+        from rogmem.pages_md import strip_source_marks
+    except ImportError:  # 来源标记分支合入之前，两边都不带标记
+        def strip_source_marks(text: str) -> str:
+            return text
+
+    body = [strip_source_marks(para).strip() for para in kept if para and para.strip()]
+    moved = [strip_source_marks(other) for other in inserted]
+    if not body or not moved:
+        return False
+    found = sum(1 for para in body if any(para in other for other in moved))
+    return found * 2 >= len(body)
 
 
 def _keep_both_pages(old: str, new: str) -> str:
@@ -8724,15 +8923,56 @@ def _parse_page_merge(raw: str) -> dict:
 # 思考额度，正常页一律走原路。
 MERGE_SINGLE_CALL_CHARS = 400_000
 MERGE_PARTIAL_NOTE = (
-    "本次已有这一页很长，一次写不下。只交回你改动过或新增的小节：每个小节用「## 标题」起头，"
+    "本次已有这一页较长，不必整页重写。只交回你改动过或新增的小节：每个小节用「## 标题」起头，"
     "后面写这一小节修订后的完整正文；没有改动的小节不要重复，程序会按原样保留。"
     "若判定不是同一个主体，仍按原要求交回新主体自己的正文。"
 )
+# 分节并页从这个规模起就是默认：整页交回的输出与页长成正比，而一次交流通常只动一两节。
+# 记忆主人那一页无论多长都按分节并。
+MERGE_PARTIAL_FROM_CHARS = _KNOB_DEFAULTS["merge_partial_from_chars"]
+# 更重的页（记忆主人，以及超过这个规模的页）不在每次交流时并页：草稿先存进 page_backlog，
+# 攒够 PAGE_BATCH_MIN_DRAFTS 份或最早一份放了 PAGE_BATCH_MAX_AGE_HOURS 小时，再一次并完。
+# 设置 page_batch=0 恢复逐次并页。
+PAGE_BATCH_FROM_CHARS = _KNOB_DEFAULTS["page_batch_from_chars"]
+PAGE_BATCH_MIN_DRAFTS = _KNOB_DEFAULTS["page_batch_min_drafts"]
+PAGE_BATCH_MAX_AGE_HOURS = _KNOB_DEFAULTS["page_batch_max_age_hours"]
+# 一次整理最多并这么多份草稿、这么多字草稿；多出来的留到下一轮。
+PAGE_BATCH_MAX_DRAFTS = _KNOB_DEFAULTS["page_batch_max_drafts"]
+PAGE_BATCH_MAX_DRAFT_CHARS = _KNOB_DEFAULTS["page_batch_max_draft_chars"]
+# 每份草稿附带的原材料只截这么长：草稿已带引文，材料只用来核对和定先后。
+PAGE_BATCH_MATERIAL_CHARS = _KNOB_DEFAULTS["page_batch_material_chars"]
+# 一次整理没写完（撞额度、跑飞、调用失败），隔这么久再试，每失败一次下一轮少并一半；
+# 只剩一份草稿仍失败这么多次就收手，草稿留在表里、记进运行日志。
+PAGE_BATCH_RETRY_SECONDS = _KNOB_DEFAULTS["page_batch_retry_hours"] * 3600
+PAGE_BATCH_MAX_TRIES = _KNOB_DEFAULTS["page_batch_max_tries"]
+PAGE_BATCH_CHECK_SECONDS = 60
+PAGE_BATCH_NOTE = (
+    "「新写成的一页」是这一页先后攒下的几份草稿，按事件时间从早到晚排列，每份前面写着它自己的时间；"
+    "「这份材料」的事件时间是今天，页上的当前态有没有过时，拿它来比。"
+)
+
+
+class MergeOverCap(Exception):
+    """分节并页仍以 length 收场：这一页这次写不回，草稿要另行停放，不能拼接。"""
 
 
 def _merge_needs_partial(old: str, new: str) -> bool:
     """一次整页并页写不下时，改问「只交回改动的小节」。"""
     return len(old or "") + len(new or "") > MERGE_SINGLE_CALL_CHARS
+
+
+def _merge_partial_by_default(crystal_id: str, old: str, new: str) -> bool:
+    """长页与记忆主人页从第一次调用起就只问改动的小节。"""
+    return crystal_id == "owner" or len(old or "") > knob("merge_partial_from_chars") or _merge_needs_partial(old, new)
+
+
+def _page_batched(crystal_id: str, old: str) -> bool:
+    """这一页的草稿先停放、攒批再并，而不是每次交流都并一次。"""
+    if not crystal_id or not (old or "").strip():
+        return False
+    if knob("page_batch") != 1:
+        return False
+    return crystal_id == "owner" or len(old) > knob("page_batch_from_chars")
 
 
 def _merge_reply_over_cap(old: str, new: str, page: str) -> bool:
@@ -8756,6 +8996,7 @@ def _merge_existing_page(
     page_name: str = "",
     page_type: str = "",
     partial: bool = False,
+    lead: str = "",
 ) -> tuple[str, list[dict], str, str, bool, str, str]:
     """Ask whether this is the same subject. A different subject comes back as its own page."""
     from rogmem.prompts import merge_user
@@ -8787,11 +9028,15 @@ def _merge_existing_page(
         agent_name=_source_column(source, "agent_name"),
         session_id=_source_column(source, "session_id"),
     )
+    # 说明接在末尾：用户消息开头（主人称呼、固定说明、库里这一页）对同一页保持不变，
+    # 供应商的前缀缓存才命中得上。
+    if lead:
+        user = user + "\n\n" + lead
     if partial:
-        user = MERGE_PARTIAL_NOTE + "\n" + user
+        user = user + "\n\n" + MERGE_PARTIAL_NOTE
     payload = {
         "model": model,
-        "max_tokens": _merge_max_tokens(base, model),
+        "max_tokens": _merge_budget(base, model, old, new, partial=partial),
         "messages": [
             {"role": "system", "content": INTEGRATE_PAGE_SYSTEM},
             {"role": "user", "content": user},
@@ -8802,29 +9047,17 @@ def _merge_existing_page(
     if reason == "length":
         # A reply that stopped for room is not a page. Writing it would drop whatever it
         # never reached, and the guard no longer pastes the missing paragraphs back.
-        # 但原样重发同一份整页请求只会一模一样地再炸一次，一路把额度烧到 attempts 上限。
-        # 于是分两级退让：整页写不下，先降一级问「只交回改动的小节」；段级仍写不下，就不再
-        # 靠模型，按段级装配兜底——旧页整段留在前，草稿新出现的段落接在后，页面照样更新、
-        # 不丢内容，这个单元也就收敛了。
+        # 原样重发同一份请求只会一模一样地再炸一次。整页写不下，降一级问「只交回改动的
+        # 小节」；分节仍写不下，就交给调用方把草稿停进 page_backlog——不再把旧页和草稿
+        # 拼在一起兜底，那样每次都把重复段落叠进页里。
         if not partial:
-            if source is not None:
+            if source is not None and not isinstance(source, dict):
                 _touch_lease(source["id"])
             return _merge_existing_page(
-                old, new, material, source, page_event_at, page_name, page_type, partial=True
-            )
-        page = _keep_both_pages(old, new)
-        if page.strip():
-            return (
-                _keep_unnamed_relations(page, "", old, new, hang_unmatched=False),
-                [],
-                "",
-                "",
-                False,
-                "",
-                "",
+                old, new, material, source, page_event_at, page_name, page_type, partial=True, lead=lead
             )
         # 记下这一笔额度被思考吃掉了多少，否则"思考挤满"与"页面太大"看起来一模一样。
-        raise ModelCallFailed(
+        raise MergeOverCap(
             "并页没有写完这一页（思考 {} 字 / 正文 {} 字 / 额度 {}）".format(
                 shape.get("reasoning_chars", "?"),
                 shape.get("content_chars", "?"),
@@ -9022,6 +9255,13 @@ SKETCH_TRY_LIMIT = 3
 SKETCH_COMPRESS_TRIES = 2
 
 
+def _sketch_chars(text: str) -> int:
+    """A sketch's length in words. 〔源 …〕 marks point at the original and are not counted."""
+    from rogmem.pages_md import strip_source_marks
+
+    return len(strip_source_marks(text or ""))
+
+
 def _compress_sketch(text: str, base: str, key: str, model: str, *, limit: int) -> str:
     """Second pass: an over-length sketch is rewritten inside the ceiling, not clipped.
 
@@ -9057,13 +9297,13 @@ def _fit_or_compress(text: str, base: str, key: str, model: str, *, limit: int) 
     手改路径（save_crystal_markdown）本来就把超上限的速写按原样存下，这里与它一致。
     """
     best = (text or "").strip()
-    if not best or len(best) <= limit:
+    if not best or _sketch_chars(best) <= limit:
         return best
     for _ in range(SKETCH_COMPRESS_TRIES):
         compressed = _compress_sketch(best, base, key, model, limit=limit)
-        if compressed and len(compressed) < len(best):
+        if compressed and _sketch_chars(compressed) < _sketch_chars(best):
             best = compressed
-        if len(best) <= limit:
+        if _sketch_chars(best) <= limit:
             break
     return best
 
@@ -9104,7 +9344,7 @@ def _ask_sketch(body: str, ctype: str, *, owner: bool) -> str:
             again, again_reason = "", reason
         content = again if (again and again_reason != "length") else ""
     text = _fit_or_compress((content or "").strip(), base, key, model, limit=limit)
-    if len(text) >= SKETCH_MIN_CHARS or len((body or "").strip()) < SKETCH_MIN_CHARS:
+    if _sketch_chars(text) >= SKETCH_MIN_CHARS or len((body or "").strip()) < SKETCH_MIN_CHARS:
         return text
     # 退化的速写（空/极短）：再要一次；仍不行就返回空，交上层判失败——不静默落库。
     try:
@@ -9116,7 +9356,7 @@ def _ask_sketch(body: str, ctype: str, *, owner: bool) -> str:
     if retry_reason == "length":
         retry = ""
     text = _fit_or_compress((retry or "").strip(), base, key, model, limit=limit)
-    return text if len(text) >= SKETCH_MIN_CHARS else ""
+    return text if _sketch_chars(text) >= SKETCH_MIN_CHARS else ""
 
 
 def _drop_pending(con, source_id: str, crystal_id: str) -> None:
@@ -9193,6 +9433,19 @@ def _write_sketch(crystal_id: str, *, source_id: str = "") -> None:
         body = crystal.body_md or ""
         ctype = crystal.type or ""
         owner = crystal.id == "owner"
+        has_sketch = bool((crystal.sketch_md or "").strip())
+        previous = _sketch_basis_on_record(db(), crystal_id)
+    rewrite, why = _sketch_due(body, previous, has_sketch=has_sketch)
+    if not rewrite:
+        with LOCK:
+            CrystalStore(db()).record_event(crystal_id, "sketch_skip", {"reason": why, "source_id": source_id})
+            if source_id:
+                _drop_pending(db(), source_id, crystal_id)
+            db().commit()
+        return
+    from rogmem.sketch_basis import basis as sketch_basis_of
+
+    written_from = sketch_basis_of(body, datetime.now(timezone.utc))
     text = _ask_sketch(body, ctype, owner=owner)
     with LOCK:
         if not text:
@@ -9221,8 +9474,46 @@ def _write_sketch(crystal_id: str, *, source_id: str = "") -> None:
                 change=_describe_text_change(before_sketch, text, label="结晶速写"),
                 basis="按这一页当时的正文写成速写。",
             )
+        CrystalStore(db()).record_event(crystal_id, "sketch_basis", written_from)
         _drop_pending(db(), source_id, crystal_id)
         db().commit()
+
+
+def _sketch_basis_on_record(con, crystal_id: str) -> dict | None:
+    """The body fingerprint the current sketch was written from, if one was kept."""
+    row = con.execute(
+        "SELECT payload_json FROM crystal_events WHERE crystal_id=? AND kind='sketch_basis' ORDER BY id DESC LIMIT 1",
+        (crystal_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        found = json.loads(row["payload_json"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def _sketch_due(body: str, previous: dict | None, *, has_sketch: bool) -> tuple[bool, str]:
+    """A sketch follows the page when the page has moved, not on every merge.
+
+    The sketch serves memory beyond this week; the recent turns reach the next agent
+    by the session-start packet. A body that is unchanged, or only lightly changed
+    within a day of the last sketch, keeps its sketch. ``sketch_debounce=0`` turns
+    this off and every touch rewrites the sketch again.
+    """
+    from rogmem.sketch_basis import needs_rewrite
+
+    if knob("sketch_debounce") != 1:
+        return True, "速写防抖已关闭"
+    return needs_rewrite(
+        body,
+        previous,
+        has_sketch=has_sketch,
+        now=datetime.now(timezone.utc),
+        below=knob("sketch_rewrite_below_similarity") / 100,
+        stale_after=timedelta(hours=knob("sketch_stale_hours")),
+    )
 
 
 def _same_label(left: str, right: str) -> bool:
@@ -9453,7 +9744,8 @@ def _merge_one_page(source, page: dict, prior: dict) -> None:
         if prior["id"] and not page.get("separate"):
             page["id"] = prior["id"]
         return
-    if len(old) > MERGE_SINGLE_CALL_CHARS and _keep_both_pages(old, bound) == old:
+    batched = _page_batched(prior["id"], old)
+    if (batched or len(old) > MERGE_SINGLE_CALL_CHARS) and _keep_both_pages(old, bound) == old:
         # 这一页已经超过一次写回得下的规模，而这份草稿没有它还没有的东西：不必再花一次并页
         # 调用——超页并页每次都得把整页旧文整段送进 prompt，是这条链路上最贵的一次调用。
         # 没有新材料可并，程序按字节保留旧页，不丢内容，也不改写法。
@@ -9465,7 +9757,13 @@ def _merge_one_page(source, page: dict, prior: dict) -> None:
         if prior["id"] and not page.get("separate"):
             page["id"] = prior["id"]
         return
-    partial = _merge_needs_partial(old, bound)
+    if batched:
+        # 重页不逐次并：草稿停进 page_backlog，由 consolidate_backlog 攒批一次并完。
+        page["parked"] = "batch"
+        page["parked_draft"] = bound
+        page["id"] = prior["id"]
+        return
+    partial = _merge_partial_by_default(prior["id"], old, bound)
     try:
         _touch_lease(source["id"])
         merged, conflicts, note, gist, separate, new_name, new_type = _merge_existing_page(
@@ -9478,6 +9776,13 @@ def _merge_one_page(source, page: dict, prior: dict) -> None:
             page_type=prior["type"],
             partial=partial,
         )
+    except MergeOverCap as exc:
+        # 分节也写不下：页不动，草稿停进 page_backlog，这个单元照常收尾，不再重试烧额度。
+        page["parked"] = "over_cap"
+        page["parked_draft"] = bound
+        page["parked_note"] = str(exc)[:200]
+        page["id"] = prior["id"]
+        return
     except ModelCallFailed as exc:
         mark_pipeline(source["id"], "并页", "fail")
         _note_stage_error(source["id"], exc)
@@ -9521,9 +9826,68 @@ def _merge_prepared_pages(source, prepared: list[dict]) -> None:
         if not page.get("settled"):
             _merge_one_page(source, page, prior)
             page["settled"] = True
+            if page.get("parked"):
+                _park_draft(source, prepared, page)
+                continue
             _save_stage(source["id"], prepared, _phase_for(prepared))
         if not page.get("landed"):
             _deliver_page(source, prepared, page)
+
+
+def _park_draft(source, catalog: list[dict], page: dict) -> None:
+    """Store one draft in page_backlog instead of merging it now. The stored page is not touched.
+
+    The page counts as landed for this unit, in the same commit as the backlog row, so a
+    retry neither parks it twice nor merges it. It is not a sketch target: the page did not move.
+    """
+    crystal_id = str(page.get("id") or "")
+    draft = str(page.pop("parked_draft", "") or page.get("body") or "")
+    reason = str(page.get("parked") or "batch")
+    note = str(page.pop("parked_note", "") or "")
+    clock_at, clock_basis = _history_unit_clock(source)
+    event_at = clock_at or _source_column(source, "event_at")
+    event_basis = clock_basis or _source_column(source, "event_basis")
+    material = _cited_material(source)[: max(knob("page_batch_material_chars"), 1000) * 4]
+    with LOCK:
+        con = db()
+        held = con.execute(
+            """SELECT 1 FROM page_backlog WHERE crystal_id=? AND source_id=? AND draft_md=?
+               AND consumed_at IS NULL""",
+            (crystal_id, source["id"], draft),
+        ).fetchone()
+        if held is None:
+            con.execute(
+                """INSERT INTO page_backlog(crystal_id,source_id,draft_md,material_md,event_at,event_basis,reason,at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (crystal_id, source["id"], draft, material, event_at or "", event_basis or "", reason, utcnow()),
+            )
+        row = con.execute("SELECT name, body_md FROM crystallizations WHERE id=?", (crystal_id,)).fetchone()
+        name = (row["name"] if row is not None else "") or page.get("name") or crystal_id
+        if reason == "over_cap":
+            size = len((row["body_md"] if row is not None else "") or "")
+            CrystalStore(con).record_event(
+                crystal_id, "page_merge_over_cap", {"before": size, "after": size, "parked": True}
+            )
+            summary = f"「{name}」分节并页仍写不下，页面未改，草稿已停进整理队列。{note}"
+        else:
+            summary = f"「{name}」较长，这份草稿先停进整理队列，攒够或放满一天后一次并完。"
+        record_run(
+            con, "萃取", "待整理", _source_subject(source), summary,
+            step="并页", ref_kind="crystal", ref_id=crystal_id,
+        )
+        page["body"] = draft
+        page["landed"] = True
+        page["crystal_id"] = crystal_id
+        phase = _phase_for(catalog)
+        pending = _ids_from_pages(catalog) if phase == "landed" else None
+        con.execute(
+            "UPDATE sources SET stage_json=? WHERE id=?",
+            (
+                _checkpoint_body(catalog, phase, source_hash=_source_column(source, "content_hash"), pending=pending),
+                source["id"],
+            ),
+        )
+        con.commit()
 
 
 def _deliver_page(source, catalog: list[dict], page: dict) -> None:
@@ -9536,6 +9900,12 @@ def _deliver_page(source, catalog: list[dict], page: dict) -> None:
     if folded != cleaned:
         page["folded_chars"] = int(page.get("folded_chars") or 0) + (len(cleaned) - len(folded))
         cleaned = folded
+    if _horizon_gate_enabled():
+        # 逐轮的修订/更新记录不是中长期记忆；那段历史在修订表里，细节在原文里。
+        kept, dropped = horizon_gate.drop_log_sections(cleaned)
+        if dropped and kept:
+            page["log_dropped_chars"] = int(page.get("log_dropped_chars") or 0) + dropped
+            cleaned = kept
     if not str(page.get("name") or "").strip() or not cleaned:
         raise RuntimeError("模型没有交出页面")
     page["body"] = cleaned
@@ -9616,11 +9986,13 @@ def _deliver_page(source, catalog: list[dict], page: dict) -> None:
             fragment = any(
                 other is not page
                 and other.get("landed")
+                and not other.get("parked")
                 and str(other.get("crystal_id") or "") == crystal.id
                 for other in catalog
                 if isinstance(other, dict)
             )
             incoming = _stored_body(before, incoming, fragment=fragment)
+            incoming = _carry_provenance(con, source, before, incoming)
             body_changed = incoming.strip() != before
             address_note = _settle_repository(con, crystal, repo)
             if body_changed or renamed_from or alias_added or address_note:
@@ -9639,6 +10011,12 @@ def _deliver_page(source, catalog: list[dict], page: dict) -> None:
                         crystal.id,
                         "page_folded",
                         {"dropped_chars": int(page["folded_chars"]), "after": len(incoming or "")},
+                    )
+                if page.get("log_dropped_chars"):
+                    CrystalStore(con).record_event(
+                        crystal.id,
+                        "page_log_dropped",
+                        {"dropped_chars": int(page["log_dropped_chars"]), "after": len(incoming or "")},
                     )
                 if page.get("merge_over_cap"):
                     CrystalStore(con).record_event(
@@ -9750,6 +10128,7 @@ def _normalize_stage_pages(pages: list) -> list[dict]:
                     "settled": page.get("settled") or False,
                     "landed": page.get("landed") or False,
                     "crystal_id": page.get("crystal_id") or "",
+                    "parked": page.get("parked") or "",
                 }
             )
         )
@@ -12383,6 +12762,7 @@ def _core_convention(*, continued: bool, truncated: bool, continuation: dict | N
             "这是历史包。顺序是人物速写、工程速写、跨页常驻速写（问题→答案），然后才是最近摘录。"
             "身份、偏好、工程规范以速写与常驻速写为准。近况若摘录里的原句更新，以摘录为准。用户本场原话高于这包。"
             "最近摘录按时间排，不按仓库切开。有仓库标记的带着，没有就空着。"
+            "页面和速写是摘要，每个〔源 …〕指向原文，决定需要原话或细节时调用 read_source(编号)。"
         )
         if not (project or "").strip():
             text += "没有传入仓库远程地址或根提交，这次没有工程速写。"
@@ -12526,6 +12906,132 @@ def _repo_identity(text: str) -> str:
         return "https://" + slug
     found = _REPO_SHA.search(text or "")
     return found.group(0) if found else ""
+
+
+SOURCE_SHORT_MIN = 8
+# 一段拿几行原文当出处：对话单元里与这一段字面重合最多的行，最多两行。
+_PARAGRAPH_SOURCES = _KNOB_DEFAULTS["provenance_paragraph_sources"]
+
+
+def provenance_marks_on() -> bool:
+    """Whether delivery adds 〔源 …〕 marks to new or changed paragraphs. On by default."""
+    return knob("provenance_marks") == 1
+
+
+def _id_prefix_bounds(prefix: str) -> tuple[str, str]:
+    # 主键上的范围查询走索引；LIKE 在默认大小写规则下不走。
+    return prefix, prefix + "\U0010ffff"
+
+
+def _short_source_id(con, source_id: str) -> str:
+    """The shortest prefix (at least 8 characters) that no other source shares right now."""
+    sid = str(source_id or "").strip()
+    if len(sid) <= SOURCE_SHORT_MIN:
+        return sid
+    for size in range(SOURCE_SHORT_MIN, len(sid)):
+        low, high = _id_prefix_bounds(sid[:size])
+        rows = con.execute("SELECT id FROM sources WHERE id>=? AND id<? LIMIT 2", (low, high)).fetchall()
+        if len(rows) <= 1:
+            return sid[:size]
+    return sid
+
+
+def resolve_source_mark(mark: str, con=None) -> str:
+    """Full source id for a short id from a 〔源 …〕 mark. Empty when none matches.
+
+    A short id was unique when it was written; a source added later with the same
+    prefix is newer, so the oldest match is the one the mark meant.
+    """
+    con = con or db()
+    short = str(mark or "").strip()
+    if not short or not re.fullmatch(r"[0-9A-Za-z_-]{1,64}", short):
+        return ""
+    row = con.execute("SELECT id FROM sources WHERE id=?", (short,)).fetchone()
+    if row is not None:
+        return str(row["id"])
+    if len(short) < SOURCE_SHORT_MIN:
+        return ""
+    low, high = _id_prefix_bounds(short)
+    row = con.execute(
+        "SELECT id FROM sources WHERE id>=? AND id<? ORDER BY rowid LIMIT 1", (low, high)
+    ).fetchone()
+    return str(row["id"]) if row is not None else ""
+
+
+def resolve_source_marks(text: str, con=None) -> list[dict]:
+    """Every 〔源 …〕 id in this text with the source it points to."""
+    from rogmem.pages_md import source_marks
+
+    con = con or db()
+    return [{"marker": mark, "source_id": resolve_source_mark(mark, con)} for mark in source_marks(text)]
+
+
+def _paragraph_attribution(con, source):
+    """Which of this unit's source rows a new paragraph came from, as short ids.
+
+    One row is the whole answer. A dialogue spans several rows: the paragraph goes to
+    the rows whose words it shares most, and to the lead row when it shares none.
+    """
+    lead = str(source["id"] or "")
+    return _attribution_for(con, lead, [sid for sid in _exchange_source_ids(source) if sid] or [lead])
+
+
+def _attribution_for(con, lead: str, ids: list[str]):
+    """Short ids for a new paragraph, picked among these source rows by shared words."""
+    from rogmem.pages_md import _grams
+
+    ids = [sid for sid in ids if sid] or [lead]
+    lead = lead or ids[-1]
+    if len(ids) == 1:
+        only = [_short_source_id(con, ids[0])]
+        return lambda _text: only
+    marks = ",".join("?" * len(ids))
+    rows = con.execute(
+        f"SELECT id, IFNULL(body,'') AS body, rowid AS rowid FROM sources WHERE id IN ({marks}) ORDER BY rowid",
+        ids,
+    ).fetchall()
+    members = [(str(row["id"]), _grams(row["body"] or "")) for row in rows]
+    shorts: dict[str, str] = {}
+
+    def short(sid: str) -> str:
+        if sid not in shorts:
+            shorts[sid] = _short_source_id(con, sid)
+        return shorts[sid]
+
+    def attribute(text: str) -> list[str]:
+        grams = _grams(text)
+        scored = [(len(grams & body), at, sid) for at, (sid, body) in enumerate(members)] if grams else []
+        best = max((score for score, _at, _sid in scored), default=0)
+        if best <= 0:
+            return [short(lead)]
+        picked = sorted(
+            (item for item in scored if item[0] * 5 >= best * 3),
+            key=lambda item: (-item[0], item[1]),
+        )[: knob("provenance_paragraph_sources")]
+        return [short(sid) for _score, _at, sid in sorted(picked, key=lambda item: item[1])]
+
+    return attribute
+
+
+def _carry_provenance(con, source, before: str, incoming: str) -> str:
+    """Unchanged paragraphs keep their marks; new or changed ones also name this unit's source."""
+    from rogmem.pages_md import carry_source_marks
+
+    attribute = _paragraph_attribution(con, source) if provenance_marks_on() else None
+    return carry_source_marks(before, incoming, attribute, cap=knob("provenance_mark_cap"))
+
+
+def carry_provenance_from(con, before: str, body: str, source_ids: list[str], lead: str = "") -> str:
+    """The same marking for a write that gathers several units at once (e.g. a backlog consolidation).
+
+    ``source_ids`` are every source the write used; ``lead`` is where a paragraph that
+    shares words with none of them points, the newest source when left empty.
+    """
+    from rogmem.pages_md import carry_source_marks
+
+    ids = [str(sid) for sid in source_ids or [] if str(sid or "").strip()]
+    attribute = _attribution_for(con, lead or (ids[-1] if ids else ""), ids) if ids and provenance_marks_on() else None
+    return carry_source_marks(before, body, attribute, cap=knob("provenance_mark_cap"))
 
 
 def _bind_source_cites(body: str, source_id: str, source_text: str = "") -> str:
@@ -13212,7 +13718,11 @@ def _with_host_names(row: sqlite3.Row) -> dict:
 def source_detail(source_id: str) -> dict | None:
     row = db().execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
     if not row:
+        full = resolve_source_mark(source_id)
+        row = db().execute("SELECT * FROM sources WHERE id=?", (full,)).fetchone() if full else None
+    if not row:
         return None
+    source_id = row["id"]
     statements = [
         dict(item)
         for item in db().execute(
@@ -13810,6 +14320,7 @@ def read_section(name: str, section: str) -> dict:
         "text": "" if missing else text,
         "missing": bool(missing),
         "sections": headings,
+        "source_marks": [] if missing else resolve_source_marks(text),
         "parents": [piece for piece in (_parent_section(item["text"] or "", chapter) for item in parents) if piece],
     }
 
@@ -13942,6 +14453,11 @@ def crystal_detail(cid: str) -> dict | None:
         "out_links": out_links,
         "in_links": in_links,
         "link_targets": link_targets,
+        "source_marks": {
+            item["marker"]: item["source_id"]
+            for item in resolve_source_marks((body or "") + "\n" + str(getattr(hydrate(row), "sketch_md", "") or ""))
+            if item["source_id"]
+        },
         "body_md": body,
         "sketch_md": str(getattr(hydrate(row), "sketch_md", "") or ""),
         "body_updated_at": str(row["body_updated_at"] or "") if "body_updated_at" in row.keys() else "",
@@ -17057,6 +17573,273 @@ def _fold_same_names() -> int:
     return folded
 
 
+_LAST_BACKLOG_CHECK = 0.0
+
+
+def _backlog_due_pages(con, now: datetime, *, force: bool = False) -> list[str]:
+    """Pages whose parked drafts should be merged now: enough of them, or the oldest waited a day."""
+    rows = con.execute(
+        """SELECT crystal_id, COUNT(*) AS n, MIN(at) AS oldest, MAX(IFNULL(tried_at,'')) AS tried
+           FROM page_backlog WHERE consumed_at IS NULL GROUP BY crystal_id ORDER BY MIN(id)"""
+    ).fetchall()
+    due: list[str] = []
+    for row in rows:
+        if force:
+            due.append(row["crystal_id"])
+            continue
+        tried = _parse_event(row["tried"])
+        if tried is not None and (now - tried).total_seconds() < knob("page_batch_retry_hours") * 3600:
+            continue
+        oldest = _parse_event(row["oldest"])
+        aged = oldest is not None and now - oldest >= timedelta(hours=knob("page_batch_max_age_hours"))
+        if int(row["n"] or 0) >= knob("page_batch_min_drafts") or aged:
+            due.append(row["crystal_id"])
+    return due
+
+
+def _renumber_marks(text: str, used: set[str]) -> str:
+    """Give one draft's note keys numbers no earlier draft or the page already uses."""
+    mapping: dict[str, str] = {}
+
+    def repl(match: re.Match) -> str:
+        key = match.group(1)
+        if key not in mapping:
+            fresh = _free_mark(used)
+            used.add(fresh)
+            mapping[key] = fresh
+        return f"[^{mapping[key]}]"
+
+    return re.sub(r"\[\^([^\]]+)\]", repl, text or "")
+
+
+def _backlog_fail(ids: list[int], cid: str, name: str, error: str, *, over_cap: bool = False) -> None:
+    with LOCK:
+        con = db()
+        marks = ",".join("?" * len(ids))
+        con.execute(
+            f"UPDATE page_backlog SET tries=tries+1, tried_at=?, last_error=? WHERE id IN ({marks})",
+            (utcnow(), (error or "")[:200], *ids),
+        )
+        if over_cap:
+            row = con.execute("SELECT body_md FROM crystallizations WHERE id=?", (cid,)).fetchone()
+            size = len((row["body_md"] if row is not None else "") or "")
+            CrystalStore(con).record_event(cid, "page_merge_over_cap", {"before": size, "after": size, "parked": True})
+        record_run(
+            con, "萃取", "将重试", name, f"整理队列 {len(ids)} 份草稿这次没有并进「{name}」：{error}"[:500],
+            step="并页", ref_kind="crystal", ref_id=cid,
+        )
+        con.commit()
+
+
+def _backlog_close(ids: list[int], cid: str, name: str, outcome: str, summary: str, error: str = "") -> None:
+    if not ids:
+        return
+    with LOCK:
+        con = db()
+        marks = ",".join("?" * len(ids))
+        con.execute(
+            f"UPDATE page_backlog SET consumed_at=?, last_error=? WHERE id IN ({marks})",
+            (utcnow(), (error or "")[:200], *ids),
+        )
+        record_run(con, "萃取", outcome, name, summary[:500], step="并页", ref_kind="crystal", ref_id=cid)
+        con.commit()
+
+
+def _consolidate_page(cid: str, now: datetime) -> str:
+    """Merge the parked drafts of one page in one section-level call, oldest first.
+
+    The model call runs outside LOCK. The page is written only if nobody changed it
+    meanwhile; a call that does not finish leaves every draft parked for a later round.
+    """
+    from rogmem.pages_md import cite_notes
+    from rogmem.prompts import clock_lines
+
+    with LOCK:
+        con = db()
+        row = con.execute("SELECT * FROM crystallizations WHERE id=?", (cid,)).fetchone()
+        rows = con.execute(
+            """SELECT b.*, src.id AS present, IFNULL(src.ingested_at,'') AS src_ingested
+               FROM page_backlog b LEFT JOIN sources src ON src.id = b.source_id
+               WHERE b.crystal_id=? AND b.consumed_at IS NULL""",
+            (cid,),
+        ).fetchall()
+    name = ((row["name"] if row is not None else "") or cid)
+    if row is None or (row["status"] or "") != "active":
+        _backlog_close([r["id"] for r in rows], cid, name, "失败", f"「{name}」已不在，整理队列里的草稿没有并入。", "页面不在")
+        return "gone"
+    orphans = [r["id"] for r in rows if r["present"] is None]
+    _backlog_close(orphans, cid, name, "跳过", f"整理队列里 {len(orphans)} 份草稿的来源已删除，没有并入「{name}」。", "来源已删除")
+    max_tries = knob("page_batch_max_tries")
+    worn = [r["id"] for r in rows if r["present"] is not None and int(r["tries"] or 0) >= max_tries]
+    _backlog_close(worn, cid, name, "失败", f"整理队列里 {len(worn)} 份草稿多次没有并进「{name}」，已停手，草稿留在整理表里。", "多次失败")
+    live = [r for r in rows if r["present"] is not None and int(r["tries"] or 0) < max_tries]
+    if not live:
+        return "empty"
+    live.sort(key=lambda r: (_instant_key(r["event_at"] or r["at"]), int(r["id"])))
+    tries = max(int(r["tries"] or 0) for r in live)
+    limit = max(1, knob("page_batch_max_drafts") >> tries)
+    max_chars = knob("page_batch_max_draft_chars")
+    material_chars = knob("page_batch_material_chars")
+    batch: list = []
+    size = 0
+    for r in live:
+        if batch and (len(batch) >= limit or size + len(r["draft_md"] or "") > max_chars):
+            break
+        batch.append(r)
+        size += len(r["draft_md"] or "")
+    ids = [int(r["id"]) for r in batch]
+    target = llm_target("page")
+    if not target or not str(target[1] or "").strip():
+        return "no_model"
+    old = (row["body_md"] or "").strip()
+    used = set(_inline_marks(old)) | set(cite_notes(old))
+    drafts: list[str] = []
+    materials: list[str] = []
+    for index, r in enumerate(batch, 1):
+        clock = "\n".join(
+            clock_lines(event_at=r["event_at"] or "", ingested_at=r["src_ingested"] or "", event_basis=r["event_basis"] or "")
+        )
+        drafts.append(f"（第 {index} 份草稿）\n{clock}\n\n{_renumber_marks(r['draft_md'] or '', used)}")
+        material = (r["material_md"] or "")[:material_chars]
+        materials.append(f"（第 {index} 份草稿的材料）\n{clock}\n{material}")
+    new = "\n\n".join(drafts)
+    today = {"id": "", "event_at": now.isoformat(), "ingested_at": "", "event_basis": ""}
+    try:
+        with bind_source(str(batch[-1]["source_id"] or "")):
+            merged, conflicts, note, gist, separate, _name, _type = _merge_existing_page(
+                old,
+                new,
+                "\n\n".join(materials),
+                today,
+                _latest_event_at(cid),
+                page_name=row["name"] or "",
+                page_type=row["type"] or "",
+                partial=True,
+                lead=PAGE_BATCH_NOTE,
+            )
+    except (AuthPause, ProviderRefused):
+        return "paused"
+    except MergeOverCap as exc:
+        _backlog_fail(ids, cid, name, str(exc), over_cap=True)
+        return "over_cap"
+    except Exception as exc:  # noqa: BLE001
+        _backlog_fail(ids, cid, name, f"{type(exc).__name__}: {exc}")
+        return "failed"
+    if separate:
+        _backlog_close(ids, cid, name, "跳过", f"整理判定这 {len(ids)} 份草稿说的不是「{name}」这个主体，页面未改，草稿留在整理表里。", "不是同一主体")
+        return "separate"
+    if _merge_reply_over_cap(old, new, merged):
+        _backlog_fail(ids, cid, name, "整理交回的页远超旧页加草稿，没有写入", over_cap=True)
+        return "over_cap"
+    try:
+        written = _deliver_consolidated(cid, old, merged, batch, conflicts, note, gist)
+    except Exception as exc:  # noqa: BLE001
+        _backlog_fail(ids, cid, name, f"{type(exc).__name__}: {exc}")
+        return "failed"
+    if written:
+        try:
+            _write_sketch(cid)
+        except Exception:  # noqa: BLE001 - the page is stored; the next touch retries the sketch
+            pass
+    return "merged" if written else "unchanged"
+
+
+def _deliver_consolidated(cid: str, old: str, merged: str, batch: list, conflicts: list, note: str, gist: str) -> bool:
+    """Store one consolidated page with its revision, then mark its drafts consumed. One commit."""
+    from rogmem.belief import reinforce_restated_statements
+
+    ids = [int(r["id"]) for r in batch]
+    newest = batch[-1]
+    with LOCK:
+        con = db()
+        fresh = con.execute("SELECT * FROM crystallizations WHERE id=?", (cid,)).fetchone()
+        if fresh is None:
+            raise RuntimeError("页面不在")
+        crystal = hydrate(fresh)
+        before = (crystal.body_md or "").strip()
+        if before != old:
+            raise RuntimeError("整理期间这一页被改过，下一轮重新整理")
+        body = _fold_repeated_page(_drop_unbacked_marks(merged))
+        if _horizon_gate_enabled():
+            kept, dropped = horizon_gate.drop_log_sections(body)
+            if dropped and kept:
+                body = kept
+        if crystal.id != "owner":
+            labels = _label_index(con)
+            body = _strip_taken_aliases(body, labels, crystal.id)
+            known = {label for label in _crystal_labels(fresh) if label}
+            added = [
+                alias
+                for alias in _alias_names(body)
+                if alias not in known and alias != crystal.name and _label_claim(labels, alias, crystal.id) != "taken"
+            ]
+            if added:
+                current = [alias for alias in crystal.aliases if alias and alias != crystal.name]
+                crystal.aliases = current + [alias for alias in dict.fromkeys(added) if alias not in current]
+        body = body.strip()
+        name = crystal.name or cid
+        marks = ",".join("?" * len(ids))
+        if not body or body == before:
+            con.execute(f"UPDATE page_backlog SET consumed_at=? WHERE id IN ({marks})", (utcnow(), *ids))
+            record_run(
+                con, "萃取", "已整理", name, f"整理队列 {len(ids)} 份草稿并完，「{name}」没有需要改的地方。",
+                step="并页", ref_kind="crystal", ref_id=cid,
+            )
+            con.commit()
+            return False
+        body = carry_provenance_from(con, before, body, [str(r["source_id"] or "") for r in batch])
+        crystal.body_md = body
+        CrystalStore(con).put(crystal, holder=f"backlog:{cid}", commit=False)
+        CrystalStore(con).record_event(
+            cid, "merge_partial", {"before": len(before), "after": len(body), "drafts": len(ids)}
+        )
+        change = _describe_text_change(before, body)
+        judged = _conflict_note(conflicts or [], note or "")
+        if judged:
+            change = (change + "\n\n冲突裁决：\n" + judged).strip()
+        _record_revision(
+            con,
+            cid,
+            "正文",
+            str(newest["source_id"] or ""),
+            "",
+            str(newest["event_at"] or ""),
+            actor="萃取",
+            change=change,
+            basis=_cited_basis(body, f"整理队列里的 {len(ids)} 份草稿", before),
+            snapshot=body,
+            gist=(gist or "").strip() or judged,
+        )
+        for r in batch:
+            src = con.execute("SELECT body FROM sources WHERE id=?", (r["source_id"],)).fetchone()
+            if src is not None:
+                reinforce_restated_statements(con, crystal_id=cid, source_id=r["source_id"], body=src["body"] or "")
+        con.execute(f"UPDATE page_backlog SET consumed_at=? WHERE id IN ({marks})", (utcnow(), *ids))
+        record_run(
+            con, "萃取", "已整理", name, f"整理队列 {len(ids)} 份草稿一次并进「{name}」。",
+            step="并页", ref_kind="crystal", ref_id=cid,
+        )
+        con.commit()
+    return True
+
+
+def consolidate_backlog(*, force: bool = False, now: datetime | None = None) -> dict:
+    """Merge parked drafts page by page. Called from the reconcile loop; cheap when nothing is due."""
+    global _LAST_BACKLOG_CHECK
+    if not force and time.time() - _LAST_BACKLOG_CHECK < PAGE_BATCH_CHECK_SECONDS:
+        return {}
+    _LAST_BACKLOG_CHECK = time.time()
+    moment = now or datetime.now(timezone.utc)
+    with LOCK:
+        due = _backlog_due_pages(db(), moment, force=force)
+    done: dict[str, str] = {}
+    for cid in due:
+        done[cid] = _consolidate_page(cid, moment)
+        if done[cid] in {"paused", "no_model"}:
+            break
+    return done
+
+
 def run_scheduled_reconcile() -> dict | None:
     """Every few hours, and once after each pack, fold same-named pages and align wiki links.
 
@@ -17065,6 +17848,10 @@ def run_scheduled_reconcile() -> dict | None:
     """
     from rogmem.version import product_version
 
+    try:
+        consolidate_backlog()
+    except Exception as exc:  # noqa: BLE001 - parked drafts wait for the next tick
+        print(f"ROGMEM_SCHEDULE backlog {type(exc).__name__}", flush=True)
     fresh = get_setting("reconcile_build") != product_version()
     due = reconcile_due()
     if not fresh and not due:
@@ -18469,6 +19256,29 @@ def save_pipeline(values: dict) -> dict:
         db().commit()
     _remember_liveness()
     return {"ok": True, "config": pipeline_config()}
+
+
+def pipeline_knobs_view() -> list[dict]:
+    """The cost/quality knobs, grouped, with live values. Shown under 管线设置."""
+    from rogmem import pipeline_knobs
+
+    return pipeline_knobs.view(get_setting)
+
+
+def save_pipeline_knobs(values: dict) -> dict:
+    """Save the knobs a form sent. A blank number is left as it is; a bad one refuses the whole save."""
+    from rogmem import pipeline_knobs
+
+    if not isinstance(values, dict):
+        return {"ok": False, "error": "设置不是一份清单"}
+    changed, refused = pipeline_knobs.checked(values)
+    if refused:
+        return {"ok": False, "error": refused}
+    with LOCK:
+        for key, value in changed.items():
+            set_setting(key, value)
+        db().commit()
+    return {"ok": True, "knobs": pipeline_knobs_view()}
 
 
 RUN_KINDS = ("告警", "萃取", "修订", "裁决", "词条整合", "清扫")

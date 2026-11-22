@@ -68,7 +68,9 @@ def body_terms(heading: str, block: str) -> set[str]:
 
     减掉标题词，是为了让标题命中与正文命中不重复计数——标题另有 HEADING_WEIGHT 权重。
     """
-    return terms((block or "")[:GIST_CHARS]) - terms(heading)
+    from rogmem.pages_md import strip_source_marks
+
+    return terms(strip_source_marks(block or "")[:GIST_CHARS]) - terms(heading)
 
 
 def stored_tokens(heading: str, block: str) -> str:

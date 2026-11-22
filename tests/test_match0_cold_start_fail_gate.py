@@ -218,6 +218,9 @@ def test_match0_new_reuses_pr79_land_gates(tmp_path, monkeypatch):
     """M0-NEW-02: 走既有 _land_integrate_new；缺稿 / 无名不得假 accept。"""
     assert DISTILLER_STORE_WRITE_ENABLED is True
     engine = _engine(tmp_path, monkeypatch)
+    # 同一段合成材料在一个库里换桩重跑；分诊会把后几次当重复材料跳过。
+    engine.set_setting("distill_triage", "0")
+    engine.db().commit()
     land_calls: list = []
     orig_land = engine._land_integrate_new
 

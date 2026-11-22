@@ -33,6 +33,8 @@ EVENT_KINDS = frozenset(
         "full_body_write_sectioned",
         "merge_partial",
         "page_folded",
+        "page_log_dropped",
+        "page_merge_over_cap",
         "apply_op",
         "defer",
         "promote_new",
@@ -40,6 +42,8 @@ EVENT_KINDS = frozenset(
         "reconcile",
         "reject",
         "lease_conflict",
+        "sketch_basis",
+        "sketch_skip",
     }
 )
 PLACEHOLDER = frozenset({"", "暂无来源", "尚无来源", "暂无信息"})

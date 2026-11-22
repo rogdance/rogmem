@@ -617,3 +617,82 @@ def test_a_sketch_reply_that_stopped_for_room_is_not_a_sketch(tmp_path, monkeypa
     monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
     monkeypatch.setattr(engine, "_complete_chat", lambda *a, **k: ("写了半句就停住", "length"))
     assert engine._ask_sketch("正文" * 60, "人物", owner=False) == ""
+
+
+def test_bodies_and_sketches_keep_what_still_holds_months_later():
+    """一条时间尺度：三个月后还用得上、还成立的才进正文；这一轮的过程留在原文和近期原话里。"""
+    from rogmem.prompts import CRYSTAL_WRITE, DISTILL_SYSTEM
+
+    prompts = worker_prompts(sketch_limit=3500)
+    assert "三个月后" in CRYSTAL_WRITE and "三个月后" in DISTILL_SYSTEM
+    assert "正文只是摘要" in CRYSTAL_WRITE
+    assert "顺着页上的来源回原文" in CRYSTAL_WRITE
+    assert "新会话开场另有最近的原话" in CRYSTAL_WRITE
+    assert CRYSTAL_WRITE.strip() in INTEGRATE_PAGE_SYSTEM
+    for gone in (
+        "这次的症状：报错原文、失败的命令、错误输出",
+        "验证到哪一步：测过并且过了",
+        "他此刻在做、很关注的工作",
+        "然后是此刻的状态，写成现在这样，写到下一手能接着做",
+        "修订记录里留着原文",
+    ):
+        assert gone not in "\n".join(prompts.values()) + INTEGRATE_PAGE_SYSTEM, gone
+    assert "只在过了这一轮仍然成立、还会改变下一手做法时才写" in CRYSTAL_WRITE
+    assert "不用写进页面" in INTEGRATE_PAGE_SYSTEM
+    for name in ("人物", "工程", "组织", "产品", "概念"):
+        assert "这一轮的进度和数字留给开场的近期原话" in prompts[f"sketch-{name}"]
+    for name in ("人物", "主人", "工程", "组织", "产品", "概念"):
+        sketch = prompts[f"sketch-{name}"]
+        assert sketch.count("〔源 ") == 1
+        assert "每一条最多跟一个" in sketch
+
+
+def _prefix_engine(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROGMEM_DATA", str(tmp_path))
+    monkeypatch.setenv("ROGMEM_SCAN", str(tmp_path / "scan"))
+    monkeypatch.setenv("ROGMEM_NO_PASSWORD", "1")
+    monkeypatch.setenv("ROGMEM_EMBED", "off")
+    from rogmem import engine
+
+    engine.connect(tmp_path, tmp_path / "scan")
+    seen: list[str] = []
+
+    def fake_complete(_base, _key, payload, **_kwargs):
+        seen.append(payload["messages"][1]["content"])
+        if "并页写作者" in payload["messages"][0]["content"]:
+            return '{"same":"无法说定","page":"旧正文","conflicts":[],"gist":"拿不准"}', "stop"
+        return "# 雾港守灯人\n类型：人物\n\n他在。\n", "stop"
+
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
+    monkeypatch.setattr(engine, "_complete_chat", fake_complete)
+    return engine, seen
+
+
+def test_draft_puts_the_stable_sketches_before_the_header_and_the_material(tmp_path, monkeypatch):
+    """供应商按前缀缓存：两份不同材料的草稿，速写那一段一字不差地排在最前。"""
+    engine, seen = _prefix_engine(tmp_path, monkeypatch)
+    engine.db().execute("UPDATE crystallizations SET body_md=?, sketch_md=? WHERE id='owner'", ("守灯人偏好短句。", "守灯人偏好短句。"))
+    engine.db().commit()
+    engine._llm_draft("第一份合成材料：铜铃挂在东窗。", "user", source_id="src-a", session_id="s-1", ingested_at="2026-11-01T01:00:00+00:00")
+    engine._llm_draft("第二份合成材料：灯油换成松脂。", "user", source_id="src-b", session_id="s-2", ingested_at="2026-11-02T01:00:00+00:00")
+    first, second = seen
+    assert first.startswith("记忆主人速写：")
+    assert first.index("守灯人偏好短句。") < first.index("材料类型：") < first.index("第一份合成材料")
+    shared = first.split("材料类型：", 1)[0]
+    assert second.startswith(shared)
+    assert "来源链接：/admin/sources/src-a" not in shared and "会话：s-1" not in shared
+
+
+def test_merge_puts_the_stored_page_before_the_per_material_lines(tmp_path, monkeypatch):
+    engine, seen = _prefix_engine(tmp_path, monkeypatch)
+    old = "守灯人把铜铃挂在东窗。"
+    from rogmem.prompts import merge_user
+
+    a = merge_user(old, "新稿甲", "材料甲", event_at="2026-11-01T01:00:00+00:00", session_id="s-1", agent_name="宿主甲", page_name="雾港守灯人", page_type="人物")
+    b = merge_user(old, "新稿乙", "材料乙", event_at="2026-11-03T01:00:00+00:00", session_id="s-2", agent_name="宿主乙", page_name="雾港守灯人", page_type="人物")
+    shared = a.split("新写成的一页：", 1)[0]
+    assert old in shared and b.startswith(shared)
+    for variable in ("会话：", "来自哪个智能体：", "事件时间：2026", "提交时间："):
+        assert variable not in shared
+    engine._merge_existing_page(old, "新稿甲", "材料甲", page_name="雾港守灯人", page_type="人物")
+    assert seen[-1].index(old) < seen[-1].index("这份材料：")

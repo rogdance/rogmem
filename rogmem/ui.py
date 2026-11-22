@@ -1752,6 +1752,7 @@ sup.cite .cite-card {{ display: none; position: absolute; left: 0; top: 1.4em; z
 sup.cite .cite-card b {{ display: block; font-size: 12px; letter-spacing: 0; color: var(--brand); }}
 sup.cite .cite-card q {{ display: block; margin: 4px 0; quotes: none; }}
 sup.cite:hover .cite-card, sup.cite:focus .cite-card, sup.cite:focus-within .cite-card {{ display: block; }}
+sup.cite.src, sup.cite.src a {{ cursor: pointer; font-weight: 400; color: var(--text-muted); }}
 .rev-sheet {{ display: flex; align-items: flex-start; gap: 14px; }}
 .rev-rail {{ position: sticky; top: 0; z-index: 2; flex: none; display: flex; flex-direction: column; justify-content: flex-start; gap: 1px; width: 22px; height: calc(100vh - 220px); margin: 0; padding: 2px 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }}
 .rev-tick, button.rev-tick {{ position: relative; flex: 1 0 5px; display: block; min-height: 5px; max-height: 28px; width: 22px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; box-shadow: none; cursor: pointer; transform: none; }}
@@ -1847,6 +1848,9 @@ h3 {{ font-size: 16px; line-height: 1.5; font-weight: 600; margin: 22px 0 8px; }
 .setting-row + .setting-row {{ border-top: 1px solid var(--border); }}
 .setting-row h2, .setting-block h2 {{ margin: 0 0 6px; font-size: 16px; line-height: 1.5; }}
 .setting-line h2 {{ margin: 0; }}
+.knob-group {{ margin: 0; padding: 18px 24px 0; font-size: 15px; border-top: 1px solid var(--border); }}
+.knob-group + .note {{ padding: 4px 24px 8px; margin: 0; }}
+.setting-line .sub {{ margin-left: 8px; opacity: .6; font-size: 12px; }}
 .setting-row .note, .setting-block .note {{ margin: 0 0 12px; }}
 .setting-line .note {{ margin: 2px 0 0; }}
 .setting-name {{ margin: 0 0 8px; font-size: 14px; line-height: 1.5; font-weight: 600; color: var(--text-primary); }}
@@ -4992,7 +4996,7 @@ def crystal_page(
 
             sketch = (detail.get("sketch_md") or "").strip()
             sketch_html = (
-                f"<aside class='lede' id='sketch'><b>结晶速写</b>{render_markdown(sketch, detail.get('link_targets') or {})}</aside>"
+                f"<aside class='lede' id='sketch'><b>结晶速写</b>{render_markdown(sketch, detail.get('link_targets') or {}, detail.get('source_marks') or {})}</aside>"
                 if sketch
                 else "<aside class='lede muted' id='sketch'><b>结晶速写</b><p>还没有写。</p></aside>"
             )
@@ -5001,7 +5005,7 @@ def crystal_page(
                 lede_block
                 + tabs
                 + sketch_html
-                + f"<article class='md-body'>{render_markdown(body_md, detail.get('link_targets') or {})}</article>"
+                + f"<article class='md-body'>{render_markdown(body_md, detail.get('link_targets') or {}, detail.get('source_marks') or {})}</article>"
             )
         else:
             parts = []
@@ -9774,7 +9778,51 @@ def basic_page(cfg: dict) -> str:
     return _section_page("basic", "基础设置", inner)
 
 
-def pipeline_page(providers: list[dict], assigned: dict, effective: dict, schedule: dict) -> str:
+def _knob_panel(groups: list[dict] | None) -> str:
+    """萃取成本与质量：每组一个小标题，开关是勾选框，其余是整数框，右边写单位和默认值。"""
+    if not groups:
+        return ""
+    blocks = []
+    names = []
+    for group in groups:
+        rows = []
+        for item in group.get("items") or []:
+            key = str(item["key"])
+            names.append((key, bool(item.get("switch"))))
+            label = esc(item.get("label") or key)
+            unit = esc(item.get("unit") or "")
+            if item.get("switch"):
+                checked = " checked" if int(item.get("value") or 0) == 1 else ""
+                field = f"<input type='checkbox' name='{esc(key)}'{checked} aria-label='{label}'> 勾上启用"
+            else:
+                field = (
+                    f"<input name='{esc(key)}' value='{esc(str(item.get('value')))}' inputmode='numeric' "
+                    f"aria-label='{label}'> {unit}<span class='sub'>默认 {esc(str(item.get('default')))}</span>"
+                )
+            rows.append(
+                "<section class='setting-row setting-line'>"
+                f"<h2>{label}</h2><label class='job-field'>{field}</label></section>"
+            )
+        blocks.append(
+            f"<h3 class='knob-group'>{esc(group.get('title') or '')}</h3>"
+            f"<p class='note'>{esc(group.get('note') or '')}</p>" + "".join(rows)
+        )
+    pairs = ", ".join(
+        f"{key}:this.{key}.checked" if switch else f"{key}:this.{key}.value" for key, switch in names
+    )
+    return (
+        "<form class='panel settings-form' onsubmit=\"event.preventDefault(); "
+        f"post('/admin/api/settings/knobs', {{{pairs}}});\">"
+        "<header class='setting-head'><h2>萃取成本与质量</h2></header>"
+        "<p class='note'>这些数字决定花多少钱、记下什么。留空的数字不改；超出范围会被拒绝。改完立刻生效，不用重启。</p>"
+        + "".join(blocks)
+        + "<div class='setting-foot'><button type='submit'>保存</button></div></form>"
+    )
+
+
+def pipeline_page(
+    providers: list[dict], assigned: dict, effective: dict, schedule: dict, knobs: list[dict] | None = None
+) -> str:
     workers = (
         ("model_distill", "草稿", "chat"),
         ("model_page", "并页", "chat"),
@@ -9879,6 +9927,7 @@ def pipeline_page(providers: list[dict], assigned: dict, effective: dict, schedu
 {gate_rows}
 <div class="setting-foot"><button type="submit">保存</button></div>
 </form>
+{_knob_panel(knobs)}
 </div>"""
     return _section_page("pipeline", "管线设置", inner)
 

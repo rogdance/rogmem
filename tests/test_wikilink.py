@@ -408,12 +408,54 @@ def test_engineering_session_sends_the_page_and_owner_sketch_file_does_not(tmp_p
     assert "主人喜欢先看结论" in seen["user"]
     engine._llm_draft("简历里写了这个仓库。", "file", project_ref=repo, source_id="src-file")
     assert "已有工程结晶：" not in seen["user"]
-    assert "记忆主人速写：" not in seen["user"]
+    assert "工程速写：" not in seen["user"]
     engine.db().execute("UPDATE crystallizations SET body_md=? WHERE id='owner'", ("他现在住在南港。",))
+    engine.db().commit()
+    # 有速写就只给速写：整页留给随后的并页去读，草稿不再整页重抄一遍。
+    engine._llm_draft("简历里写了住址。", "file", source_id="src-file")
+    assert "记忆主人速写：" in seen["user"]
+    assert "主人喜欢先看结论" in seen["user"]
+    assert "已有记忆主人结晶：" not in seen["user"]
+    assert "他现在住在南港。" not in seen["user"]
+    engine.db().execute("UPDATE crystallizations SET sketch_md='' WHERE id='owner'")
     engine.db().commit()
     engine._llm_draft("简历里写了住址。", "file", source_id="src-file")
     assert "已有记忆主人结晶：" in seen["user"]
     assert "他现在住在南港。" in seen["user"]
+    assert "记忆主人速写：" not in seen["user"]
+
+
+def test_draft_sees_the_engineering_sketch_instead_of_the_whole_page(tmp_path, monkeypatch):
+    engine = _open(tmp_path, monkeypatch)
+    repo = "https://github.com/example/lantern"
+    engine.db().execute(
+        "UPDATE crystallizations SET body_md=?, sketch_md=? WHERE id='owner'",
+        ("他偏好先看结论。" * 50, "主人偏好先看结论。"),
+    )
+    engine._insert_crystal_page(engine.db(), "eng-2", "工程", "灯塔记账", holder="distill:seed")
+    row = engine.db().execute("SELECT * FROM crystallizations WHERE id='eng-2'").fetchone()
+    from rogmem.crystal_store import CrystalStore, hydrate
+
+    crystal = hydrate(row)
+    crystal.body_md = f"仓库 {repo}\n\n" + "缓存曾经定成 30 分钟。\n" * 40
+    crystal.sketch_md = "灯塔记账是一个记账仓库，缓存 30 分钟。"
+    crystal.keys["仓库地址"] = repo
+    CrystalStore(engine.db()).put(crystal, holder="distill:seed")
+    seen = {}
+
+    def fake_complete(_base, _key, payload, **_kwargs):
+        seen["user"] = payload["messages"][1]["content"]
+        return "# 灯塔记账\n类型：工程\n\n缓存改成 10 分钟。\n", "stop"
+
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m") if role in {"distill", "page", "sketch", "proper"} else None)
+    monkeypatch.setattr(engine, "_complete_chat", fake_complete)
+    engine._llm_draft("缓存改成 10 分钟。", "user", project_ref=repo, source_id="src-eng")
+    told = seen["user"]
+    assert "工程速写：" in told and "灯塔记账是一个记账仓库" in told
+    assert "已有工程结晶：" not in told
+    assert told.count("缓存曾经定成 30 分钟") == 0
+    assert "记忆主人速写：" in told and "已有记忆主人结晶：" not in told
+    assert "他偏好先看结论。他偏好先看结论。" not in told
 
 
 def test_core_memory_is_the_owner_sketch_and_the_current_project_sketch(tmp_path, monkeypatch):

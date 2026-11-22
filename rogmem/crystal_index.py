@@ -18,7 +18,14 @@ def tokens(text: str) -> str:
 
 
 def readable_text(name: str, body: str, sketch: str) -> str:
-    parts = [part.strip() for part in (name or "", sketch or "", body or "") if part and part.strip()]
+    from rogmem.pages_md import strip_source_marks
+
+    # 〔源 …〕 marks are addresses, not words a search should match.
+    parts = [
+        part.strip()
+        for part in (name or "", strip_source_marks(sketch or ""), strip_source_marks(body or ""))
+        if part and part.strip()
+    ]
     return "\n".join(parts)
 
 

@@ -487,6 +487,9 @@ def test_ba_after_promote_identity_gates_equal_pr79(tmp_path, monkeypatch):
     """BA-REUSE-02: 全文比对之后仍走 same/new/maybe。"""
     assert DISTILLER_STORE_WRITE_ENABLED is True
     engine = _engine(tmp_path, monkeypatch)
+    # 同一段合成材料在一个库里换桩重跑；分诊会把后几次当重复材料跳过。
+    engine.set_setting("distill_triage", "0")
+    engine.db().commit()
     _seed_ba_library(engine)
 
     def run(second_payload, source_id):

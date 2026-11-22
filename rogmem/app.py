@@ -1071,6 +1071,7 @@ async def admin_pipeline(request: Request) -> Response:
             engine.assignments(),
             engine.llm_public(),
             engine.pipeline_config(),
+            engine.pipeline_knobs_view(),
         )
     )
 
@@ -1522,6 +1523,15 @@ async def save_basic(request: Request) -> Response:
     return response
 
 
+@mcp.custom_route("/admin/api/settings/knobs", methods=["POST"])
+async def save_pipeline_knobs(request: Request) -> Response:
+    denied = _guard(request)
+    if denied:
+        return denied
+    result = engine.save_pipeline_knobs(await _body(request))
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
 @mcp.custom_route("/admin/api/settings/pipeline", methods=["POST"])
 async def save_pipeline(request: Request) -> Response:
     denied = _guard(request)
@@ -1746,7 +1756,10 @@ def search(query: str, limit: int = 5, trace: bool = False) -> str:
 @mcp.tool()
 @off_loop
 def read_section(crystal: str, section: str) -> str:
-    """读这一页正文里的一节。节名是该页的二级标题。对不上时，返回里的 sections 是这一页实际有的标题。"""
+    """读这一页正文里的一节。节名是该页的二级标题。对不上时，返回里的 sections 是这一页实际有的标题。
+
+    段末的〔源 …〕是这段的原文编号，source_marks 给出每个编号对应的来源；要原话或细节时用 read_source 读它。
+    """
     payload = engine.read_section(crystal, section)
     _count_memory_read()
     return json.dumps(payload, ensure_ascii=False)
@@ -1764,8 +1777,9 @@ def read_chain(crystal: str, section: str) -> str:
 @mcp.tool()
 @off_loop
 def read_source(source_id: str) -> str:
-    """按来源编号读原文。"""
-    row = engine.db().execute("SELECT id, body, redacted, status, last_error FROM sources WHERE id=?", (source_id,)).fetchone()
+    """按来源编号读原文。编号可以是完整编号，也可以是正文〔源 …〕里的短编号。"""
+    wanted = engine.resolve_source_mark(source_id) or source_id
+    row = engine.db().execute("SELECT id, body, redacted, status, last_error FROM sources WHERE id=?", (wanted,)).fetchone()
     _count_memory_read()
     if not row:
         return json.dumps({"error": "没有这条"}, ensure_ascii=False)
@@ -1917,7 +1931,7 @@ def guide(level: str = "brief") -> str:
         "历史包是人物速写、工程速写，余量才是最近摘录。返回写明截断时，要更早原文必须按 continuation.before 再调 core，这次只有更早摘录。"
         "这一问的事实包里没有，才 search，绝对禁止用 search 翻页。要读某一节，用 read_section，节名是这一页正文里的二级标题；对不上时看返回的 sections。"
         "要看这一节先后怎么变的、每次为什么改，用 read_chain，节名与那一节相同。"
-        "要原文再用 read_source。整页为什么变成现在这样，用 read_revisions。"
+        "页面是摘要，段末的〔源 …〕是原文编号，决定需要原话或细节时用 read_source(编号) 读原文。整页为什么变成现在这样，用 read_revisions。"
         "要改已经有的一页，用 submit_draft，交一页和首蒸相同的 Markdown，篇名对上那一页。不按这个形状写的不会收下，收下也不直接改正在用的正文和速写。本场原话优先于历史包。"
     )
     full = brief + " submit_turn 只收用户句和看得见的回复。系统提示、召回、压缩摘要和隐藏推理不要提交。"

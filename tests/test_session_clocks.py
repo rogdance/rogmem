@@ -20,6 +20,9 @@ def _open(tmp_path, monkeypatch):
     from rogmem import engine
 
     engine.connect(tmp_path, tmp_path / "scan")
+    # 这里验的是一次并页怎样对待两个时钟，所以记忆主人页按逐次并页走，不停进整理队列。
+    engine.set_setting("page_batch", "0")
+    engine.db().commit()
     return engine
 
 

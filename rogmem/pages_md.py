@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from rogmem.pipeline_knobs import DEFAULTS as _KNOB_DEFAULTS
+
 import html
 import re
 
@@ -136,6 +138,169 @@ def parse_pages(text: str) -> list[dict]:
 
 _CITE_DEF = re.compile(r"^\[\^([^\]]+)\]:\s*(.*)$")
 
+# A paragraph's provenance, written by the program at delivery: ` 〔源 3f2a9c1e 7b0d11aa〕`.
+# Each id is a unique prefix of sources.id. It never uses the `[^n]` footnote syntax.
+SOURCE_MARK = re.compile(r"[ \t]*〔源((?:[ \t]+[0-9A-Za-z_-]{1,64})+)[ \t]*〕")
+SOURCE_MARK_CAP = _KNOB_DEFAULTS["provenance_mark_cap"]
+
+
+def source_marks(text: str) -> list[str]:
+    """Short source ids in the order the marks name them, once each."""
+    found: list[str] = []
+    for match in SOURCE_MARK.finditer(text or ""):
+        for short in match.group(1).split():
+            if short not in found:
+                found.append(short)
+    return found
+
+
+def strip_source_marks(text: str) -> str:
+    return SOURCE_MARK.sub("", text or "")
+
+
+def source_mark(ids: list[str]) -> str:
+    kept = [item for item in ids if item][-SOURCE_MARK_CAP:]
+    return f" 〔源 {' '.join(kept)}〕" if kept else ""
+
+
+_BLOCK_GAP = re.compile(r"(\n(?:[ \t]*\n)+)")
+_HEAD_LINE = re.compile(r"^#{1,6}\s")
+_RULE_LINE = re.compile(r"^(?:[-*_]\s*){3,}$")
+_WORD = re.compile(r"[^\W_]", re.UNICODE)
+# A changed paragraph inherits the marks of the old paragraph it most resembles (bigram Dice).
+_PREDECESSOR_SIMILARITY = 0.5
+
+
+def _mark_only(line: str) -> bool:
+    return bool(SOURCE_MARK.search(line or "")) and not strip_source_marks(line).strip()
+
+
+def _structural(line: str) -> bool:
+    """Headings, alias and type lines, note definitions, tables, rules, and lines with no words."""
+    text = (line or "").strip()
+    if not text or _HEAD_LINE.match(text) or text.startswith("|") or _RULE_LINE.match(text):
+        return True
+    if _CITE_DEF.match(text) or re.match(r"^\[\^[^\]]+\]：", text):
+        return True
+    probe = text.lstrip("#").strip()
+    if probe.startswith(("别名：", "别名:", "类型：", "类型:")):
+        return True
+    rest = re.sub(r"\[\[[^\[\]\n]+\]\]|\[\^[^\]]+\]", "", strip_source_marks(text))
+    return _WORD.search(rest) is None
+
+
+def _unit_key(text: str) -> str:
+    return re.sub(r"\s+", " ", strip_source_marks(text)).strip()
+
+
+def _grams(key: str) -> set[str]:
+    flat = re.sub(r"\s+", "", key)
+    return {flat[i : i + 2] for i in range(len(flat) - 1)}
+
+
+def _units(text: str) -> list[tuple[str, list[str]]]:
+    """Each blank-line paragraph that carries words: its comparison key and its marks."""
+    found: list[tuple[str, list[str]]] = []
+    fenced = False
+    for block in _BLOCK_GAP.split(text or "")[::2]:
+        lines = block.split("\n")
+        fences = sum(1 for line in lines if line.strip().startswith("```"))
+        if fenced or fences:
+            fenced = fenced ^ (fences % 2 == 1)
+            continue
+        content = [line for line in lines if not _structural(line)]
+        if not content:
+            continue
+        marked = [line for line in lines if not _structural(line) or _mark_only(line)]
+        found.append((_unit_key("\n".join(content)), source_marks("\n".join(marked))))
+    return found
+
+
+def _ordered(ids: list[str]) -> list[str]:
+    """Oldest first, a repeated id keeps its latest place."""
+    out: list[str] = []
+    for item in ids:
+        if item in out:
+            out.remove(item)
+        out.append(item)
+    return out
+
+
+def carry_source_marks(before: str, after: str, attribute=None, cap: int = SOURCE_MARK_CAP) -> str:
+    """Give every paragraph of ``after`` its source marks.
+
+    A paragraph whose words are already on ``before`` keeps the marks it had there, even
+    when the writer dropped them. A new or changed paragraph keeps the marks of the old
+    paragraph it most resembles and gets ``attribute(text)`` added at the end. Only the
+    ``cap`` most recent ids stay. Marks that ``before`` never carried are not trusted.
+    Headings, alias lines, note definitions and code are never marked.
+    """
+    old = _units(before)
+    known = set(source_marks(before))
+    exact: dict[str, list[str]] = {}
+    index: dict[str, list[int]] = {}
+    old_grams: list[set[str]] = []
+    for at, (key, marks) in enumerate(old):
+        exact[key] = _ordered(exact.get(key, []) + marks)
+        grams = _grams(key)
+        old_grams.append(grams)
+        for gram in grams:
+            index.setdefault(gram, []).append(at)
+
+    def nearest(key: str) -> list[str]:
+        grams = _grams(key)
+        if len(grams) < 3:
+            return []
+        shared: dict[int, int] = {}
+        for gram in grams:
+            for at in index.get(gram, ()):
+                shared[at] = shared.get(at, 0) + 1
+        best, score = None, 0.0
+        for at, count in shared.items():
+            value = 2 * count / (len(grams) + len(old_grams[at]))
+            if value > score:
+                best, score = at, value
+        if best is None or score < _PREDECESSOR_SIMILARITY:
+            return []
+        return list(old[best][1])
+
+    pieces = _BLOCK_GAP.split(after or "")
+    fenced = False
+    for at in range(0, len(pieces), 2):
+        lines = pieces[at].split("\n")
+        fences = sum(1 for line in lines if line.strip().startswith("```"))
+        if fenced or fences:
+            fenced = fenced ^ (fences % 2 == 1)
+            continue
+        content = [j for j, line in enumerate(lines) if not _structural(line)]
+        if not content:
+            continue
+        loose = {j for j, line in enumerate(lines) if _mark_only(line)}
+        written = [
+            mark
+            for mark in source_marks("\n".join(lines[j] for j in sorted(set(content) | loose)))
+            if mark in known
+        ]
+        key = _unit_key("\n".join(lines[j] for j in content))
+        if key in exact:
+            marks = _ordered(exact[key] + written)
+        else:
+            fresh = [item for item in (attribute(key) if attribute else []) if item]
+            marks = _ordered(nearest(key) + written + fresh)
+        marks = marks[-cap:] if cap > 0 else []
+        last = content[-1]
+        shaped: list[str] = []
+        for j, line in enumerate(lines):
+            if j in loose:
+                continue
+            if j in content and SOURCE_MARK.search(line):
+                line = strip_source_marks(line).rstrip()
+            if j == last and marks:
+                line = line.rstrip() + source_mark(marks)
+            shaped.append(line)
+        pieces[at] = "\n".join(shaped)
+    return "".join(pieces)
+
 
 def cite_notes(text: str) -> dict[str, str]:
     """Footnote definitions are the citation payload, not part of the reading text."""
@@ -147,10 +312,14 @@ def cite_notes(text: str) -> dict[str, str]:
     return notes
 
 
-def render_markdown(text: str, targets: dict | None = None) -> str:
-    """Preview the page as written. Citation notes become a hover mark, not a second copy of the sentence."""
+def render_markdown(text: str, targets: dict | None = None, sources: dict | None = None) -> str:
+    """Preview the page as written. Citation notes become a hover mark, not a second copy of the sentence.
+
+    ``sources`` maps a short id in a 〔源 …〕 mark to the full source id it links to.
+    """
     targets = targets or {}
     notes = cite_notes(text)
+    sources = sources or {}
     blocks: list[str] = []
     paragraph: list[str] = []
     list_items: list[str] = []
@@ -158,7 +327,7 @@ def render_markdown(text: str, targets: dict | None = None) -> str:
     def flush_paragraph() -> None:
         if not paragraph:
             return
-        blocks.append("<p>" + _inline(" ".join(paragraph), targets, notes) + "</p>")
+        blocks.append("<p>" + _inline(" ".join(paragraph), targets, notes, sources) + "</p>")
         paragraph.clear()
 
     def flush_list() -> None:
@@ -177,19 +346,19 @@ def render_markdown(text: str, targets: dict | None = None) -> str:
             flush_paragraph()
             flush_list()
             title = line[4:].strip()
-            blocks.append(f"<h3 id='{_esc(title)}'>{_inline(title, targets, notes)}</h3>")
+            blocks.append(f"<h3 id='{_esc(title)}'>{_inline(title, targets, notes, sources)}</h3>")
             continue
         if line.startswith("## "):
             flush_paragraph()
             flush_list()
             title = line[3:].strip()
-            blocks.append(f"<h2 id='{_esc(title)}'>{_inline(title, targets, notes)}</h2>")
+            blocks.append(f"<h2 id='{_esc(title)}'>{_inline(title, targets, notes, sources)}</h2>")
             continue
         if line.startswith("# "):
             flush_paragraph()
             flush_list()
             title = line[2:].strip()
-            blocks.append(f"<h2 id='{_esc(title)}'>{_inline(title, targets, notes)}</h2>")
+            blocks.append(f"<h2 id='{_esc(title)}'>{_inline(title, targets, notes, sources)}</h2>")
             continue
         if _CITE_DEF.match(line.strip()):
             flush_paragraph()
@@ -197,7 +366,7 @@ def render_markdown(text: str, targets: dict | None = None) -> str:
             continue
         if line.lstrip().startswith(("- ", "* ")):
             flush_paragraph()
-            list_items.append(_inline(line.lstrip()[2:], targets, notes))
+            list_items.append(_inline(line.lstrip()[2:], targets, notes, sources))
             continue
         flush_list()
         paragraph.append(line.strip())
@@ -237,14 +406,27 @@ def _cite_html(note: str) -> str:
     )
 
 
-def _inline(text: str, targets: dict, notes: dict | None = None) -> str:
+def _source_mark_html(ids: str, sources: dict) -> str:
+    links = []
+    for short in ids.split():
+        full = str(sources.get(short) or short)
+        links.append(f"<a href='/admin/sources/{_esc(full)}' title='打开原文 {_esc(full)}'>{_esc(short[:8])}</a>")
+    return " <sup class='cite src'>源 " + " ".join(links) + "</sup>"
+
+
+def _inline(text: str, targets: dict, notes: dict | None = None, sources: dict | None = None) -> str:
     notes = notes or {}
+    sources = sources or {}
     parts: list[str] = []
     cursor = 0
-    pattern = re.compile(r"\[\[([^\[\]\n]{1,80})\]\]|\*\*([^*]+)\*\*|\[\^([^\]]+)\]")
+    pattern = re.compile(
+        r"\[\[([^\[\]\n]{1,80})\]\]|\*\*([^*]+)\*\*|\[\^([^\]]+)\]|" + SOURCE_MARK.pattern
+    )
     for match in pattern.finditer(text or ""):
         parts.append(_esc(text[cursor : match.start()]))
-        if match.group(1) is not None:
+        if match.group(4) is not None:
+            parts.append(_source_mark_html(match.group(4), sources))
+        elif match.group(1) is not None:
             label = match.group(1).strip()
             dest = targets.get(label)
             if dest:

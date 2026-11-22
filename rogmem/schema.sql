@@ -389,6 +389,40 @@ CREATE TABLE IF NOT EXISTS provider_health (
 );
 
 CREATE INDEX IF NOT EXISTS provider_health_provider_at ON provider_health(provider_id, at);
+
+-- 萃取前分诊：每个送去萃取或被跳过的单元留一行指纹。decision 是 pending / distilled / skipped，
+-- pending 只在这一次萃取真正收尾后才改成 distilled，失败的尝试不会冒充「已萃取过」。
+CREATE TABLE IF NOT EXISTS distill_fingerprints (
+  source_id TEXT PRIMARY KEY,
+  unit_hash TEXT NOT NULL,
+  template_key TEXT NOT NULL DEFAULT '',
+  agent_sample TEXT NOT NULL DEFAULT '',
+  decision TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  unit_at TEXT NOT NULL DEFAULT '',
+  at TEXT NOT NULL
+);
+-- 重页（记忆主人，以及很长的页）不在每次交流时并页：草稿先停在这里，攒批后一次并完。
+-- 分节并页仍写不下的草稿也停在这里，页不动、不拼接。consumed_at 为空就是还没并进去。
+CREATE TABLE IF NOT EXISTS page_backlog (
+  id INTEGER PRIMARY KEY,
+  crystal_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  draft_md TEXT NOT NULL,
+  material_md TEXT NOT NULL DEFAULT '',
+  event_at TEXT NOT NULL DEFAULT '',
+  event_basis TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  at TEXT NOT NULL,
+  consumed_at TEXT,
+  tries INTEGER NOT NULL DEFAULT 0,
+  tried_at TEXT,
+  last_error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS page_backlog_open ON page_backlog(crystal_id, consumed_at, id);
+CREATE INDEX IF NOT EXISTS page_backlog_source ON page_backlog(source_id);
+CREATE INDEX IF NOT EXISTS distill_fingerprints_hash ON distill_fingerprints(unit_hash, decision);
+CREATE INDEX IF NOT EXISTS distill_fingerprints_template ON distill_fingerprints(template_key, decision);
 CREATE INDEX IF NOT EXISTS statements_crystal ON statements(crystal_id, invalid_at);
 CREATE INDEX IF NOT EXISTS edges_mention ON edges(src, dst) WHERE ended=0 AND kind='提及';
 CREATE INDEX IF NOT EXISTS edges_mention_dst ON edges(dst, src) WHERE ended=0 AND kind='提及';

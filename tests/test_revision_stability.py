@@ -204,10 +204,26 @@ def test_a_reply_with_no_usable_paragraph_leaves_the_page_alone():
     assert page.strip() == old
 
 
-def test_a_reply_that_stopped_for_room_is_not_written_as_the_page(tmp_path, monkeypatch):
-    """A reply cut off for room is not a page. Writing it would drop whatever it never
-    reached, and the guard no longer pastes the missing paragraphs back."""
+def test_a_reply_that_stopped_for_room_escalates_then_parks_instead_of_splicing(tmp_path, monkeypatch):
+    """额度到顶的回复不是一页：先降一级问「只交回改动的小节」，分节仍写不下就交给调用方
+    停放草稿——不再把旧页和草稿拼在一起兜底，那样每次都把重复段落叠进页里。"""
     import pytest
+
+    engine = _open(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
+    seen: list[str] = []
+
+    def fake(_base, _key, payload, **_kwargs):
+        seen.append(payload["messages"][1]["content"])
+        return ("铜铃改挂到第五格。", "length")
+
+    monkeypatch.setattr(engine, "_complete_chat", fake)
+    with pytest.raises(engine.MergeOverCap):
+        engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
+    assert len(seen) == 2  # 整页一次 + 分节一次，不再有第三次
+    assert engine.MERGE_PARTIAL_NOTE not in seen[0]
+    assert engine.MERGE_PARTIAL_NOTE in seen[1]
+
 
     from rogmem.engine import ModelCallFailed
 
@@ -312,11 +328,10 @@ def test_the_fold_keeps_a_section_the_page_carries_only_once():
     assert folded.index(head) < folded.index("## 外海")
 
 
-def test_a_merge_gets_the_same_ceiling_as_the_draft(tmp_path, monkeypatch):
-    """A merge reply is one whole page, and thinking rides inside max_tokens. 草稿 may
-    emit a page bigger than a smaller merge-only clamp allowed, which left 并页 unable to
-    ever write that page back: it stopped for room on every retry. 并页 and the draft share
-    one worker and one level, so they share one ceiling — the model's own."""
+def test_a_merge_budget_follows_the_text_it_writes_back(tmp_path, monkeypatch):
+    """Thinking rides inside max_tokens, so a merge gets room for thinking plus what it
+    writes back, never more than the model's own ceiling. A ceiling-sized budget only let a
+    runaway reply burn all of it."""
     engine = _open(tmp_path, monkeypatch)
     monkeypatch.setattr(engine, "llm_target", lambda role: ("https://api.minimax.chat/v1", "k", "MiniMax-M3.1-Flash"))
     seen = {}
@@ -329,16 +344,17 @@ def test_a_merge_gets_the_same_ceiling_as_the_draft(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(engine, "_complete_chat", fake)
-    engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
-    assert seen["max_tokens"] == engine._chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash")
+    old, new = "夜航员把铜铃留在第三格。", "铜铃改挂到第五格。"
+    engine._merge_existing_page(old, new, "合成材料。")
+    ceiling = engine._chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash")
+    want = engine.MERGE_BUDGET_BASE_TOKENS + engine.MERGE_BUDGET_TOKENS_PER_CHAR * (len(old) + len(new))
+    assert seen["max_tokens"] == min(ceiling, want) < ceiling
 
 
-def test_a_merge_that_stopped_for_room_asks_once_at_the_model_ceiling(tmp_path, monkeypatch):
-    """One merge reply is one call at the model's own ceiling. A reply that still stopped
-    for room is not retried here with a bigger number: the unit goes back to the queue."""
+def test_a_merge_that_stopped_for_room_never_asks_above_the_model_ceiling(tmp_path, monkeypatch):
+    """A reply that stopped for room drops to section-level once, then is parked by the
+    caller rather than going back to the queue to ask the same full page again."""
     import pytest
-
-    from rogmem.engine import ModelCallFailed
 
     engine = _open(tmp_path, monkeypatch)
     monkeypatch.setattr(engine, "llm_target", lambda role: ("https://api.minimax.chat/v1", "k", "MiniMax-M3.1-Flash"))
@@ -349,9 +365,11 @@ def test_a_merge_that_stopped_for_room_asks_once_at_the_model_ceiling(tmp_path, 
         return "铜铃改挂到第五格。", "length"
 
     monkeypatch.setattr(engine, "_complete_chat", fake)
-    with pytest.raises(ModelCallFailed):
+    with pytest.raises(engine.MergeOverCap):
         engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
-    assert calls == [engine._chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash")]
+    ceiling = engine._chat_max_tokens("https://api.minimax.chat/v1", "MiniMax-M3.1-Flash")
+    assert len(calls) == 2
+    assert all(value <= ceiling for value in calls)
 
 
 def test_the_page_ceiling_never_raises_a_smaller_model_s_own_ceiling():
