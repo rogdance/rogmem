@@ -70,12 +70,13 @@ def test_every_page_has_the_music_toggle_default_on():
         assert gone not in html, gone
 
 
-def test_music_toggle_sits_right_of_model_health_as_the_last_header_control():
+def test_music_toggle_sits_before_the_hamburger_not_on_top_of_it():
+    """音乐按钮排在折叠导航按钮之前，窄屏下不压住汉堡 icon。"""
     plain = ui.page("结晶记忆", "crystals", "<p>hello</p>")
     assert plain.index('class="ver"') < plain.index('id="model-health"') < plain.index('id="rga-toggle"')
     header = plain.split("<header>", 1)[1].split("</header>", 1)[0]
-    assert header.index('id="nav-toggle"') < header.index('id="rga-toggle"')
-    assert 'id="rga-toggle"' in header.rsplit("<button", 1)[1]
+    assert header.index('id="rga-toggle"') < header.index('id="nav-toggle"')
+    assert 'id="nav-toggle"' in header.rsplit("<button", 1)[1]
 
 
 def test_bgm_resumes_from_the_saved_position_on_every_page():

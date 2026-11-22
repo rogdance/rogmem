@@ -2629,7 +2629,7 @@ html.nav-drawer-open, html.nav-drawer-open body {{ overflow: hidden; }}
 </style></head><body class="{body_class}">
 <div id="rogmem-progress" aria-hidden="true"><span class="bar"></span></div>
 {channel_bar()}
-<header><a class="brand" href="/admin/crystals" aria-label="ROGMEM">{BRAND_LOCKUP_SVG}</a><nav>{links}</nav><span class="ver">{esc(product_version())}</span>{_nav_model_health()}<button type="button" id="nav-toggle" class="nav-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="nav-drawer" hidden><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>{_AUDIO_BUTTON}</header>
+<header><a class="brand" href="/admin/crystals" aria-label="ROGMEM">{BRAND_LOCKUP_SVG}</a><nav>{links}</nav><span class="ver">{esc(product_version())}</span>{_nav_model_health()}{_AUDIO_BUTTON}<button type="button" id="nav-toggle" class="nav-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="nav-drawer" hidden><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button></header>
 <main class="{'reader' if reader else ''}">{side}<div class="content">{body}</div></main>
 <dialog id="nav-drawer" class="nav-drawer" aria-label="主导航">
 <div class="nav-drawer-head"><span>导航</span><button type="button" class="nav-close" aria-label="关闭导航"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button></div>
@@ -7469,32 +7469,36 @@ def graph_audio_src() -> str:
     return "/admin/static/audio/" + GRAPH_AUDIO_BGM + ("?v=" + version if version else "")
 
 _AUDIO_CSS = """<style>
-header .rga-toggle{position:relative;display:grid;place-items:center;flex:none;width:26px;height:26px;padding:0;border:1px solid var(--border);border-radius:50%;background:transparent;color:var(--text-muted);cursor:pointer}
+header .rga-toggle{position:relative;display:grid;place-items:center;flex:none;box-sizing:border-box;aspect-ratio:1;width:20px;height:20px;min-width:20px;min-height:20px;line-height:0;padding:0;margin-right:4px;border:1px solid var(--border);border-radius:50%;background:transparent;color:var(--text-muted);cursor:pointer}
+header .rga-toggle::before{content:"";position:absolute;inset:-10px -6px;border-radius:50%}
 header .rga-toggle:hover{background:var(--surface-hover);color:var(--text-primary)}
 header .rga-toggle:focus-visible{outline:2px solid var(--focus-color);outline-offset:2px}
-.rga-note{display:block;width:16px;height:16px;transform-origin:50% 50%}
+.rga-note{display:block;flex:none;width:12px;height:12px;aspect-ratio:1;transform-origin:50% 50%}
 .rga-toggle[data-state="playing"] .rga-note{animation:rga-spin 4s linear infinite}
 .rga-toggle[data-state="loading"] .rga-note{animation:rga-breathe 1100ms ease-in-out infinite}
-.rga-toggle[data-state="loading"]::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:1.5px solid transparent;border-top-color:var(--text-muted);animation:rga-scan 900ms linear infinite;pointer-events:none}
-.rga-toggle[data-state="error"]::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:1.5px dashed var(--border-strong);pointer-events:none}
+.rga-toggle[data-state="loading"]::after{content:"";position:absolute;inset:-2px;border-radius:50%;border:1.5px solid transparent;border-top-color:var(--text-muted);animation:rga-scan 900ms linear infinite;pointer-events:none}
+.rga-toggle[data-state="error"]::after{content:"";position:absolute;inset:-2px;border-radius:50%;border:1.5px dashed var(--border-strong);pointer-events:none}
 .rga-toggle[data-state="paused"] .rga-note,.rga-toggle[data-state="error"] .rga-note{animation-play-state:paused;opacity:.45}
 .rga-toggle[aria-pressed="false"] .rga-note{animation-play-state:paused;opacity:.45}
 .rga-toggle[data-state="playing"] .rga-core{fill:var(--brand)}
 @keyframes rga-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 @keyframes rga-scan{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 @keyframes rga-breathe{0%,100%{opacity:.42}50%{opacity:.9}}
+@media (max-width: 860px){header .rga-toggle{margin-right:8px}}
 @media (prefers-reduced-motion: reduce){.rga-note,.rga-toggle::after{animation:none}.rga-toggle[data-state="loading"] .rga-note{opacity:.7}}
 </style>"""
 
 _AUDIO_BUTTON = """<button type="button" class="rga-toggle" id="rga-toggle" aria-pressed="true" data-state="loading" aria-label="暂停背景音乐" title="暂停背景音乐">
-  <svg class="rga-note" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
-    <path d="M8 17V5l10-2v12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-    <ellipse class="rga-core" cx="6" cy="17" rx="2.8" ry="2.1" fill="currentColor"/>
-    <ellipse cx="16" cy="15" rx="2.8" ry="2.1" fill="currentColor"/>
+  <svg class="rga-note" viewBox="0 0 24 24" preserveAspectRatio="xMidYMid meet" fill="none" aria-hidden="true" focusable="false">
+    <g transform="translate(1.6 0)">
+      <path d="M9 17.5V6.4l8-1.9v11.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      <ellipse class="rga-core" cx="6.4" cy="17.5" rx="2.6" ry="2" fill="currentColor"/>
+      <ellipse cx="14.4" cy="15.6" rx="2.6" ry="2" fill="currentColor"/>
+    </g>
   </svg>
 </button>"""
 
-_AUDIO_MEDIA = """<audio id="rogmem-graph-bgm" loop preload="auto" src="__BGM_SRC__"></audio>"""
+_AUDIO_MEDIA = """<audio id="rogmem-graph-bgm" loop preload="none" data-bgm-src="__BGM_SRC__"></audio>"""
 
 _AUDIO_JS = """<script>
 (function () {
@@ -7503,6 +7507,8 @@ _AUDIO_JS = """<script>
   var POS = "rogmem-bgm-position-v1";
   var VOLUME = 0.45;
   var bgm = document.getElementById("rogmem-graph-bgm");
+  var bgmSrc = bgm ? bgm.getAttribute("data-bgm-src") : "";
+  var bgmLoaded = false;
   var toggle = document.getElementById("rga-toggle");
   var playing = true;
   var state = "loading";
@@ -7573,9 +7579,22 @@ _AUDIO_JS = """<script>
       bgm.muted = false;
       fadeIn();
       setState("playing");
-    } else if (bgm.paused) {
+    } else if (bgmLoaded && bgm.paused) {
       attempt();
     }
+  }
+  function startBgm() {
+    if (bgmLoaded || !bgm || !bgmSrc) return;
+    bgmLoaded = true;
+    bgm.src = bgmSrc;
+    bgm.load();
+    if (playing) attempt();
+  }
+  function afterPageAssets() {
+    // window.load 已等完 CSS / three.module.js / addons / 图片；再让出一次空闲帧，
+    // 不让整首 BGM 和星图资产抢下载带宽。
+    if (window.requestIdleCallback) window.requestIdleCallback(startBgm, {timeout: 1500});
+    else setTimeout(startBgm, 120);
   }
   if (bgm) {
     bgm.addEventListener("loadedmetadata", resume);
@@ -7602,7 +7621,7 @@ _AUDIO_JS = """<script>
       mutedForAutoplay = false;
       blocked = false;
       if (bgm) { bgm.muted = false; bgm.volume = VOLUME; }
-      attempt();
+      if (bgmLoaded) attempt(); else startBgm();
     } else if (bgm) {
       bgm.pause();
       setState("paused");
@@ -7615,13 +7634,18 @@ _AUDIO_JS = """<script>
   if (bgm && bgm.readyState >= 1) resume();
   // 上次关过音乐：直接落暂停态，别一直显示"载入中"。
   if (!playing) { setState("paused"); }
-  else { attempt(); }  // 进页面就尝试出声，不等交互；被拦时静音打底，任何一次交互淡入。
+  // 页面其它资产全部就位后才开始下载 BGM；下载完立即尝试出声，不需要用户先点一下。
+  else if (document.readyState === "complete") { afterPageAssets(); }
+  else { window.addEventListener("load", afterPageAssets, {once:true}); }
 })();
 </script>"""
 
 
 def audio_layer() -> str:
-    """全站背景音乐：样式 + <audio> + 状态机。控制台每一页都带，跨页从断点续播。"""
+    """全站背景音乐：样式 + <audio> + 状态机。控制台每一页都带，跨页从断点续播。
+
+    音频文件等到 window.load 之后才开始下载，不与星图资源抢带宽。
+    """
     return (
         _AUDIO_CSS
         + _AUDIO_MEDIA.replace("__BGM_SRC__", graph_audio_src())

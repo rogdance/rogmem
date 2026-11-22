@@ -22,13 +22,14 @@ def test_background_stars_are_round_not_square():
     assert "if (d > 1.0) discard;" in page
 
 
-def test_note_button_sits_right_of_model_health_as_the_last_header_control():
+def test_note_button_sits_before_the_hamburger_not_on_top_of_it():
+    """音乐按钮在汉堡之前，折叠导航按钮才是 header 最后一个 button。"""
     page = ui.graph_page()
-    assert page.index('class="ver"') < page.index('id="model-health"') < page.index('id="rga-toggle"')
+    assert page.index('class="ver"') < page.index('id="model-health"') < page.index('id="rga-toggle"') < page.index('id="nav-toggle"')
     assert page.count('id="rga-toggle"') == 1
     header = page.split("<header>", 1)[1].split("</header>", 1)[0]
-    assert header.index('id="nav-toggle"') < header.index('id="rga-toggle"')
-    assert 'id="rga-toggle"' in header.rsplit("<button", 1)[1]
+    assert header.index('id="rga-toggle"') < header.index('id="nav-toggle"')
+    assert 'id="nav-toggle"' in header.rsplit("<button", 1)[1]
     # 星图右上角只剩活跃结晶计数；按钮不再叠在星图里。
     assert "<div id=\"graph\" aria-busy=\"true\"><p class='graph-count' id='graph-count'></p>" in page
     assert "graph-chrome" not in page
@@ -50,9 +51,10 @@ def test_model_health_is_a_round_dot_not_a_square():
 
 def test_bgm_starts_on_entry_without_waiting_for_a_gesture():
     page = ui.graph_page()
-    assert 'id="rogmem-graph-bgm" loop preload="auto"' in page
+    assert 'id="rogmem-graph-bgm" loop preload="none"' in page
+    assert 'data-bgm-src="' + ui.graph_audio_src() + '"' in page
     script = page.split('var STORE = "rogmem-graph-bgm-v1"', 1)[1]
-    # 进页面立即尝试出声，不再有"首次交互才 unlock"的硬门槛。
+    # 资产就位后自动尝试出声，不再有"首次交互才 unlock"的硬门槛。
     assert "attempt();" in script
     assert "var unlocked = false" not in page
     assert "!unlocked" not in page
@@ -95,3 +97,43 @@ def test_note_loading_animation_differs_from_playing():
     # 状态由音频真实事件驱动，不靠定时器猜。
     for event in ("loadstart", "waiting", "playing", "pause", "error"):
         assert 'addEventListener("' + event + '"' in page
+
+
+def test_note_icon_is_small_but_never_squashed():
+    """20px 按钮 + 12px 等宽高等比音符：缩小后不变形，几何居中，旋转不跑偏。"""
+    page = ui.graph_page()
+    btn = re.search(r"header \.rga-toggle\{([^}]*)\}", page)
+    assert btn, "顶栏音乐按钮样式没找到"
+    css = btn.group(1)
+    assert "width:20px" in css and "height:20px" in css
+    assert "aspect-ratio:1" in css and "flex:none" in css
+    assert "box-sizing:border-box" in css and "margin-right:4px" in css
+    note = re.search(r"\.rga-note\{([^}]*)\}", page)
+    assert note, "音符样式没找到"
+    assert "width:12px" in note.group(1) and "height:12px" in note.group(1)
+    assert "aspect-ratio:1" in note.group(1) and "flex:none" in note.group(1)
+    # 图形重心对齐 viewBox 中心，旋转时不会偏出小圆圈。
+    assert 'preserveAspectRatio="xMidYMid meet"' in page
+    assert 'transform="translate(1.6 0)"' in page
+    # 缩小后仍保留透明放大热区，且窄屏与汉堡按钮拉开间距。
+    assert "header .rga-toggle::before" in page
+    assert "@media (max-width: 860px){header .rga-toggle{margin-right:8px}}" in page
+
+
+def test_bgm_download_waits_until_other_page_assets_are_loaded():
+    """初始 HTML 不带音频 src；window.load 之后才启动下载，不与星图资源抢带宽。"""
+    for page in (ui.page("结晶记忆", "crystals", "<p>hello</p>"), ui.graph_page()):
+        tag = re.search(r'<audio id="rogmem-graph-bgm"[^>]*>', page).group(0)
+        assert 'preload="none"' in tag
+        assert re.search(r'\ssrc="', tag) is None, tag
+        assert 'data-bgm-src="' + ui.graph_audio_src() + '"' in tag
+        assert 'bgm.getAttribute("data-bgm-src")' in page
+        assert "function startBgm()" in page
+        assert "function afterPageAssets()" in page
+        assert "bgm.src = bgmSrc" in page
+        assert "bgm.load()" in page
+        assert 'document.readyState === "complete"' in page
+        assert 'window.addEventListener("load", afterPageAssets' in page
+        assert "requestIdleCallback" in page
+        # 用户主动开音乐时不等资产，立刻下载。
+        assert "if (bgmLoaded) attempt(); else startBgm();" in page
