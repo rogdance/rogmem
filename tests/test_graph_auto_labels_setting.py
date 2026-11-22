@@ -76,7 +76,7 @@ def test_basic_page_renders_checkbox(tmp_path, monkeypatch):
 
     html = basic_page(engine.basic_config())
     assert "自动展示词条名" in html
-    assert "<h2>记忆图谱视效</h2>" in html
+    assert "<h2>记忆星图视效</h2>" in html
     assert "<h2>图谱</h2>" not in html
     assert 'name="graph_auto_labels"' in html or "name='graph_auto_labels'" in html
     assert 'type="checkbox"' in html or "type='checkbox'" in html

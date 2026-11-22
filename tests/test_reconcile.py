@@ -245,7 +245,7 @@ def test_pipeline_page_holds_workers_and_schedules():
     assert 'data-theme-pick="light"' in basic and 'data-theme-pick="dark"' in basic
     assert "<h2>自动采集方案</h2>" in basic
     assert "<h2>记忆预算上限</h2>" in basic
-    assert "<h2>记忆图谱视效</h2>" in basic
+    assert "<h2>记忆星图视效</h2>" in basic
     assert '<p class="setting-name">定时扫描目录</p>' in basic
     assert '<p class="setting-name">支持文件格式</p>' in basic
     assert '<p class="setting-name">会话回合等待时长</p>' in basic

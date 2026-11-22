@@ -1,4 +1,4 @@
-"""情景会话类别展示名。只锁 UI 文案，不改 sources.kind 底层值。"""
+"""原始会话类别展示名。只锁 UI 文案，不改 sources.kind 底层值。"""
 
 from rogmem.ui import KIND, _HOST_TIPS
 

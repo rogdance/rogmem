@@ -14,12 +14,13 @@ import secrets
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from rogmem import auth, cost, engine, rate_limit, ui
+from rogmem import auth, cost, engine, file_preview, rate_limit, ui
 from rogmem.version import product_version
 
 mcp = FastMCP("rogmem", stateless_http=True, json_response=True, host="0.0.0.0")
@@ -183,7 +184,7 @@ def _mark_channel(response: Response) -> Response:
 
 
 def _graph_label_flags() -> tuple[bool, int]:
-    """记忆图谱和结晶页关联图谱共用这一组设置，不另做开关。"""
+    """记忆星图和结晶页关联图谱共用这一组设置，不另做开关。"""
     return engine.graph_auto_labels(), engine.graph_label_budget()
 
 
@@ -409,7 +410,7 @@ async def enroll_claim(request: Request) -> Response:
 @mcp.custom_route("/admin/login", methods=["GET", "POST"])
 async def admin_login(request: Request) -> Response:
     if request.method == "GET":
-        # 已经登录就进记忆图谱。还没有会话时停在口令页，不再跳过口令。
+        # 已经登录就进记忆星图。还没有会话时停在口令页，不再跳过口令。
         if _admin_ok(request):
             return RedirectResponse("/admin/graph", status_code=302)
         return HTMLResponse(_login_page())
@@ -431,7 +432,7 @@ async def admin_login(request: Request) -> Response:
 
 @mcp.custom_route("/admin", methods=["GET"])
 async def admin_home(_request: Request) -> Response:
-    # 默认入口进"记忆图谱"（t205）。深链 /admin/<page> 自身路由不走这里。
+    # 默认入口进"记忆星图"（t205）。深链 /admin/<page> 自身路由不走这里。
     return RedirectResponse("/admin/graph", status_code=302)
 
 
@@ -669,6 +670,51 @@ async def admin_source(request: Request) -> Response:
     source["_part"] = request.query_params.get("part", "")
     source["_cite"] = request.query_params.get("cite", "")
     return HTMLResponse(ui.source_detail(source, detail["statements"], detail["mate"], origin))
+
+
+@mcp.custom_route("/admin/api/sources/{sid}/file", methods=["GET"])
+async def source_file_bytes(request: Request) -> Response:
+    """文件资料的原始字节。预览、新窗口打开、下载共用这一处。
+
+    原件留在扫描目录里，库里只存文件名。只认 kinds=file 且后缀在白名单内的
+    记录，并把拼接后的路径钉在扫描目录内，避免借文件名读别处的文件。
+    """
+    denied = _guard(request)
+    if denied:
+        return denied
+    sid = str(request.path_params.get("sid") or "")
+
+    def read() -> tuple[str, bytes, str] | None:
+        row = engine.db().execute(
+            "SELECT kind, filename FROM sources WHERE id=?", (sid,)
+        ).fetchone()
+        if row is None or (row["kind"] or "") != "file":
+            return None
+        filename = Path(str(row["filename"] or "")).name
+        if not filename or file_preview.suffix_of(filename) not in engine.accepted_suffixes():
+            return None
+        root = engine.active_scan()
+        if root is None:
+            return None
+        base = root.resolve()
+        target = (base / filename).resolve()
+        if not target.is_relative_to(base) or not target.is_file():
+            return None
+        if target.stat().st_size > engine.DOCUMENT_MAX_BYTES:
+            return None
+        return filename, target.read_bytes(), file_preview.mime_for(filename)
+
+    found = await asyncio.to_thread(read)
+    if found is None:
+        return JSONResponse({"error": "找不到这份文件的原件"}, status_code=404)
+    filename, data, media = found
+    disposition = "attachment" if request.query_params.get("download") == "1" else "inline"
+    headers = {
+        "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(filename, safe='')}",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+    }
+    return Response(data, media_type=media, headers=headers)
 
 
 @mcp.custom_route("/admin/api/crystals/nav", methods=["GET"])
@@ -1617,6 +1663,26 @@ async def pump(request: Request) -> Response:
     return JSONResponse({"next": engine.queue_next_lane(), "done": engine.pump_one()})
 
 
+@mcp.custom_route("/admin/static/preview/{path:path}", methods=["GET"])
+async def preview_asset(request: Request) -> Response:
+    """文件预览的随包渲染器，离线自带不走 CDN。只放行 vendor/preview 里的文件。"""
+    denied = _guard(request)
+    if denied:
+        return denied
+    rel = str(request.path_params.get("path") or "")
+    try:
+        target = (file_preview.ASSET_ROOT / rel).resolve()
+    except OSError:
+        return Response(status_code=404)
+    if not rel or not target.is_file() or not target.is_relative_to(file_preview.ASSET_ROOT):
+        return Response(status_code=404)
+    return Response(
+        target.read_bytes(),
+        media_type=file_preview.asset_media_type(target),
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
 @mcp.custom_route("/admin/static/three/{path:path}", methods=["GET"])
 async def three_module(request: Request) -> Response:
     """登录页的 3D 视效自带 three.js，不走 CDN。只放行 vendor/three 里的文件。"""
@@ -1637,7 +1703,7 @@ _GRAPH_AUDIO_ROOT = (Path(__file__).parent / "vendor" / "audio").resolve()
 
 @mcp.custom_route("/admin/static/audio/{name}", methods=["GET"])
 async def graph_audio(request: Request) -> Response:
-    """记忆图谱随包自带的 BGM：白名单 + 本地缓存，曲目不变就不再回传整首。"""
+    """全站随包自带的 BGM：白名单 + 本地缓存，曲目不变就不再回传整首。"""
     name = str(request.path_params.get("name") or "")
     if name not in ui.GRAPH_AUDIO_FILES:
         return Response(status_code=404)

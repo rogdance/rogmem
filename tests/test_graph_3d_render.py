@@ -1,4 +1,4 @@
-"""三维记忆图谱契约：静态资源现成、加载状态机照旧、铺名层按开关收发。"""
+"""三维记忆星图契约：静态资源现成、加载状态机照旧、铺名层按开关收发。"""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def _without_neighborhood(script: str) -> str:
 
 
 def test_both_graphs_ship_the_same_three_d_body(tmp_path, monkeypatch):
-    """关联图谱和记忆图谱的三维脚本除邻域过滤外应当同一份。"""
+    """关联图谱和记忆星图的三维脚本除邻域过滤外应当同一份。"""
     _open(tmp_path, monkeypatch)
     from starlette.testclient import TestClient
 
@@ -157,7 +157,7 @@ def test_both_graphs_ship_the_same_three_d_body(tmp_path, monkeypatch):
     assert draw in memory
     assert "var selfId" in association
     assert "var selfId" not in memory
-    # 记忆图谱把活跃结晶计数叠进 #graph；关联图谱没有。比三维脚本时先去掉它。
+    # 记忆星图把活跃结晶计数叠进 #graph；关联图谱没有。比三维脚本时先去掉它。
     memory_mount = _mount(memory).replace("<p class='graph-count' id='graph-count'></p>", "")
     assert _without_neighborhood(_mount(association)) == memory_mount
 

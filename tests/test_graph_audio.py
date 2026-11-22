@@ -1,7 +1,7 @@
-"""记忆图谱背景音乐：只播随包自带的一首 BGM。
+"""全站背景音乐：只播随包自带的一首 BGM。
 
-右下角一枚旋转的小唱片控制播放；曲目按内容指纹做本地缓存。
-不放交互音效、不加载第三方音频、不在任何页面留下许可或署名文字。
+顶栏一枚旋转的音符控制播放；控制台每一页都在，跨页从断点续播。
+曲目按内容指纹做本地缓存。不放交互音效、不加载第三方音频、不留下许可或署名文字。
 """
 
 from __future__ import annotations
@@ -42,18 +42,23 @@ def test_bgm_url_is_versioned_by_content():
     assert src.endswith(etag.strip('"')[:12])
 
 
-def test_graph_page_has_a_spinning_record_default_on():
+def test_every_page_has_the_music_toggle_default_on():
     html = ui.graph_page()
-    assert ui.graph_audio_src() in html
-    assert 'id="rogmem-graph-bgm" loop' in html
-    assert 'class="rga-disc"' in html
-    assert "@keyframes rga-spin" in html
-    assert "animation-play-state:paused" in html  # 暂停时停转
-    assert 'id="rga-toggle" aria-pressed="true"' in html  # 默认开启
-    assert 'aria-label="暂停背景音乐"' in html
-    assert "rga-badge" not in html  # 只有图标，没有文字标签
-    assert "pointerdown" in html  # 浏览器自动播放策略：首次交互解锁
-    assert "localStorage" in html  # 记住用户上次的选择
+    plain = ui.page("结晶记忆", "crystals", "<p>hello</p>")
+    for page in (html, plain):
+        assert ui.graph_audio_src() in page
+        assert 'id="rogmem-graph-bgm" loop' in page
+        assert 'class="rga-note"' in page
+        assert "@keyframes rga-spin" in page
+        assert "animation-play-state:paused" in page
+        assert 'id="rga-toggle" aria-pressed="true"' in page
+        assert 'aria-label="暂停背景音乐"' in page
+        assert page.count('id="rga-toggle"') == 1
+        assert page.count('id="rogmem-graph-bgm"') == 1
+        assert "rga-disc" not in page
+        assert "rga-badge" not in page
+        assert "pointerdown" in page
+        assert "localStorage" in page
     # 旧音景、第三方素材和授权文字，一个字节都不留在页面上。
     for gone in (
         "Mixkit", "license", "Vastness", "Andrew Ev", "Crystal chime",
@@ -65,10 +70,33 @@ def test_graph_page_has_a_spinning_record_default_on():
         assert gone not in html, gone
 
 
-def test_audio_layer_is_exclusive_to_the_graph_page():
+def test_music_toggle_sits_right_of_model_health_as_the_last_header_control():
     plain = ui.page("结晶记忆", "crystals", "<p>hello</p>")
-    assert "rga-toggle" not in plain
-    assert "/admin/static/audio/" not in plain
+    assert plain.index('class="ver"') < plain.index('id="model-health"') < plain.index('id="rga-toggle"')
+    header = plain.split("<header>", 1)[1].split("</header>", 1)[0]
+    assert header.index('id="nav-toggle"') < header.index('id="rga-toggle"')
+    assert 'id="rga-toggle"' in header.rsplit("<button", 1)[1]
+
+
+def test_bgm_resumes_from_the_saved_position_on_every_page():
+    plain = ui.page("结晶记忆", "crystals", "<p>hello</p>")
+    for needle in (
+        "rogmem-bgm-position-v1", "sessionStorage", "timeupdate",
+        "loadedmetadata", "pagehide", "beforeunload",
+        "function resume()", "function savePos()", "bgm.currentTime",
+    ):
+        assert needle in plain, needle
+
+
+def test_audio_layer_is_global_not_tied_to_the_graph_page():
+    plain = ui.page("结晶记忆", "crystals", "<p>hello</p>")
+    assert 'id="rga-toggle"' in plain
+    assert ui.graph_audio_src() in plain
+    graph = ui.graph_page()
+    assert graph.count('id="rga-toggle"') == 1
+    assert graph.count('id="rogmem-graph-bgm"') == 1
+    # 未登录的口令页不算"系统内"，不发音频。
+    assert "rogmem-graph-bgm" not in ui.login_page()
 
 
 def test_no_audio_credit_anywhere_in_the_about_page():
@@ -76,9 +104,10 @@ def test_no_audio_credit_anywhere_in_the_about_page():
 
     about = about_page("V1-test")
     assert "致谢" in about  # 项目原有的致谢区块仍在，只是不含音频条目
+    # 全站 BGM 会出现在每一页，但不得留下任何署名或许可文字。
     for gone in (
         "音效", "Mixkit", "license", "Vastness", "Andrew Ev",
-        "Crystal chime", "Floating Pulse", "bgm.mp3", "背景音乐",
+        "Crystal chime", "Floating Pulse",
     ):
         assert gone not in about, gone
 

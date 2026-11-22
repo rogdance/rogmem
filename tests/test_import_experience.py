@@ -1,4 +1,4 @@
-"""知识文件导入菜单与极空间目录窗的页面契约。"""
+"""文件资料导入菜单与极空间目录窗的页面契约。"""
 
 from rogmem.ui import page, sources_page
 

@@ -1,7 +1,7 @@
-"""打开控制台而不点名某一页时，正门是记忆图谱。点名了的地址仍直达。
+"""打开控制台而不点名某一页时，正门是记忆星图。点名了的地址仍直达。
 
 契约：
-- `/` 与 `/index.html`（远程打开）直接是记忆图谱，并带上通道标记。
+- `/` 与 `/index.html`（远程打开）直接是记忆星图，并带上通道标记。
 - `/admin/login` GET、`/admin` GET → 302 到 `/admin/graph`。
 - `/admin/costs`、`/admin/settings*`、`/admin/crystals/*`、`/admin/sources*` 等深链 200/其自身内容，
   不被改写。
@@ -50,7 +50,7 @@ def test_admin_graph_itself_is_200_no_loop(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     resp = client.get("/admin/graph", follow_redirects=False)
     assert resp.status_code == 200
-    assert "记忆图谱" in resp.text
+    assert "记忆星图" in resp.text
 
 
 def test_deep_link_cost_preserved(tmp_path, monkeypatch):
@@ -82,13 +82,13 @@ def test_deep_link_sources_preserved(tmp_path, monkeypatch):
 
 
 def test_remote_open_is_the_graph(tmp_path, monkeypatch):
-    """远程打开的 `/` 就是控制台正门，页面本身是记忆图谱，并留下通道标记。"""
+    """远程打开的 `/` 就是控制台正门，页面本身是记忆星图，并留下通道标记。"""
     client = _client(tmp_path, monkeypatch)
     for path in ("/", "/index.html"):
         resp = client.get(path, follow_redirects=False)
         assert resp.status_code == 200, path
-        assert "记忆图谱" in resp.text
-        assert "<h1>记忆图谱</h1>" not in resp.text
+        assert "记忆星图" in resp.text
+        assert "<h1>记忆星图</h1>" not in resp.text
         assert "id='graph-count'" in resp.text
         assert "为保障记忆服务通畅，请务必保持本窗口开启或最小化" in resp.text
         assert "rogmem_channel=1" in resp.headers.get("set-cookie", "")
@@ -155,15 +155,15 @@ def test_default_entry_chain_through_build_app(tmp_path, monkeypatch):
     assert r1.status_code == 302 and r1.headers["location"] == "/admin/graph", (r1.status_code, r1.headers)
     r2 = client.get("/admin/login", follow_redirects=False)
     assert r2.status_code == 302 and r2.headers["location"] == "/admin/graph", (r2.status_code, r2.headers)
-    # follow 到 /admin/graph：200 + 含"记忆图谱"（沉浸式，无页头 h1）
+    # follow 到 /admin/graph：200 + 含"记忆星图"（沉浸式，无页头 h1）
     r3 = client.get("/admin", follow_redirects=True)
     assert r3.status_code == 200
-    assert "记忆图谱" in r3.text
-    assert "<h1>记忆图谱</h1>" not in r3.text
+    assert "记忆星图" in r3.text
+    assert "<h1>记忆星图</h1>" not in r3.text
     opened = client.get("/", follow_redirects=False)
     assert opened.status_code == 200
-    assert "记忆图谱" in opened.text
-    assert "<h1>记忆图谱</h1>" not in opened.text
+    assert "记忆星图" in opened.text
+    assert "<h1>记忆星图</h1>" not in opened.text
     assert "rogmem_channel=1" in opened.headers.get("set-cookie", "")
 
 

@@ -14,7 +14,7 @@
 | 说法对不上在并页里裁决 | `rogmem/prompts.py` 的 `INTEGRATE_PAGE_SYSTEM` |
 | 并页交回的正文直接落地 | `rogmem/engine.py` 并页落地后调用 `_write_sketch` |
 | 萃取前替换密钥模样的字符串 | `rogmem/engine.py` 的 `_llm_extract` |
-| 知识文件类型 | `rogmem/ui.py` 的 `FILE_TYPES` |
+| 文件资料类型 | `rogmem/ui.py` 的 `FILE_TYPES` |
 | 相同内容只留一条 | `rogmem/engine.py` 的 `hash_dedup_enabled` |
 | 宿主名单 | `rogmem/engine.py` 的 `HOST_PROGRAMS` |
 | DSH 用插件，其余用同一份 hook | `rogmem/ui.py` 宿主页说明，`rogmem/onboard.py` |
@@ -40,7 +40,7 @@
 
 ## 术语
 
-界面和代码用哪个词，README 就用哪个。记忆主人、速写、结晶、宿主、情景会话、知识文件、历史包，不改写成同义词。
+界面和代码用哪个词，README 就用哪个。记忆主人、速写、结晶、宿主、原始会话、文件资料、历史包，不改写成同义词。
 
 ## 章节顺序
 

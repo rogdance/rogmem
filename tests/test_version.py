@@ -80,12 +80,13 @@ def test_both_labels_share_one_grammar(monkeypatch):
 
 
 def test_nav_puts_the_version_left_of_model_health(monkeypatch):
-    """版本号靠右，模型健康色块贴在版本号右侧。"""
+    """版本号靠右，模型状态圆点贴在版本号右侧，音乐按钮在最右。"""
     monkeypatch.setenv("ROGMEM_BUILD_STAMP", "2610271857")
     html = about_page("S-V1-2610271857")
     header = html.split("<main", 1)[0]
     assert '<span class="ver">S-V1-2610271857</span>' in header
     assert header.index("</nav>") < header.index('class="ver"') < header.index('id="model-health"')
+    assert header.index('id="model-health"') < header.index('id="rga-toggle"')
     assert 'savedTheme !== "light"' in header
     assert 'setAttribute("data-theme", "dark")' in header
     assert 'id="theme"' not in header

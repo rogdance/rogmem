@@ -382,14 +382,15 @@ def test_browser_fallback_is_offered_and_refuses_local_files():
 
 
 def test_graph_counts_active_nodes():
-    """记忆图谱报出当前有多少活跃结晶；计数叠在星图内，不再单独占页头。"""
+    """记忆星图报出当前有多少活跃结晶；计数叠在星图内，不再单独占页头。"""
     from rogmem.ui import graph_page
 
     page = graph_page()
-    assert "<h1>记忆图谱</h1>" not in page
+    assert "<h1>记忆星图</h1>" not in page
     assert "class='page-head'" not in page
     assert "<div id=\"graph\" aria-busy=\"true\"><p class='graph-count' id='graph-count'></p>" in page
     assert "#graph > .graph-count" in page
+    assert "':scope > #graph-count'" in page
     assert "body.graph-screen main { flex: 1; min-height: 0; padding: 0;" in page
     assert "nodes.length + ' 个活跃结晶'" not in page
     assert "'活跃结晶：' + nodes.length" in page

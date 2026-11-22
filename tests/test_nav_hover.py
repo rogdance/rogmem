@@ -85,6 +85,6 @@ def test_keyboard_path_is_added_without_taking_the_tab_sequence():
 
 def test_plain_pages_keep_a_single_primary_link():
     desktop = _desktop(_render("graph"))
-    assert "class='on' href='/admin/graph'>记忆图谱" in desktop
+    assert "class='on' href='/admin/graph'>记忆星图" in desktop
     assert "<nav class='side'>" not in _render("graph")
     assert "nav-sub-monitor" in desktop and "nav-sub-settings" in desktop

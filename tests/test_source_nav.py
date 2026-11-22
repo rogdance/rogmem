@@ -153,19 +153,19 @@ def test_session_list_hides_the_device_column_and_keeps_the_filter():
 def test_session_and_file_are_top_level_and_drop_the_old_name():
     session = sources_page([], "session", {}, {})
     files = sources_page([], "file", {}, {})
-    assert "<h1>情景会话</h1>" not in session
-    assert "<h1>知识文件</h1>" not in files
-    assert "知识文件" in files.split("<nav>", 1)[1].split("</nav>", 1)[0]
+    assert "<h1>原始会话</h1>" not in session
+    assert "<h1>文件资料</h1>" not in files
+    assert "文件资料" in files.split("<nav>", 1)[1].split("</nav>", 1)[0]
     assert "原始记忆" not in session
     assert "原始记忆" not in files
     assert "href='/admin/sources?tab=session'" in session
     assert "href='/admin/sources?tab=file'" in session
     assert "class='tabs'" not in session
     assert "class='tabs'" not in files
-    assert "这一栏还没有情景会话。" in session
+    assert "这一栏还没有原始会话。" in session
     assert "这一栏还没有文件。" in files
     assert "class='on'" in session
-    assert "情景会话" in session.split("class='on'", 1)[1][:40]
+    assert "原始会话" in session.split("class='on'", 1)[1][:40]
     assert "关联工程" in session
     assert "关联项目" not in session
     assert "关联工程" in files
@@ -185,13 +185,13 @@ def test_file_detail_is_the_text_and_the_crystals_that_cite_it():
         ],
     }
     original = source_detail(row, [], None, "file")
-    assert "原文解析" in original
+    assert "文本解析" in original
     assert "关联结晶" in original
     assert "清洗文本" not in original
     assert "写入内容" not in original
     assert "产出结晶" not in original
     assert "# 标题" in original
-    assert "<h1>知识文件</h1>" not in original
+    assert "<h1>文件资料</h1>" not in original
     assert "class='page-head'><a href='/admin/sources?tab=file'>返回列表</a><button" in original
     cited = source_detail({**row, "_part": "crystals"}, [], None, "file")
     assert "南港书院" in cited
@@ -200,10 +200,10 @@ def test_file_detail_is_the_text_and_the_crystals_that_cite_it():
     session = source_detail({**row, "kind": "user", "_part": "text"}, [], None, "session")
     assert "关联工程" in session
     assert "关联项目" not in session
-    assert "原文解析" in session
+    assert "文本解析" in session
     assert "关联结晶" in session
     assert "清洗文本" not in session
-    assert "<h1>情景会话</h1>" not in session
+    assert "<h1>原始会话</h1>" not in session
 
 
 def test_a_material_lists_every_crystal_that_used_it(tmp_path, monkeypatch):

@@ -1,0 +1,57 @@
+文件预览渲染器 / offline document preview bundle
+打包日期：2026-11-22
+
+来源
+  omni-doc-viewer 0.2.0（MIT）
+  https://github.com/akbhuker/omni-doc-viewer
+  npm: https://www.npmjs.com/package/omni-doc-viewer
+  仓库与作者、许可证已核对；LICENSE / NOTICE 原文见同目录两个 .txt。
+
+它把下面这些成熟的开源渲染引擎包在一个 API 后面（详见 NOTICE）：
+  pdfjs-dist 6.3.x (Apache-2.0) / docx-preview (Apache-2.0)
+  @e965/xlsx = SheetJS CE 0.20.3 (Apache-2.0) / pptx-preview (ISC)
+  jszip (MIT) / marked (MIT) / DOMPurify (Apache-2.0) / emf-converter (Apache-2.0)
+
+为什么是它
+  纯浏览器、离线、无外部服务、无 API key，按下扩展名自动选引擎，
+  一次接入覆盖本项目 FILE_TYPES 的 9 种格式：
+  txt / md / markdown / csv / pdf / docx / pptx / xlsx / xls。
+  管理台是 Python 直出 HTML，没有前端构建链，所以把成品 bundle 随包带上，
+  不走 CDN（与 vendor/three 的做法一致）。
+
+产物
+  omni-doc-viewer.iife.js                  单文件 IIFE，暴露 window.RogMemDoc
+  pdfjs/build/pdf.worker.min.mjs           pdf.js worker，必须与 bundle 同版本
+  pdfjs/cmaps/                             CJK / 非拉丁 PDF 的 CMap 表
+  pdfjs/standard_fonts/                    PDF 标准字体
+  LICENSE.omni-doc-viewer.txt / NOTICE...  上游许可证与第三方致谢
+
+校验
+  sha256 omni-doc-viewer.iife.js
+    223b8ef6d12830901a28778e8fc11fae7a9969d94d933f882d2b764c92f0add6
+  sha256 pdfjs/build/pdf.worker.min.mjs
+    1e64c8240e54735ec5913b37acd5134747799cb8c6bb3777c70adbc01232d2aa
+
+复现（本机临时目录，不进仓库）
+  npm init -y
+  npm i omni-doc-viewer@0.2.0 esbuild@0.25.10
+  # entry.js
+  #   import { renderDocument, setPdfWorkerSrc, createViewer, detect,
+  #            detectFromExtension } from 'omni-doc-viewer';
+  #   window.RogMemDoc = { renderDocument, setPdfWorkerSrc, createViewer,
+  #                        detect, detectFromExtension };
+  # canvas-stub.js：导出空对象与 createCanvas/loadImage/Image/Canvas。
+  #   emf-converter 会引入 @napi-rs/canvas（Node 原生插件），浏览器里没有，
+  #   alias 成空实现只影响 EMF/WMF 图片转码，普通 pptx 不走这条路径。
+  npx esbuild entry.js --bundle --format=iife --target=es2020 --minify \
+      --alias:@napi-rs/canvas=./canvas-stub.js --outfile=omni-doc-viewer.iife.js
+  cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs pdfjs/build/
+  cp -r node_modules/pdfjs-dist/cmaps node_modules/pdfjs-dist/standard_fonts pdfjs/
+
+  worker 放在 pdfjs/build/ 下不是随便放的：上游会从
+  ".../build/pdf.worker*.mjs" 推导出 assetsUrl = ".../pdfjs/"，
+  中文 PDF 才会去同目录下找 cmaps 和 standard_fonts。
+
+验收
+  2026-11-22 用真实 Edge（Playwright）逐份渲染 9 种样例文件，
+  9/9 出内容、零运行时报错；PDF 两页 canvas 与文本层均正常。

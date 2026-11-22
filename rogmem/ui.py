@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
+from rogmem import file_preview
 from rogmem.device_identity import display_device_name
 from rogmem.progress import LAMP_WORD as _LAMP_WORD
 from rogmem.progress import flow_states, processing_filters, stage_note as _stage_note, vector_state
@@ -21,10 +22,10 @@ CHANNEL = contextvars.ContextVar("rogmem_channel", default=False)
 
 # 一项导航是一页。带孩子的项是一栏：顶栏亮哪一项、侧栏列哪些页，都由当前页的键推出来。
 CONSOLE = (
-    ("/admin/sources?tab=session", "情景会话", "session", ()),
-    ("/admin/sources?tab=file", "知识文件", "file", ()),
+    ("/admin/sources?tab=session", "原始会话", "session", ()),
+    ("/admin/sources?tab=file", "文件资料", "file", ()),
     ("/admin/crystals", "结晶记忆", "crystals", ()),
-    ("/admin/graph", "记忆图谱", "graph", ()),
+    ("/admin/graph", "记忆星图", "graph", ()),
     ("/admin/costs", "监控中心", "monitor", (
         ("/admin/costs", "成本明细", "costs"),
         ("/admin/settings/queue", "队列状态", "queue"),
@@ -1627,10 +1628,12 @@ header nav .nav-sub a:focus-visible {{ background: var(--surface-hover); color: 
 header nav .nav-sub a.on {{ background: var(--surface-selected); color: var(--text-primary); font-weight: 400; }}
 header .ver {{ margin-left: auto; color: var(--text-muted); font-size: 12px; font-weight: 400; letter-spacing: 0; white-space: nowrap; }}
 header .model-health {{
-  flex: none; box-sizing: border-box; width: 16px; height: 16px; min-height: 16px; margin: 6px 0;
-  padding: 0; border-radius: 3px; border: 1px solid transparent; text-decoration: none;
+  position: relative; flex: none; box-sizing: border-box;
+  width: 10px; height: 10px; min-height: 10px;
+  padding: 0; border-radius: 50%; border: 1px solid transparent; text-decoration: none;
   background: var(--surface-subtle); border-color: var(--border-strong);
 }}
+header .model-health::after {{ content: ""; position: absolute; inset: -8px -4px; border-radius: 50%; }}
 header .model-health[data-tone="ok"],
 header .model-health[data-tone="warn"],
 header .model-health[data-tone="down"] {{ border-color: transparent; }}
@@ -2333,6 +2336,18 @@ tr.draft input {{ width: 100%; }}
 .about-credits a {{ color: var(--link-color); }}
 code, kbd, pre, samp {{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }}
 .src-body {{ max-width: 100%; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
+.file-preview {{ margin: 0 0 24px; }}
+.file-preview-bar {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px; font-size: 13px; color: var(--text-muted); }}
+.file-preview-name {{ color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }}
+.file-preview-kind {{ padding: 1px 8px; border: 1px solid var(--border); border-radius: 10px; font-size: 12px; }}
+/* 预览的是文件原件：渲染器一律按浅色纸张写死字色，舞台也固定白底深字，
+   不随管理台深浅主题翻转，否则深色主题下 Word / txt / markdown 会变成深底深字。 */
+.file-preview-stage {{ box-sizing: border-box; width: 100%; min-height: 320px; max-height: 72vh; overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: #202124; }}
+.file-preview-stage table {{ border-collapse: collapse; background: #fff; }}
+.file-preview-stage .odv-docx-content-wrapper {{ background: #fff; }}
+.file-preview-stage .odv-docx-content {{ background: #fff; color: #000; }}
+.file-preview-stage img {{ max-width: 100%; }}
+.file-preview-error {{ color: var(--danger-text); background: var(--danger-bg); padding: 10px 12px; border-radius: 8px; }}
 .wiki-article code {{ font-size: .92em; background: var(--surface-subtle); border-radius: 4px; padding: 1px 5px; }}
 .board {{ display: flex; flex-direction: column; gap: 16px; }}
 .board .panel {{ padding: 0; overflow: hidden; }}
@@ -2614,7 +2629,7 @@ html.nav-drawer-open, html.nav-drawer-open body {{ overflow: hidden; }}
 </style></head><body class="{body_class}">
 <div id="rogmem-progress" aria-hidden="true"><span class="bar"></span></div>
 {channel_bar()}
-<header><a class="brand" href="/admin/crystals" aria-label="ROGMEM">{BRAND_LOCKUP_SVG}</a><nav>{links}</nav><span class="ver">{esc(product_version())}</span>{_nav_model_health()}<button type="button" id="nav-toggle" class="nav-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="nav-drawer" hidden><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button></header>
+<header><a class="brand" href="/admin/crystals" aria-label="ROGMEM">{BRAND_LOCKUP_SVG}</a><nav>{links}</nav><span class="ver">{esc(product_version())}</span>{_nav_model_health()}<button type="button" id="nav-toggle" class="nav-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="nav-drawer" hidden><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>{_AUDIO_BUTTON}</header>
 <main class="{'reader' if reader else ''}">{side}<div class="content">{body}</div></main>
 <dialog id="nav-drawer" class="nav-drawer" aria-label="主导航">
 <div class="nav-drawer-head"><span>导航</span><button type="button" class="nav-close" aria-label="关闭导航"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button></div>
@@ -3073,6 +3088,7 @@ function formatSourceClocks(root) {{
 }}
 formatSourceClocks(document);
 </script>
+{audio_layer()}
 </body></html>"""
 
 
@@ -3329,7 +3345,8 @@ def source_row_html(row: dict, origin: str) -> str:
     href = f"/admin/sources/{esc(row['id'])}?from={esc('file' if file_row else 'session')}"
     if file_row:
         label = row.get("filename") or row.get("preview") or ""
-        name = f"<a href='{href}'>{esc(label)}</a>"
+        # 点文件名直接看原件；「查看」仍进详情页的文本解析。
+        name = f"<a href='{href}&part=preview'>{esc(label)}</a>"
     else:
         name = clip_html(row.get("preview") or "", link=href)
     view = f"<a href='{href}'>查看</a>"
@@ -3578,7 +3595,7 @@ def _fresh_hint(tab: str, params: dict, rows: list[dict], total: int, page_no: i
 
 def sources_page(rows: list[dict], tab: str, filters: dict, facets: dict, pager: dict | None = None) -> str:
     tab = "file" if tab == "file" else "session"
-    title = "知识文件" if tab == "file" else "情景会话"
+    title = "文件资料" if tab == "file" else "原始会话"
     kind_values = ["user", "agent", "summary"] if tab != "file" else []
     status_pairs = list(processing_filters())
     chosen_status = filters.get("status", "")
@@ -3998,7 +4015,7 @@ function pollSources() {
     .catch(function () {});
 }
 function seedSourceWatch() {
-  // 订阅只服务知识文件页。情景会话页没有导入入口，也就没有这一行要看的东西。
+  // 订阅只服务文件资料页。原始会话页没有导入入口，也就没有这一行要看的东西。
   if (!document.getElementById('import-files')) return;
   var root = sourceWatchRoot();
   if (!root) return;
@@ -4483,7 +4500,7 @@ document.addEventListener('click', function (event) {
     )
     moving = ",".join(str(row.get("id")) for row in rows if row.get("active"))
     if not rows:
-        empty = "这一栏还没有文件。" if tab == "file" else "这一栏还没有情景会话。"
+        empty = "这一栏还没有文件。" if tab == "file" else "这一栏还没有原始会话。"
         table = f"<div class='table-scroll' data-active='{esc(moving)}'><table class='sources'>{head}<tr><td colspan='{columns}' class='empty'>{empty}</td></tr></table></div>"
     else:
         body = []
@@ -4577,7 +4594,7 @@ def source_detail(row: dict, statements: list[dict], mate: dict | None, origin: 
     mate_link = "<span class='muted'>—</span>"
     if mate:
         mate_link = f"<a href='/admin/sources/{esc(mate['id'])}?from={esc(origin)}'>{esc(KIND.get(mate['kind'], mate['kind']))} {esc(mate['id'])}</a>"
-    title = "知识文件" if origin == "file" else "情景会话"
+    title = "文件资料" if origin == "file" else "原始会话"
     status = row.get("status") or ""
     if origin == "file":
         pairs = [
@@ -4616,8 +4633,10 @@ def source_detail(row: dict, statements: list[dict], mate: dict | None, origin: 
     cited = row.get("_cited")
     if cited is None:
         cited = _cited_from_statements(statements)
+    has_file = origin == "file"
     part = row.get("_part") or "text"
-    if part not in {"text", "crystals"}:
+    allowed = {"text", "preview", "crystals"} if has_file else {"text", "crystals"}
+    if part not in allowed:
         part = "text"
     base = f"/admin/sources/{esc(row['id'])}?from={esc(origin)}"
 
@@ -4625,8 +4644,18 @@ def source_detail(row: dict, statements: list[dict], mate: dict | None, origin: 
         href = base if name == "text" else base + f"&part={name}"
         return f"<a class='{'on' if part == name else ''}' href='{href}'>{label}</a>"
 
-    switched = _marked_body(row, statements) if part == "text" else _cited_html(cited)
-    section_tabs = f"{piece('text', '原文解析')}{piece('crystals', '关联结晶')}"
+    if part == "preview":
+        switched = file_preview.preview_body(row["id"], str(row.get("filename") or ""))
+    elif part == "text":
+        switched = _marked_body(row, statements)
+    else:
+        switched = _cited_html(cited)
+    # 原始会话没有原文件，不摆「文件预览」这个入口。
+    tabs = [piece("text", "文本解析")]
+    if has_file:
+        tabs.append(piece("preview", "文件预览"))
+    tabs.append(piece("crystals", "关联结晶"))
+    section_tabs = "".join(tabs)
     body = f"""<div class='page-head'><a href='/admin/sources?tab={esc(origin)}'>返回列表</a><button type='button' onclick='post("/admin/api/sources/{esc(row['id'])}/retry")'>重试</button></div>
 {_source_cost_banner(row)}
 <div class='panel'>
@@ -6451,7 +6480,7 @@ function rogmemShowError(el, text, retry) {
   rogmemClearBusy(el);
 }
 function rogmemGraphCacheKey(el) {
-  // 记忆图谱和每一篇结晶的关联图谱不是同一份数据，本会话里的留存也不能互相顶掉。
+  // 记忆星图和每一篇结晶的关联图谱不是同一份数据，本会话里的留存也不能互相顶掉。
   // 取本页地址当名字：同一页重进能命中，换一页不会串。
   var here = '';
   try { here = location.pathname + location.search; } catch (err) {}
@@ -6579,7 +6608,7 @@ function rogmemOpenBrowser() {
 """
 
 
-# 3D 记忆图谱：坐标用后端算好的球面位置，画面交给 Three.js，沿用登录页那套视效细节。
+# 3D 记忆星图：坐标用后端算好的球面位置，画面交给 Three.js，沿用登录页那套视效细节。
 # 配色、发光、曲线波动、能量流动、点击脉冲、泛光全部照搬登录页的着色器；数据换成真实图谱。
 _GRAPH_3D_JS_TEMPLATE = """
 var ROGMEM_GRAPH_3D_MAX_POINTS = 200000;
@@ -6621,6 +6650,25 @@ function rogmem3dSegments(edgeCount) {
   if (edgeCount <= 8000) return 10;
   if (edgeCount <= 30000) return 5;
   return 2;
+}
+
+function rogmem3dStarSprite(THREE) {
+  // Three.js 的 PointsMaterial 不指定 map 时把点画成实心方块。
+  // 用一张 32x32 径向渐变把背景星裁成柔边圆点，和结晶节点用同一套发光语言。
+  var side = 32;
+  var half = side / 2;
+  var canvas = document.createElement('canvas');
+  canvas.width = canvas.height = side;
+  var ctx = canvas.getContext('2d');
+  var grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.38, 'rgba(255,255,255,.85)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, side, side);
+  var texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
 
 function rogmemDraw3D(el, nodes, edges, focusMode) {
@@ -6740,7 +6788,10 @@ function rogmem3dBuild(el, ctx) {
   }
   var starGeo = new THREE.BufferGeometry();
   starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
-  var stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: true, transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending }));
+  var stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
+    color: 0xffffff, size: 1.9, sizeAttenuation: true, map: rogmem3dStarSprite(THREE),
+    transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending
+  }));
   stars.frustumCulled = false;
   scene.add(stars);
 
@@ -7291,7 +7342,7 @@ def _graph_3d_document(
     labels_block: str = "",
     labels_css: str = "",
 ) -> str:
-    """3D 记忆图谱。画面全部由 Three.js 出，坐标来自后端算好的球面位置（半径=跳数，角度=向量）。
+    """3D 记忆星图。画面全部由 Three.js 出，坐标来自后端算好的球面位置（半径=跳数，角度=向量）。
 
     labels_block / labels_css 只在"自动展示词条名"开着时非空；关态下这一层一个字节都不发。
     """
@@ -7379,7 +7430,7 @@ def shared_graph(
     )
 
 
-# ---- 记忆图谱背景音乐 -------------------------------------------------------
+# ---- 全站背景音乐 ---------------------------------------------------------------
 # 只播这一首随包自带的 BGM。不加载第三方音频，不加交互音效，也不做音频处理。
 GRAPH_AUDIO_BGM = "bgm.mp3"
 GRAPH_AUDIO_FILES = frozenset({GRAPH_AUDIO_BGM})
@@ -7417,91 +7468,177 @@ def graph_audio_src() -> str:
     version = etag.strip('"')[:12]
     return "/admin/static/audio/" + GRAPH_AUDIO_BGM + ("?v=" + version if version else "")
 
-_GRAPH_AUDIO_CSS = """<style>
-.rga{position:fixed;right:18px;bottom:18px;z-index:80}
-.rga-toggle{display:grid;place-items:center;width:34px;height:34px;padding:0;border:1px solid rgba(180,205,255,.22);border-radius:50%;background:rgba(14,20,38,.62);backdrop-filter:blur(12px);color:#cfe0ff;cursor:pointer;box-shadow:0 6px 24px rgba(0,0,0,.28)}
-.rga-toggle:hover{border-color:rgba(180,205,255,.45);background:rgba(20,30,54,.78)}
-.rga-disc{display:block;width:20px;height:20px;animation:rga-spin 3.2s linear infinite;transform-origin:50% 50%}
-.rga-toggle[aria-pressed="false"] .rga-disc{animation-play-state:paused;opacity:.45}
+_AUDIO_CSS = """<style>
+header .rga-toggle{position:relative;display:grid;place-items:center;flex:none;width:26px;height:26px;padding:0;border:1px solid var(--border);border-radius:50%;background:transparent;color:var(--text-muted);cursor:pointer}
+header .rga-toggle:hover{background:var(--surface-hover);color:var(--text-primary)}
+header .rga-toggle:focus-visible{outline:2px solid var(--focus-color);outline-offset:2px}
+.rga-note{display:block;width:16px;height:16px;transform-origin:50% 50%}
+.rga-toggle[data-state="playing"] .rga-note{animation:rga-spin 4s linear infinite}
+.rga-toggle[data-state="loading"] .rga-note{animation:rga-breathe 1100ms ease-in-out infinite}
+.rga-toggle[data-state="loading"]::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:1.5px solid transparent;border-top-color:var(--text-muted);animation:rga-scan 900ms linear infinite;pointer-events:none}
+.rga-toggle[data-state="error"]::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:1.5px dashed var(--border-strong);pointer-events:none}
+.rga-toggle[data-state="paused"] .rga-note,.rga-toggle[data-state="error"] .rga-note{animation-play-state:paused;opacity:.45}
+.rga-toggle[aria-pressed="false"] .rga-note{animation-play-state:paused;opacity:.45}
+.rga-toggle[data-state="playing"] .rga-core{fill:var(--brand)}
 @keyframes rga-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes rga-scan{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes rga-breathe{0%,100%{opacity:.42}50%{opacity:.9}}
+@media (prefers-reduced-motion: reduce){.rga-note,.rga-toggle::after{animation:none}.rga-toggle[data-state="loading"] .rga-note{opacity:.7}}
 </style>"""
 
-_GRAPH_AUDIO_PANEL = """<div class="rga">
-  <button type="button" class="rga-toggle" id="rga-toggle" aria-pressed="true" aria-label="暂停背景音乐" title="暂停背景音乐">
-    <svg class="rga-disc" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
-      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/>
-      <circle cx="12" cy="12" r="6.4" stroke="currentColor" stroke-width="1" opacity=".55"/>
-      <path d="M12 2a10 10 0 0 1 8.7 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-      <circle cx="12" cy="12" r="2.6" fill="currentColor"/>
-      <circle cx="12" cy="12" r=".9" fill="#0e1426"/>
-    </svg>
-  </button>
-</div>
-<audio id="rogmem-graph-bgm" loop preload="none" src="__BGM_SRC__"></audio>"""
+_AUDIO_BUTTON = """<button type="button" class="rga-toggle" id="rga-toggle" aria-pressed="true" data-state="loading" aria-label="暂停背景音乐" title="暂停背景音乐">
+  <svg class="rga-note" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+    <path d="M8 17V5l10-2v12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <ellipse class="rga-core" cx="6" cy="17" rx="2.8" ry="2.1" fill="currentColor"/>
+    <ellipse cx="16" cy="15" rx="2.8" ry="2.1" fill="currentColor"/>
+  </svg>
+</button>"""
 
-_GRAPH_AUDIO_JS = """<script>
+_AUDIO_MEDIA = """<audio id="rogmem-graph-bgm" loop preload="auto" src="__BGM_SRC__"></audio>"""
+
+_AUDIO_JS = """<script>
 (function () {
   'use strict';
   var STORE = "rogmem-graph-bgm-v1";
+  var POS = "rogmem-bgm-position-v1";
+  var VOLUME = 0.45;
   var bgm = document.getElementById("rogmem-graph-bgm");
   var toggle = document.getElementById("rga-toggle");
   var playing = true;
-  var unlocked = false;
+  var state = "loading";
+  var mutedForAutoplay = false;
+  var blocked = false;
+  var resumeAt = 0;
+  var lastSaved = 0;
   try { playing = localStorage.getItem(STORE) !== "off"; } catch (e) {}
-  if (bgm) bgm.volume = 0.45;
+  try { resumeAt = parseFloat(sessionStorage.getItem(POS)) || 0; } catch (e) {}
+  if (bgm) bgm.volume = VOLUME;
 
   function paint() {
     if (!toggle) return;
     toggle.setAttribute("aria-pressed", playing ? "true" : "false");
-    var label = playing ? "暂停背景音乐" : "播放背景音乐";
+    var label = state === "error" ? "背景音乐载入失败"
+      : state === "loading" ? (blocked ? "点一下开启背景音乐" : "背景音乐载入中")
+      : playing ? "暂停背景音乐" : "播放背景音乐";
     toggle.setAttribute("aria-label", label);
     toggle.setAttribute("title", label);
   }
-  function play() {
-    if (!bgm || !playing || !unlocked) return;
-    if (bgm.paused) {
-      var pending = bgm.play();
-      if (pending && pending.catch) pending.catch(function () {});
+  function setState(next) {
+    if (state === next) return;
+    state = next;
+    if (toggle) toggle.setAttribute("data-state", next);
+    paint();
+  }
+  function savePos() {
+    if (!bgm) return;
+    try { sessionStorage.setItem(POS, String(bgm.currentTime || 0)); } catch (e) {}
+  }
+  function resume() {
+    if (!bgm || !(resumeAt > 0)) return;
+    var span = bgm.duration;
+    var target = (isFinite(span) && span > 0) ? Math.min(resumeAt, span - 0.25) : resumeAt;
+    try { bgm.currentTime = Math.max(0, target); } catch (e) {}
+    resumeAt = 0;
+  }
+  function fadeIn() {
+    if (!bgm) return;
+    bgm.volume = 0;
+    var step = VOLUME / 14;
+    var timer = setInterval(function () {
+      if (!playing || bgm.paused) { clearInterval(timer); return; }
+      var next = Math.min(VOLUME, bgm.volume + step);
+      bgm.volume = next;
+      if (next >= VOLUME) clearInterval(timer);
+    }, 50);
+  }
+  function attempt() {
+    if (!bgm || !playing) return;
+    var pending = bgm.play();
+    if (pending && pending.catch) pending.catch(function () {
+      // 自动播放被策略挡住：先静音把时间轴跑起来，任一次交互再淡入，不必专点按钮。
+      if (mutedForAutoplay || !playing || !bgm.paused) return;
+      mutedForAutoplay = true;
+      blocked = true;
+      paint();
+      bgm.muted = true;
+      var retry = bgm.play();
+      if (retry && retry.catch) retry.catch(function () {});
+    });
+  }
+  function unlock() {
+    if (!playing || !bgm) return;
+    if (mutedForAutoplay) {
+      mutedForAutoplay = false;
+      blocked = false;
+      bgm.muted = false;
+      fadeIn();
+      setState("playing");
+    } else if (bgm.paused) {
+      attempt();
     }
   }
-  // 浏览器不允许无交互出声：第一次点页面或按键时再开始播。
-  function unlock() {
-    if (unlocked) return;
-    unlocked = true;
-    play();
+  if (bgm) {
+    bgm.addEventListener("loadedmetadata", resume);
+    bgm.addEventListener("timeupdate", function () {
+      var now = bgm.currentTime || 0;
+      if (Math.abs(now - lastSaved) >= 1) { lastSaved = now; savePos(); }
+    });
+    bgm.addEventListener("loadstart", function () { setState("loading"); });
+    bgm.addEventListener("waiting", function () { setState("loading"); });
+    bgm.addEventListener("stalled", function () { setState("loading"); });
+    bgm.addEventListener("playing", function () { if (!mutedForAutoplay) setState("playing"); });
+    bgm.addEventListener("pause", function () { if (!mutedForAutoplay) setState("paused"); });
+    bgm.addEventListener("error", function () { setState("error"); });
   }
+  window.addEventListener("pagehide", savePos);
+  window.addEventListener("beforeunload", savePos);
   document.addEventListener("pointerdown", unlock, {passive: true});
   document.addEventListener("keydown", unlock);
+  document.addEventListener("touchstart", unlock, {passive: true});
   if (toggle) toggle.addEventListener("click", function () {
     playing = !playing;
     try { localStorage.setItem(STORE, playing ? "on" : "off"); } catch (e) {}
-    if (playing) { unlock(); play(); } else if (bgm) bgm.pause();
+    if (playing) {
+      mutedForAutoplay = false;
+      blocked = false;
+      if (bgm) { bgm.muted = false; bgm.volume = VOLUME; }
+      attempt();
+    } else if (bgm) {
+      bgm.pause();
+      setState("paused");
+    }
     paint();
   });
+  if (toggle) toggle.setAttribute("data-state", state);
   paint();
+  // 命中缓存时 loadedmetadata 可能早于本脚本；补一次断点续播。
+  if (bgm && bgm.readyState >= 1) resume();
+  // 上次关过音乐：直接落暂停态，别一直显示"载入中"。
+  if (!playing) { setState("paused"); }
+  else { attempt(); }  // 进页面就尝试出声，不等交互；被拦时静音打底，任何一次交互淡入。
 })();
 </script>"""
 
 
-def graph_audio_layer() -> str:
-    """图谱页专属背景音乐。别的页面一个字节都不发。"""
+def audio_layer() -> str:
+    """全站背景音乐：样式 + <audio> + 状态机。控制台每一页都带，跨页从断点续播。"""
     return (
-        _GRAPH_AUDIO_CSS
-        + _GRAPH_AUDIO_PANEL.replace("__BGM_SRC__", graph_audio_src())
-        + _GRAPH_AUDIO_JS
+        _AUDIO_CSS
+        + _AUDIO_MEDIA.replace("__BGM_SRC__", graph_audio_src())
+        + _AUDIO_JS
     )
 
 
 def graph_page(auto_labels: bool = False, label_budget: int = 50) -> str:
-    """沉浸式星空：主导航以下 edge-to-edge，活跃结晶计数叠在图谱内。"""
+    """沉浸式星空：主导航以下 edge-to-edge，活跃结晶计数叠在星图内。"""
     mount = shared_graph(auto_labels=auto_labels, label_budget=label_budget)
     count = "<p class='graph-count' id='graph-count'></p>"
     mount = mount.replace(
         '<div id="graph" aria-busy="true">',
-        f'<div id="graph" aria-busy="true">{count}',
+        '<div id="graph" aria-busy="true">' + count,
         1,
     )
-    return page("记忆图谱", "graph", mount + graph_audio_layer())
+    return page("记忆星图", "graph", mount)
 
 
 def _section_page(key: str, title: str, inner: str) -> str:
@@ -9710,7 +9847,7 @@ def basic_page(cfg: dict) -> str:
         "post('/admin/api/settings/basic', {sketch_char_limit:this.sketch_char_limit.value, core_budget:this.core_budget.value})",
     )
     graph = _settings_plate(
-        "记忆图谱视效",
+        "记忆星图视效",
         f"""<section class="setting-row setting-line">
 <div><p class="setting-name">自动展示词条名</p><p class="note">放大到一定程度后，在星点上显示词条名。</p></div>
 <label class="switch"><span class="knob"><input type="checkbox" name="graph_auto_labels" role="switch"{auto} aria-label="自动展示词条名"><i></i></span></label>
