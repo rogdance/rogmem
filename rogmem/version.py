@@ -27,6 +27,21 @@ def shanghai_stamp(moment: datetime | None = None) -> str:
     return when.strftime("%y%m%d%H%M")
 
 
+def resolve_pack_stamp(candidate: str = "", moment: datetime | None = None) -> str:
+    """Decide the pack identity once, at build time.
+
+    The release owner declares it explicitly (PACK_STAMP / --build-arg).
+    Only when it is absent or malformed do we fall back to the wall clock,
+    which is exactly the behaviour the old inline Dockerfile script had.
+    Keeping this a domain function makes the build-time decision testable
+    without a Docker daemon.
+    """
+    value = (candidate or os.environ.get("PACK_STAMP", "") or "").strip()
+    if STAMP_RE.fullmatch(value):
+        return value
+    return shanghai_stamp(moment)
+
+
 def pack_stamp() -> str:
     override = os.environ.get("ROGMEM_BUILD_STAMP", "").strip()
     if STAMP_RE.fullmatch(override):
