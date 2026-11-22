@@ -288,6 +288,36 @@ def _hub_file(home: Path) -> Path:
     return home / ".rogmem" / "hub"
 
 
+def _entrances_file(home: Path) -> Path:
+    return home / ".rogmem" / "entrances.json"
+
+
+_LOOPBACK_DOOR = "http://127.0.0.1:18780"
+
+
+def _remembered_entrances(home: Path) -> list[str]:
+    """Entrances that answered as this hub before, newest first. Never the door itself."""
+    try:
+        rows = json.loads(_entrances_file(home).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        rows = []
+    found = [str(item) for item in rows if isinstance(item, str) and item.strip()] if isinstance(rows, list) else []
+    return [item for item in found if item.rstrip("/") != _LOOPBACK_DOOR]
+
+
+def _remember_entrance(home: Path, origin: str) -> None:
+    text = (origin or "").strip().rstrip("/")
+    if not text.startswith(("http://", "https://")) or text == _LOOPBACK_DOOR:
+        return
+    rows = [text] + [item for item in _remembered_entrances(home) if item.rstrip("/") != text]
+    path = _entrances_file(home)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rows[:8], ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _remembered_hub(home: Path) -> str:
     path = _hub_file(home)
     if not path.is_file():
@@ -350,6 +380,17 @@ def channel_main(args: argparse.Namespace) -> int:
         hub = _remembered_hub(home)
     if origin or hub:
         plan = inst.plan_channel(origin, hub)
+        if not plan.get("ok") and hub and not ticket_text:
+            # The entrance this door was given is gone (the NAS app's local tunnel restarts
+            # on its own schedule). Any entrance that once answered as this hub is the same hub.
+            for remembered in _remembered_entrances(home):
+                if remembered.rstrip("/") == (origin or "").rstrip("/"):
+                    continue
+                retry = inst.plan_channel(remembered, hub)
+                if retry.get("ok"):
+                    plan = retry
+                    origin = remembered
+                    break
         if not plan.get("ok"):
             _note_closed_gap(home)
             refused = str(plan.get("refused") or "channel-closed")
@@ -363,6 +404,7 @@ def channel_main(args: argparse.Namespace) -> int:
                 )
             )
         _remember_hub(home, str(plan.get("hub") or hub))
+        _remember_entrance(home, str(plan.get("origin") or origin or ""))
         if plan.get("mode") == "ready":
             return _emit(
                 _base_result(

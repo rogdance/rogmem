@@ -738,3 +738,27 @@ def test_health_names_one_hub_and_keeps_it(tmp_path, monkeypatch):
     first = engine.health()["hub"]
     assert first.startswith("rh_") and len(first) == 35
     assert engine.health()["hub"] == first
+
+
+def test_a_door_whose_tunnel_went_away_uses_an_entrance_that_answered_before(tmp_path, monkeypatch):
+    """The NAS app's local tunnel comes and goes; the hub's LAN or remote entrance does not."""
+    import rogmem.cli as cli
+
+    (tmp_path / ".rogmem").mkdir()
+    cli._remember_entrance(tmp_path, "http://192.168.1.9:18080")
+    cli._remember_entrance(tmp_path, "http://127.0.0.1:18780")  # the door itself is never an entrance
+    assert cli._remembered_entrances(tmp_path) == ["http://192.168.1.9:18080"]
+    seen = []
+
+    def plan(origin, hub=""):
+        seen.append(origin)
+        if origin == "http://192.168.1.9:18080":
+            return {"ok": True, "mode": "ready", "refused": "", "origin": origin, "target": 0, "location": "", "hub": hub}
+        return {"ok": False, "refused": "bad-origin", "hub": hub}
+
+    monkeypatch.setattr(inst, "plan_channel", plan)
+    args = type("A", (), {"origin": "", "hub": "rh_same", "ticket": "", "session": True, "home": tmp_path})()
+    monkeypatch.setattr(cli, "_installer", lambda: inst)
+    monkeypatch.setattr(cli, "_home", lambda a: tmp_path)
+    assert cli.channel_main(args) == 0
+    assert seen == ["", "http://192.168.1.9:18080"]
