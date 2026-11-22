@@ -237,6 +237,10 @@ def _restart_door(home: Path, python: str) -> str:
     """
     from installer import rogmem_installer as inst
 
+    from rogmem import plugin
+
+    if _door_plugin() == plugin.installed(home).get("version"):
+        return "current"
     before = _door_pid()
     if before:
         for _ in range(150):
@@ -265,6 +269,15 @@ def _restart_door(home: Path, python: str) -> str:
             return "started"
         time.sleep(0.2)
     return "down"
+
+
+def _door_plugin() -> str:
+    """The plugin id the running door loaded, from its own whoami. Empty when it cannot say."""
+    try:
+        data = json.loads(_get(DOOR + "/client/whoami", 3).decode("utf-8"))
+    except Exception:
+        return ""
+    return str(data.get("plugin") or "") if isinstance(data, dict) else ""
 
 
 def _door_pid() -> int:
@@ -350,6 +363,7 @@ def update(home: Path, door: str = DOOR, restart_door: bool = True) -> dict:
     verify = written.get("verify") or {}
     done = bool(written.get("ok")) and (not latest_id or after_id == latest_id) and not verify.get("broken")
     door_note = {
+        "current": "本机门口已经是这一版。",
         "handed-over": "本机门口已换成新插件。",
         "next-login": "本机门口还在用旧插件转发，下次登录自动换新，不影响使用。",
         "started": "本机门口已启动。",
@@ -368,7 +382,12 @@ def update(home: Path, door: str = DOOR, restart_door: bool = True) -> dict:
         "door_launcher": str(launcher) if launcher else "",
         "human_actions": verify.get("human_actions") or [],
         "text": (
-            f"{plugin.NAME}已从 {before or '未知'} 更新到 {after}，本机 {len(written.get('programs') or [])} 个宿主的钩子都能跑。{door_note}"
+            (
+                f"{plugin.NAME}已经是最新的 {after}，已重新安装并复核，"
+                if before_id and before_id == after_id
+                else f"{plugin.NAME}已从 {before or '未知'} 更新到 {after}，"
+            )
+            + f"本机 {len(written.get('programs') or [])} 个宿主的钩子都能跑。{door_note}"
             if done
             else "更新没有完成：" + (written.get("text") or "钩子复核没过")
         ),

@@ -382,6 +382,7 @@ def test_an_update_never_stops_a_door_it_cannot_replace(monkeypatch, tmp_path):
     from rogmem import plugin_cli
 
     monkeypatch.setattr(plugin_cli, "_door_pid", lambda: 4242)
+    monkeypatch.setattr(plugin_cli, "_door_plugin", lambda: "2.old")
     monkeypatch.setattr(plugin_cli.time, "sleep", lambda _s: None)
     stopped = []
     monkeypatch.setattr(plugin_cli, "_stop", lambda pid: stopped.append(pid))
@@ -430,3 +431,14 @@ def test_a_server_only_release_keeps_the_plugin_version(tmp_path, monkeypatch):
     assert engine.current_plugin_label() == "P-V1-2611230900-DEV"
     assert engine.plugin_label_of(f"{plugin.SERIES}.0123456789ab") == ""
     monkeypatch.setattr(plugin, "_cached", None)
+
+
+def test_a_door_already_on_this_plugin_is_left_alone(monkeypatch, tmp_path):
+    from rogmem import plugin_cli
+
+    home = tmp_path / "home"
+    (home / ".rogmem").mkdir(parents=True)
+    (home / ".rogmem" / "plugin.json").write_text(json.dumps({"version": "2.same"}), encoding="utf-8")
+    monkeypatch.setattr(plugin_cli, "_door_plugin", lambda: "2.same")
+    monkeypatch.setattr(plugin_cli, "_door_pid", lambda: (_ for _ in ()).throw(AssertionError("not asked")))
+    assert plugin_cli._restart_door(home, "python") == "current"
