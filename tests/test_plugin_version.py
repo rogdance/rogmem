@@ -209,6 +209,12 @@ def test_the_hub_publishes_the_plugin_it_serves(hub):
     assert manifest["version"] == plugin.version()
     assert manifest["min_series"] == plugin.MIN_SERIES
     assert manifest["update"] == plugin.UPDATE_COMMAND
+    with urllib.request.urlopen(hub["base"] + "/host-client.whl", timeout=20) as resp:
+        wheel = resp.read()
+    import hashlib
+
+    assert manifest["wheel_sha256"] == hashlib.sha256(wheel).hexdigest()
+    assert manifest["wheel_bytes"] == len(wheel)
     with urllib.request.urlopen(hub["base"] + "/healthz", timeout=5) as resp:
         assert json.loads(resp.read())["plugin"] == plugin.version()
 
@@ -358,3 +364,20 @@ def test_an_update_never_stops_a_door_it_cannot_replace(monkeypatch, tmp_path):
     monkeypatch.setattr(plugin_cli, "_stop", lambda pid: stopped.append(pid))
     assert plugin_cli._restart_door(tmp_path, "python") == "next-login"
     assert stopped == []
+
+
+def test_a_wheel_damaged_in_transit_is_fetched_again_and_never_installed(monkeypatch):
+    import hashlib
+
+    from rogmem import plugin_cli
+    from rogmem.host_client import bundle_bytes
+
+    good = bundle_bytes()
+    damaged = good[:-200] + bytes(200)
+    manifest = {"wheel_sha256": hashlib.sha256(good).hexdigest()}
+    sent = [damaged, good]
+    monkeypatch.setattr(plugin_cli, "_get", lambda url, timeout=10: sent.pop(0))
+    wheel, why = plugin_cli.fetch_verified_wheel("http://door", manifest)
+    assert wheel == good and why == ""
+    monkeypatch.setattr(plugin_cli, "_get", lambda url, timeout=10: damaged)
+    assert plugin_cli.fetch_verified_wheel("http://door", manifest) == (None, "corrupt")

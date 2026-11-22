@@ -84,6 +84,52 @@ def status(home: Path, door: str = DOOR, verify: bool = True) -> dict:
     return report
 
 
+_FETCH_TEXT = {
+    "download-failed": "下载插件失败：门口或中枢没有回答。",
+    "not-a-wheel": "门口返回的不是插件包。",
+    "corrupt": "下载到的插件包和中枢公布的校验值对不上（传输途中损坏），重试几次仍不对，没有安装。",
+}
+
+
+def fetch_verified_wheel(door: str, manifest: dict, attempts: int = 3) -> tuple[bytes | None, str]:
+    """The wheel exactly as the hub published it, or nothing.
+
+    The path to the hub is a tunnel through a NAS remote-access relay; a byte can arrive
+    wrong. pip then calls the wheel "invalid" and the update fails for a reason that has
+    nothing to do with the plugin. The hub publishes the sha256; a mismatch is fetched
+    again, and a wheel that never matches is never installed.
+    """
+    import hashlib
+
+    expected = str(manifest.get("wheel_sha256") or "").lower()
+    last = "download-failed"
+    for _ in range(max(1, attempts)):
+        try:
+            wheel = _get(door.rstrip("/") + "/host-client.whl", 120)
+        except Exception:
+            last = "download-failed"
+            continue
+        if not wheel.startswith(b"PK"):
+            last = "not-a-wheel"
+            continue
+        if expected and hashlib.sha256(wheel).hexdigest() != expected:
+            last = "corrupt"
+            continue
+        import io
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(wheel)) as archive:
+                if archive.testzip() is not None:
+                    last = "corrupt"
+                    continue
+        except zipfile.BadZipFile:
+            last = "corrupt"
+            continue
+        return wheel, ""
+    return None, last
+
+
 def _install_wheel(wheel: bytes, python: str) -> tuple[bool, str]:
     folder = Path(tempfile.mkdtemp(prefix="rogmem-plugin-"))
     path = folder / "rogmem_host-1.0.0-py3-none-any.whl"
@@ -242,12 +288,9 @@ def update(home: Path, door: str = DOOR, restart_door: bool = True) -> dict:
     if not identity or (remembered and identity != remembered):
         return {"ok": False, "command": "plugin.update", "refused": "door-not-this-hub",
                 "text": "本机门口没有回答这份中枢的身份，不从它取插件。先确认本机门口开着。"}
-    try:
-        wheel = _get(door.rstrip("/") + "/host-client.whl", 120)
-    except Exception as exc:
-        return {"ok": False, "command": "plugin.update", "refused": "download-failed", "text": f"下载插件失败：{type(exc).__name__}"}
-    if not wheel.startswith(b"PK"):
-        return {"ok": False, "command": "plugin.update", "refused": "not-a-wheel", "text": "门口返回的不是插件包。"}
+    wheel, why = fetch_verified_wheel(door, hub)
+    if wheel is None:
+        return {"ok": False, "command": "plugin.update", "refused": why, "text": _FETCH_TEXT.get(why, why)}
     from installer import rogmem_installer as inst
 
     python = inst._hook_interpreter()

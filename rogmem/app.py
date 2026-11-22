@@ -269,7 +269,17 @@ async def plugin_manifest(_request: Request) -> Response:
     """The plugin version this hub serves. Public: it says nothing a host could not read from the wheel."""
     from rogmem import plugin
 
-    return JSONResponse(plugin.hub_manifest(engine.health_snapshot().get("hub") or ""), headers={"Cache-Control": "no-store"})
+    from rogmem.host_client import bundle_bytes
+
+    manifest = plugin.hub_manifest(engine.health_snapshot().get("hub") or "")
+    wheel = await asyncio.to_thread(bundle_bytes)
+    if wheel:
+        import hashlib
+
+        # A computer checks the wheel it downloaded against this before installing it.
+        manifest["wheel_sha256"] = hashlib.sha256(wheel).hexdigest()
+        manifest["wheel_bytes"] = len(wheel)
+    return JSONResponse(manifest, headers={"Cache-Control": "no-store"})
 
 
 @mcp.custom_route("/host-bootstrap", methods=["GET"])
