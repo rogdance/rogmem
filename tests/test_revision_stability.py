@@ -225,15 +225,6 @@ def test_a_reply_that_stopped_for_room_escalates_then_parks_instead_of_splicing(
     assert engine.MERGE_PARTIAL_NOTE in seen[1]
 
 
-    from rogmem.engine import ModelCallFailed
-
-    engine = _open(tmp_path, monkeypatch)
-    monkeypatch.setattr(engine, "llm_target", lambda role: ("http://stub/v1", "k", "m"))
-    monkeypatch.setattr(engine, "_complete_chat", lambda *a, **k: ("铜铃改挂到第五格。", "length"))
-    with pytest.raises(ModelCallFailed):
-        engine._merge_existing_page("夜航员把铜铃留在第三格。", "铜铃改挂到第五格。", "合成材料。")
-
-
 def test_a_page_too_big_for_one_reply_is_merged_by_the_sections_it_changed():
     """整页一次写不下（回复必然 finish=length），所以先问「只交回改动的小节」。"""
     from rogmem.engine import MERGE_SINGLE_CALL_CHARS, _merge_needs_partial

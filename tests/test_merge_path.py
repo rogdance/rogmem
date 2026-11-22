@@ -31,6 +31,10 @@ def _overlap(text: str, sample: str, size: int = 8) -> str:
 
 
 def test_synthetic_sentences_do_not_repeat_the_corpus():
+    import pytest
+
+    if not CORPUS.exists():
+        pytest.skip("评测语料不随这个仓库发布")
     raw = json.loads(CORPUS.read_text(encoding="utf-8"))
     blob = "\n".join((item.get("title") or "") + "\n" + (item.get("plain_text") or "") for item in raw["items"])
     for sample in SENTENCES:
