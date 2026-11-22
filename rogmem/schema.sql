@@ -103,6 +103,9 @@ CREATE INDEX IF NOT EXISTS sources_recent_turn
 ON sources(IFNULL(event_at, ''), id, kind, IFNULL(project_ref, ''))
 WHERE redacted = 0 AND kind IN ('user', 'agent');
 CREATE INDEX IF NOT EXISTS sources_ingested ON sources(ingested_at, id);
+-- 文件导入按内容摘要查重、读取线程按状态取队头：两处都在写锁里，不能扫全表。
+CREATE INDEX IF NOT EXISTS sources_content_hash ON sources(content_hash);
+CREATE INDEX IF NOT EXISTS sources_status_ingested ON sources(status, ingested_at, id);
 
 CREATE TABLE IF NOT EXISTS chunks (
   id INTEGER PRIMARY KEY,

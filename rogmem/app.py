@@ -236,6 +236,15 @@ async def metrics_json(_request: Request) -> Response:
     return JSONResponse(snap)
 
 
+@mcp.custom_route("/admin/api/diag/write-lock", methods=["GET"])
+async def write_lock_diag(request: Request) -> Response:
+    """谁开着写事务、开了多久、开在哪一行；收口/自愈过几次。只读内存，不碰数据库。"""
+    denied = _guard(request)
+    if denied:
+        return denied
+    return JSONResponse(engine.tx_health())
+
+
 def _client_response(payload: bytes | None) -> Response:
     from rogmem.host_client import bundle_filename
 
@@ -1737,23 +1746,41 @@ def _count_memory_read() -> None:
     agent = CURRENT.get()
     if agent is None:
         return
-    engine.note_memory_call(str(agent["id"]))
+    try:
+        engine.note_memory_call(str(agent["id"]))
+    except Exception as exc:  # 计数是记账，读本身已经成功，不能因为它报错
+        print(f"ROGMEM_CALL_COUNT_SKIPPED {type(exc).__name__}: {exc}", flush=True)
 
 
 def off_loop(fn):
     """Run a sync tool off the request thread. Memory work must not stall the admin page."""
     signature = inspect.signature(fn)
 
+    def settled(*args, **kwargs):
+        failed = True
+        try:
+            result = fn(*args, **kwargs)
+            failed = False
+            return result
+        finally:
+            # 工具跑在线程池里，线程会被下一个请求复用。它开着的写事务不能跟着线程活下去。
+            engine.settle_thread_transaction(f"tool:{fn.__name__}", failed=failed)
+
     @functools.wraps(fn)
     async def wrapped(*args, **kwargs):
-        return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
+        return await asyncio.to_thread(functools.partial(settled, *args, **kwargs))
 
     wrapped.__signature__ = signature
     return wrapped
 
 
 def _run_core(budget: int, project: str, before: str) -> str:
-    payload = engine.core_memory(engine.core_budget_for(budget), project, before=before)
+    failed = True
+    try:
+        payload = engine.core_memory(engine.core_budget_for(budget), project, before=before)
+        failed = False
+    finally:
+        engine.settle_thread_transaction("tool:core", failed=failed)
     return json.dumps(payload, ensure_ascii=False)
 
 

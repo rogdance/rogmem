@@ -103,7 +103,7 @@ def ensure_registry(con: sqlite3.Connection) -> None:
     """Seed builtin baseline questions. Overlay rows are created on refresh."""
     ensure_schema(con)
     for spec in BUILTIN_SPECS:
-        row = con.execute("SELECT id FROM standing_sketches WHERE id=?", (spec.id,)).fetchone()
+        row = con.execute("SELECT id, question FROM standing_sketches WHERE id=?", (spec.id,)).fetchone()
         if row is None:
             con.execute(
                 """INSERT INTO standing_sketches(
@@ -112,7 +112,8 @@ def ensure_registry(con: sqlite3.Connection) -> None:
                    ) VALUES(?,?, '', '[]', '', '[]', '', 1)""",
                 (spec.id, spec.question),
             )
-        else:
+        elif (row["question"] if hasattr(row, "keys") else row[1]) != spec.question:
+            # 只在问题文字真的变了时才写：无变化的 UPDATE 也会开写事务、占住写锁。
             con.execute(
                 "UPDATE standing_sketches SET question=? WHERE id=?",
                 (spec.question, spec.id),

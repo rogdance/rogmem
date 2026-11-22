@@ -151,11 +151,23 @@ def _utcnow() -> str:
 
 
 def _embed_text(text: str) -> list[float] | None:
-    """Optional dense probe. Failures become text-affinity fallback."""
+    """Optional dense probe. Failures become text-affinity fallback.
+
+    Belief landing runs inside the page's write transaction. An embedding call there
+    would hold SQLite's single write lock for the length of a network or CPU wait, so
+    inside an open write transaction the probe falls back to text affinity instead.
+    """
     from rogmem import engine as eng
 
     if getattr(eng, "_EMBED", "off") == "off":
         return None
+    con = getattr(eng._LOCAL, "con", None)
+    try:
+        # hash 模式是本地算一次摘要，不等任何东西；真模型才需要避开写事务。
+        if eng._EMBED != "hash" and con is not None and con.in_transaction:
+            return None
+    except Exception:
+        pass
     try:
         return eng._embed_one(text)
     except Exception:

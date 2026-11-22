@@ -377,7 +377,10 @@ def migrate_crystal_store(con: sqlite3.Connection) -> None:
     indexes = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
     if "crystal_events_crystal_at" not in indexes:
         con.execute("CREATE INDEX crystal_events_crystal_at ON crystal_events(crystal_id, at)")
-    con.execute("UPDATE crystallizations SET type='工程' WHERE type='项目'")
+    # 先问再写：一条 UPDATE 哪怕一行都没改，也会让这条连接开出写事务、拿走整库唯一的写锁。
+    # CrystalStore 在读路径上也会被构造，读线程不提交，写锁就一直在它手里。
+    if con.execute("SELECT 1 FROM crystallizations WHERE type='项目' LIMIT 1").fetchone() is not None:
+        con.execute("UPDATE crystallizations SET type='工程' WHERE type='项目'")
     con.execute(
         """CREATE TABLE IF NOT EXISTS crystal_leases(
              crystal_id TEXT PRIMARY KEY,

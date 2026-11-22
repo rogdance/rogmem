@@ -119,6 +119,7 @@ from rogmem.distill_gate import (
 from rogmem.distill_match import list_draft_crystals, match_integrate_parts
 from rogmem import distill_triage
 from rogmem import horizon_gate
+from rogmem import txguard
 from rogmem.slot_chain import (
     origin_links,
     style_delta,
@@ -230,7 +231,9 @@ def _apply_then_sidecar(
         con.rollback()
         raise
 
-LOCK = threading.RLock()
+# 写锁。最外层释放时，本线程连接上还开着的写事务当场收口（见 txguard）：一个写事务
+# 活不过它的锁，漏掉的 commit 不会再把整库写入卡住几十分钟。
+LOCK = txguard.WriteLock(lambda: getattr(_LOCAL, "con", None))
 _CHUNK_SEQ: contextvars.ContextVar[int | None] = contextvars.ContextVar("rogmem_chunk_seq", default=None)
 # The queue row this distill thread is allowed to finish. Empty for a direct call.
 _ATTEMPT: contextvars.ContextVar[int | None] = contextvars.ContextVar("rogmem_attempt", default=None)
@@ -982,16 +985,42 @@ class _RogmemConnection(sqlite3.Connection):
         return exc
 
     def execute(self, sql, parameters=()):
+        was = self.in_transaction
         try:
-            return super().execute(sql, parameters)
+            cursor = super().execute(sql, parameters)
         except sqlite3.OperationalError as exc:
             raise self._settle(exc)
+        if not was and self.in_transaction:
+            txguard.opened(self)
+        return cursor
 
     def executemany(self, sql, seq_of_parameters):
+        was = self.in_transaction
         try:
-            return super().executemany(sql, seq_of_parameters)
+            cursor = super().executemany(sql, seq_of_parameters)
         except sqlite3.OperationalError as exc:
             raise self._settle(exc)
+        if not was and self.in_transaction:
+            txguard.opened(self)
+        return cursor
+
+    def executescript(self, sql_script):
+        was = self.in_transaction
+        try:
+            cursor = super().executescript(sql_script)
+        except sqlite3.OperationalError as exc:
+            raise self._settle(exc)
+        if not was and self.in_transaction:
+            txguard.opened(self)
+        return cursor
+
+    def commit(self):
+        super().commit()
+        txguard.closed(self)
+
+    def rollback(self):
+        super().rollback()
+        txguard.closed(self)
 
 
 _WAL_WARNED = False
@@ -1014,7 +1043,18 @@ def _open_connection(path: Path) -> sqlite3.Connection:
         _WAL_WARNED = True
         print(f"ROGMEM_WAL_FALLBACK journal_mode={mode or 'unknown'} path={path}", flush=True)
     con.execute("PRAGMA foreign_keys=ON")
+    txguard.register(con)
     return con
+
+
+def settle_thread_transaction(boundary: str, *, failed: bool = False) -> None:
+    """End of a request/tool call on this thread: close any write it left open (see txguard)."""
+    txguard.settle(getattr(_LOCAL, "con", None), boundary, failed=failed)
+
+
+def tx_health() -> dict:
+    """Write-transaction guard: counters, transactions open right now, latest findings."""
+    return txguard.snapshot()
 
 
 def db() -> sqlite3.Connection:
@@ -1641,6 +1681,7 @@ def _run_model(texts: list[str]) -> list[list[float] | None]:
     """One embedding at a time. A remote model does not take the machine's cores."""
     if not texts:
         return []
+    txguard.slow_call("embed", getattr(_LOCAL, "con", None))
     if _embed_is_remote():
         with _EMBED_GATE:
             return _remote_embed(texts)
@@ -2135,17 +2176,71 @@ def enable_agent(agent_id: str) -> dict:
     return {"ok": True, "status": "启用"}
 
 
+# 读调用的计数先记在内存里。检索/读页是读，不能因为一笔计数写不进去就失败或排队：
+# 写锁一时被占，计数留在这里，下一次拿得到锁时一并补上。
+_PENDING_CALLS: dict[str, int] = {}
+_PENDING_CALLS_GUARD = threading.Lock()
+
+
+def pending_memory_calls(agent_id: str) -> int:
+    with _PENDING_CALLS_GUARD:
+        return int(_PENDING_CALLS.get(agent_id, 0))
+
+
+def flush_memory_calls(*, wait: float = 0.0) -> bool:
+    """Write the buffered read counts. Never blocks a read for long, never raises."""
+    with _PENDING_CALLS_GUARD:
+        if not _PENDING_CALLS:
+            return True
+        batch = dict(_PENDING_CALLS)
+        _PENDING_CALLS.clear()
+    landed = False
+    got = LOCK.acquire(timeout=wait) if wait > 0 else LOCK.acquire(blocking=False)
+    if got:
+        try:
+            con = db()
+            con.execute("PRAGMA busy_timeout=200")
+            try:
+                for agent_id, count in batch.items():
+                    con.execute(
+                        "UPDATE agents SET call_count = COALESCE(call_count, 0) + ? WHERE id=? AND status='启用'",
+                        (count, agent_id),
+                    )
+                con.commit()
+                landed = True
+            except sqlite3.Error:
+                try:
+                    con.rollback()
+                except sqlite3.Error:
+                    pass
+            finally:
+                try:
+                    con.execute("PRAGMA busy_timeout=5000")
+                except sqlite3.Error:
+                    pass
+        except Exception:
+            landed = False
+        finally:
+            LOCK.release()
+    if not landed:
+        with _PENDING_CALLS_GUARD:
+            for agent_id, count in batch.items():
+                _PENDING_CALLS[agent_id] = _PENDING_CALLS.get(agent_id, 0) + count
+    return landed
+
+
 def note_memory_call(agent_id: str) -> None:
-    """Count one successful memory read. Writes and internal distill are not calls."""
+    """Count one successful memory read. Writes and internal distill are not calls.
+
+    The count never fails the read it counts. It waits a moment for the write lock;
+    when the lock stays busy the count waits in memory until a later read lands it.
+    """
     agent_id = (agent_id or "").strip()
     if not agent_id:
         return
-    with LOCK:
-        db().execute(
-            "UPDATE agents SET call_count = COALESCE(call_count, 0) + 1 WHERE id=? AND status='启用'",
-            (agent_id,),
-        )
-        db().commit()
+    with _PENDING_CALLS_GUARD:
+        _PENDING_CALLS[agent_id] = _PENDING_CALLS.get(agent_id, 0) + 1
+    flush_memory_calls(wait=0.5)
 
 
 def list_agents() -> list[dict]:
@@ -3007,6 +3102,10 @@ def queue_staged(
     dest = root / safe
     if dest.exists() and _sha256_file(dest) != digest:
         dest = root / f"{dest.stem}-{digest[:8]}{dest.suffix}"
+    try:
+        written_at = datetime.fromtimestamp(staged.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        written_at = ""
     with LOCK:
         con = db()
         old = con.execute(
@@ -3015,30 +3114,36 @@ def queue_staged(
         ).fetchone()
         if old:
             return {"ok": True, "id": old["id"], "duplicate": True, "filename": old["filename"] or safe}
-        os.replace(staged, dest)
-        try:
-            written_at = datetime.fromtimestamp(dest.stat().st_mtime, timezone.utc).isoformat()
-        except OSError:
-            written_at = ""
         source_id = secrets.token_hex(8)
         now = utcnow()
-        con.execute(
-            """INSERT INTO sources(id,kind,device_name,agent_name,event_at,event_basis,ingested_at,
-                   idempotency_key,content_hash,body,status,lane,pair_ready,filename,pipeline)
-               VALUES(?,'file',?,'极空间',?,'file',?,?,?,'',?,?,1,?,'解析:run')""",
-            (
-                source_id,
-                label,
-                written_at or now,
-                now,
-                f"file:{digest}",
-                digest,
-                ST_QUEUED,
-                lane_for(kind="file", origin=ORIGIN_BATCH),
-                dest.name,
-            ),
-        )
-        con.commit()
+        # 先写行、后挪文件：写不进去时扫描目录里不留一份没有行的文件，用户再传一次即可。
+        try:
+            con.execute(
+                """INSERT INTO sources(id,kind,device_name,agent_name,event_at,event_basis,ingested_at,
+                       idempotency_key,content_hash,body,status,lane,pair_ready,filename,pipeline)
+                   VALUES(?,'file',?,'极空间',?,'file',?,?,?,'',?,?,1,?,'解析:run')""",
+                (
+                    source_id,
+                    label,
+                    written_at or now,
+                    now,
+                    f"file:{digest}",
+                    digest,
+                    ST_QUEUED,
+                    lane_for(kind="file", origin=ORIGIN_BATCH),
+                    dest.name,
+                ),
+            )
+            os.replace(staged, dest)
+            con.commit()
+        except sqlite3.OperationalError as exc:
+            _rollback_write(con)
+            if getattr(exc, "sqlite_errorcode", None) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                return {"ok": False, "error": _BUSY_WRITE, "filename": safe}
+            raise
+        except BaseException:
+            _rollback_write(con)
+            raise
     return {"ok": True, "id": source_id, "duplicate": False, "filename": dest.name, "queued": True}
 
 
@@ -5492,6 +5597,7 @@ def _complete_chat(
     outbound["stream"] = True
     outbound["stream_options"] = {"include_usage": True}
     silence = _chat_silence_seconds(outbound) if timeout is None else timeout
+    txguard.slow_call("chat", getattr(_LOCAL, "con", None))
     req = urllib.request.Request(
         base + "/chat/completions",
         data=json.dumps(outbound).encode(),
@@ -15738,6 +15844,7 @@ def list_connected_hosts(
            ORDER BY device_name, program, id"""
     ):
         item = dict(row)
+        item["call_count"] = int(item.get("call_count") or 0) + pending_memory_calls(str(item["id"]))
         try:
             item["code"] = crypto.code_for(crypto.b64decode(item.pop("pubkey")))
         except Exception:
