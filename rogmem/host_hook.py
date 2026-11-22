@@ -69,7 +69,15 @@ def program_of(script: Path, explicit: str = "") -> str:
         return "CodeBuddy"
     if ".dsh" in parts:
         return "DSH"
+    if _hermes_local_hook(script):
+        return "Hermes"
     return ""
+
+
+def _hermes_local_hook(script: Path) -> bool:
+    """Hermes on Windows lives in %LOCALAPPDATA%\\hermes, which has no dotfile name to recognise."""
+    resolved = script.resolve()
+    return resolved.parent.name == "agent-hooks" and resolved.parent.parent.name.lower() == "hermes"
 
 
 def home_of(script: Path) -> Path:
@@ -78,6 +86,8 @@ def home_of(script: Path) -> Path:
     for name in (".cursor", ".trae", ".hermes", ".codex", ".workbuddy", ".codebuddy", ".dsh"):
         if name in parts:
             return Path(*parts[: parts.index(name)])
+    if _hermes_local_hook(script):
+        return Path.home()
     return resolved.parents[2]
 
 
@@ -526,41 +536,107 @@ def _read_outbox(path: Path) -> list[dict]:
 
 
 def _write_outbox(path: Path, rows: list[dict]) -> None:
+    """Replace the whole file in one step. A reader sees the old list or the new one, never half."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         path.unlink(missing_ok=True)
         return
-    path.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in rows), encoding="utf-8")
+    temp = path.parent / f"{path.name}.{os.getpid()}.tmp"
+    temp.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in rows), encoding="utf-8")
+    for attempt in range(20):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            # Windows refuses a replace while another process has the target open.
+            time.sleep(0.05 * (attempt + 1))
+    temp.unlink(missing_ok=True)
+    raise PermissionError(f"outbox busy: {path}")
+
+
+def _append_outbox(path: Path, rows: list[dict]) -> None:
+    """A new turn is one appended line. Rewriting the whole file per turn is what made writers queue."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in rows)
+    try:
+        with path.open("rb") as tail:
+            tail.seek(-1, os.SEEK_END)
+            if tail.read(1) != b"\n":
+                # A writer that died mid-line must not swallow the next turn into its fragment.
+                data = "\n" + data
+    except OSError:
+        pass
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(data)
+        handle.flush()
+
+
+_LOCK_WAIT = 10.0
 
 
 class _OutboxLock:
-    """One writer at a time. The hook and the channel both drain the same file."""
+    """One writer at a time on every platform. The hook and the channel both drain the same file.
+
+    A platform without a lock primitive is not a reason to skip the lock: the hook runs once per
+    host event, several hosts fire at once, and an unlocked read-modify-write drops their turns.
+    """
 
     def __init__(self, path: Path):
         self.path = path
         self.handle = None
+        self.held = False
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = (self.path.parent / (self.path.name + ".lock")).open("a")
-        try:
+        lock_path = self.path.parent / (self.path.name + ".lock")
+        if os.name == "nt":
+            import msvcrt
+
+            # Opening can be refused for a moment too (a scanner holding the file), so the
+            # open and the byte lock share one deadline.
+            deadline = time.monotonic() + _LOCK_WAIT
+            while True:
+                try:
+                    if self.handle is None:
+                        self.handle = lock_path.open("a+b")
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    self.held = True
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        if self.handle is not None:
+                            self.handle.close()
+                            self.handle = None
+                        raise TimeoutError(f"outbox lock busy: {self.path}")
+                    time.sleep(0.02)
+        else:
+            self.handle = lock_path.open("a+b")
             import fcntl
 
             fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
-        except ImportError:
-            pass
+            self.held = True
         return self
 
     def __exit__(self, *args):
         if self.handle is None:
             return
         try:
-            import fcntl
+            if self.held and os.name == "nt":
+                import msvcrt
 
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        except ImportError:
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif self.held:
+                import fcntl
+
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
             pass
-        self.handle.close()
+        finally:
+            self.held = False
+            self.handle.close()
+            self.handle = None
 
 
 def _turn_key(item: dict) -> str:
@@ -654,7 +730,7 @@ def _capture(home: Path, program: str, payload: dict, project: str = "", *, drai
     path = _outbox(home)
     if fresh:
         with _OutboxLock(path):
-            _write_outbox(path, _read_outbox(path) + fresh)
+            _append_outbox(path, fresh)
     if not drain:
         return
     try:
@@ -672,36 +748,149 @@ def _context_response(event: str, packet: str) -> dict:
     return {"additional_context": packet}
 
 
+PROBE_EVENT = "rogmem_probe"
+# A packet that once loaded is the same packet a minute later. When the hub is slow at the
+# moment a session opens, the last good copy is better than an empty session.
+_CACHE_MAX_AGE = 7 * 24 * 3600
+_CLAIM_STALE = 30
+
+
+def _cache_path(home: Path, program: str, project: str) -> Path:
+    key = hashlib.sha256(f"{program}\n{project}".encode()).hexdigest()[:16]
+    return home / ".rogmem" / "core-cache" / f"{program}-{key}.json"
+
+
+def _save_packet(home: Path, program: str, project: str, text: str) -> None:
+    path = _cache_path(home, program, project)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.parent / f"{path.name}.{os.getpid()}.tmp"
+        temp.write_text(
+            json.dumps({"at": datetime.now(timezone.utc).isoformat(), "text": text}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(temp, path)
+    except OSError:
+        return
+
+
+def _cached_packet(home: Path, program: str, project: str) -> tuple[str, str]:
+    path = _cache_path(home, program, project)
+    try:
+        if time.time() - path.stat().st_mtime > _CACHE_MAX_AGE:
+            return "", ""
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    return str(data.get("at") or ""), str(data.get("text") or "")
+
+
+def _claim(path: Path) -> bool:
+    """One opening fetch per session. A host that fires the same event twice gets one packet.
+
+    The claim is a timestamp, not a lock that must be removed: the ok/down markers decide the
+    rest of the session, and a claim older than a fetch can take is simply taken again.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # A state dir the host refuses must not cost the packet.
+        return True
+    try:
+        os.close(os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except FileExistsError:
+        try:
+            if time.time() - path.stat().st_mtime < _CLAIM_STALE:
+                return False
+            os.utime(path, None)
+            return True
+        except OSError:
+            return False
+    except OSError:
+        return True
+
+
+def _note_run(home: Path, program: str, event: str, outcome: str) -> None:
+    """The last time this host really ran the hook. A config that never runs leaves this stale."""
+    _remember(
+        home / ".rogmem" / "hook-core" / f"last-{program}.json",
+        json.dumps(
+            {
+                "event": event,
+                "outcome": outcome,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "python": sys.executable,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+    )
+
+
+def _opening_packet(home: Path, program: str, session_id: str, project: str) -> tuple[str, str]:
+    ok_mark = _marker(home, program, session_id, "ok")
+    down_mark = _marker(home, program, session_id, "down")
+    if ok_mark.is_file() or _quiet(down_mark):
+        return "", "skip"
+    claim = _marker(home, program, session_id, "claim")
+    if not _claim(claim):
+        return "", "skip"
+    try:
+        text = _core_text(home, program, project)
+    except Exception:
+        text = ""
+    if text:
+        _save_packet(home, program, project, text)
+        _remember(ok_mark, "ok\n")
+        return f"{PACKET_MARK}\n{text}", "packet"
+    # A host whose key was taken away gets nothing from the cache either.
+    at, cached = _cached_packet(home, program, project) if _enrolled(home, program) else ("", "")
+    if cached:
+        _remember(ok_mark, "cache\n")
+        note = (
+            f"（记忆中枢这次没有及时回答。下面是 {at} 装入过的同一份历史包；"
+            "在那之后的事，先 search 核对再答。）"
+        )
+        return f"{PACKET_MARK}\n{note}\n{cached}", "cache"
+    _remember(down_mark, "down\n")
+    return "", "down"
+
+
 def handle(payload: dict, *, home: Path, program: str) -> dict:
     """One event. Empty means the agent should continue with what it already has."""
+    event = _event_name(payload)
+    if event == PROBE_EVENT:
+        # A dry run of the exact command a host registered. No marker, no outbox, no hub call.
+        known = program in _PROGRAMS
+        return {
+            "rogmem_probe": {
+                "ok": known,
+                "program": program,
+                "enrolled": bool(known and _enrolled(home, program)),
+                "python": sys.version.split()[0],
+            }
+        }
     if program not in _PROGRAMS:
         return {}
-    event = _event_name(payload)
     session_id = _session_id(payload)
     project = _session_project(home, program, session_id, payload)
     opening = event in {"sessionStart", "SessionStart", "pre_llm_call", "UserPromptSubmit"}
     if opening and program == "Hermes" and event == "pre_llm_call" and not _first_turn(payload):
         opening = False
     packet = ""
+    outcome = "turn"
     if opening:
-        ok_mark = _marker(home, program, session_id, "ok")
-        down_mark = _marker(home, program, session_id, "down")
-        if not ok_mark.is_file() and not _quiet(down_mark):
-            try:
-                text = _core_text(home, program, project)
-            except Exception:
-                text = ""
-            if not text:
-                _remember(down_mark, "down\n")
-            else:
-                packet = f"{PACKET_MARK}\n{text}"
-                _remember(ok_mark, "ok\n")
+        packet, outcome = _opening_packet(home, program, session_id, project)
     context = packet
     if not context and event in _USER_TURN_EVENTS and _enrolled(home, program):
         # The opening packet is a one-time bootstrap. A later user turn gets no packet,
         # so the standing order is repeated here as one short line.
         context = _REMINDER
     result = _context_response(event, context) if context else {}
+    _note_run(home, program, event, outcome)
     try:
         # The opening response has to leave before the host's deadline.
         # Uploading saved turns is later work; doing it here can kill the process

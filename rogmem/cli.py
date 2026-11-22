@@ -54,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     status = hosts_sub.add_parser("status", help="查看本机宿主接入状态，不写入")
     _add_home(status)
     _add_dry_run(status)
+    verify = hosts_sub.add_parser("verify", help="真的执行每个宿主登记的 hook 命令（探针事件，不写入、不调中枢）")
+    _add_home(verify)
+    verify.add_argument("--program", action="append", dest="programs", help="只检查这些宿主，可重复")
 
     history = sub.add_parser("history", help="历史会话预览 / 上传")
     history_sub = history.add_subparsers(dest="history_command")
@@ -968,8 +971,32 @@ def hosts_update(args: argparse.Namespace) -> int:
             hooks=result.get("hooks") or [],
             wrote=bool(written),
             text="已把本机已支持宿主的全局规则和 hook 更新到最新。" if result.get("ok") else "没有更新。",
+            verify=_hook_report(inst, home, programs) if result.get("ok") else {},
         )
     )
+
+
+def _hook_report(inst, home: Path, programs: list[str] | None) -> dict:
+    """Registered hooks executed for real, the last event each host delivered, and WorkBuddy's trust gate."""
+    rows = inst.verify_host_hooks(home, programs)
+    for row in rows:
+        row["last_event"] = inst.hook_heartbeat(home, str(row.get("program") or ""))
+    human = []
+    trusted = inst.workbuddy_mcp_trusted(home)
+    if trusted is False:
+        human.append("WorkBuddy：在连接器管理右上角的自定义连接器里，给 rogmem 点一次「信任」。不点，会话里没有 core / search 工具，只能靠 hook 装入历史包。")
+    broken = [row for row in rows if not row.get("ok")]
+    return {"hooks": rows, "broken": len(broken), "workbuddy_mcp_trusted": trusted, "human_actions": human}
+
+
+def hosts_verify(args: argparse.Namespace) -> int:
+    inst = _installer()
+    home = _home(args)
+    programs = list(args.programs) if args.programs else None
+    report = _hook_report(inst, home, programs)
+    ok = report["broken"] == 0
+    text = "每个登记的 hook 都能跑。" if ok else f"{report['broken']} 条登记的 hook 跑不起来。运行 rogmem hosts update --confirm 重写。"
+    return _emit(_base_result("hosts.verify", True, ok=ok, text=text, **report))
 
 
 def _hermes_turns(home: Path) -> list[dict]:
@@ -1234,6 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": hosts_status,
             "connect": hosts_connect,
             "update": hosts_update,
+            "verify": hosts_verify,
         }.get(args.hosts_command)
         if action is None:
             parser.parse_args(["hosts", "--help"])

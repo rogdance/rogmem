@@ -7,8 +7,13 @@ import json
 import sys
 from pathlib import Path
 
-from installer.rogmem_installer import chosen_hosts, write_configs
+from installer.rogmem_installer import chosen_hosts, hook_command, write_configs
 from rogmem.host_hook import _flush, handle
+
+
+def _cmd(script: Path, program: str, home: Path) -> str:
+    """What the installer registers for this script on the platform running the tests."""
+    return hook_command(script, program=program, home=home)
 
 
 def _home(tmp_path: Path) -> Path:
@@ -30,10 +35,10 @@ def test_a_named_host_installs_only_its_hook(tmp_path):
     home = _home(tmp_path)
     assert write_configs(home, "http://127.0.0.1:18780", programs=["Cursor"]) == ["Cursor"]
     script = home / ".cursor" / "hooks" / "rogmem.py"
-    assert script.is_file() and script.stat().st_mode & 0o111
+    assert script.is_file() and (sys.platform == "win32" or script.stat().st_mode & 0o111)
     saved = json.loads((home / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
-    assert saved["hooks"]["sessionStart"][0]["command"] == str(script)
-    assert saved["hooks"]["sessionStart"][0]["timeout"] == 3
+    assert saved["hooks"]["sessionStart"][0]["command"] == _cmd(script, "Cursor", home)
+    assert saved["hooks"]["sessionStart"][0]["timeout"] == 10
     assert (home / ".cursor" / "rules" / "rogmem.mdc").is_file()
     assert not (home / ".hermes" / "agent-hooks" / "rogmem.py").exists()
     assert not (home / ".hermes" / "rogmem-rule.md").exists()
@@ -51,15 +56,16 @@ def test_no_selection_installs_cursor_and_hermes_hooks(tmp_path):
     assert hermes.is_file()
     text = (home / ".hermes" / "config.yaml").read_text(encoding="utf-8")
     assert "provider: onemem" in text
-    assert "pre_llm_call:" in text and str(hermes) in text
+    assert "pre_llm_call:" in text and _cmd(hermes, "Hermes", home) in text
     assert "post_llm_call:" in text
     write_configs(home, "http://127.0.0.1:18780")
-    assert text.count(str(hermes)) == (home / ".hermes" / "config.yaml").read_text(encoding="utf-8").count(str(hermes))
+    hermes_cmd = _cmd(hermes, "Hermes", home)
+    assert text.count(hermes_cmd) == (home / ".hermes" / "config.yaml").read_text(encoding="utf-8").count(hermes_cmd)
     codex = home / ".codex" / "hooks" / "rogmem.py"
     assert codex.is_file()
     registered = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
-    assert registered["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == str(codex)
-    assert registered["hooks"]["Stop"][0]["hooks"][0]["command"] == str(codex)
+    assert registered["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == _cmd(codex, "Codex", home)
+    assert registered["hooks"]["Stop"][0]["hooks"][0]["command"] == _cmd(codex, "Codex", home)
 
 
 def test_hermes_hook_reads_its_own_block_and_joins_existing_events(tmp_path):
@@ -325,7 +331,7 @@ def test_codebuddy_uses_the_same_hook_and_dsh_gets_a_plugin(tmp_path):
     settings = json.loads((home / ".codebuddy" / "settings.json").read_text(encoding="utf-8"))
     assert settings["enabledPlugins"] == {"pdf": True}
     command = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
-    assert command == str(home / ".codebuddy" / "hooks" / "rogmem.py")
+    assert command == _cmd(home / ".codebuddy" / "hooks" / "rogmem.py", "CodeBuddy", home)
     saved = json.loads((home / ".rogmem" / "hosts" / "DSH.json").read_text(encoding="utf-8"))
     assert saved["token"] == "rm_test"
     assert saved["url"].endswith("/mcp")
@@ -444,11 +450,11 @@ def test_codex_and_workbuddy_keep_their_own_hooks_and_share_the_script(tmp_path)
         for item in group["hooks"]
     ]
     assert "/bin/echo keep" in commands
-    assert str(home / ".codex" / "hooks" / "rogmem.py") in commands
+    assert _cmd(home / ".codex" / "hooks" / "rogmem.py", "Codex", home) in commands
     assert "Stop" in codex["hooks"]
     work = json.loads((home / ".workbuddy" / "settings.json").read_text(encoding="utf-8"))
     assert work["enabledPlugins"] == {"pdf": True}
-    assert work["hooks"]["SessionStart"][0]["hooks"][0]["command"] == str(home / ".workbuddy" / "hooks" / "rogmem.py")
+    assert work["hooks"]["SessionStart"][0]["hooks"][0]["command"] == _cmd(home / ".workbuddy" / "hooks" / "rogmem.py", "WorkBuddy", home)
     install_host_hooks(home, ["Codex", "WorkBuddy"])
     again = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
     assert len(again["hooks"]["UserPromptSubmit"]) == 2
@@ -506,7 +512,7 @@ def test_trae_hooks_keep_the_version_and_the_shared_script(tmp_path):
     commands = [
         item["command"] for group in data["hooks"]["UserPromptSubmit"] for item in group["hooks"]
     ]
-    assert str(home / ".trae" / "hooks" / "rogmem.py") in commands
+    assert _cmd(home / ".trae" / "hooks" / "rogmem.py", "Trae", home) in commands
     assert (home / ".trae" / "hooks" / "rogmem.py").is_file()
 
 

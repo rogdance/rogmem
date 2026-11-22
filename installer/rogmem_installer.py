@@ -912,7 +912,85 @@ def _install_hook_script(dest: Path) -> None:
     dest.chmod(0o755)
 
 
-def _merge_cursor_hooks(path: Path, command: str) -> None:
+# A hook is registered as one command string, and each host runs that string its own way:
+# WorkBuddy and CodeBuddy hand it to Git Bash, Cursor to a Windows shell, Hermes splits it
+# into argv. On POSIX the kernel reads the script's shebang, so the path alone is a program.
+# Windows has no shebang, Bash eats the backslashes of a Windows path, and `.py` often has
+# no file association at all. The one shape every runner reads the same way is an absolute
+# interpreter followed by the script, both written with forward slashes and without spaces.
+# What a host waits before killing the hook. The hook bounds its own network calls (2 s for the
+# opening packet, 2 s for the inline upload), so this is headroom, not a wait: a kill after the
+# session was marked loaded but before the packet was printed loses that session's packet.
+HOOK_TIMEOUT = 10
+
+
+def _hook_interpreter() -> str:
+    """The interpreter that runs the hook. The hook is stdlib-only, so a venv adds nothing but a way to break."""
+    import sys
+
+    for candidate in (getattr(sys, "_base_executable", "") or "", sys.executable or ""):
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return sys.executable or "python"
+
+
+def _windows_short(path: str) -> str:
+    """A path every Windows runner reads as one word. Spaces are the only thing to remove."""
+    if " " not in path:
+        return path
+    try:
+        import ctypes
+
+        size = ctypes.windll.kernel32.GetShortPathNameW(path, None, 0)
+        if size:
+            buffer = ctypes.create_unicode_buffer(size)
+            if ctypes.windll.kernel32.GetShortPathNameW(path, buffer, size):
+                return buffer.value
+    except Exception:
+        pass
+    return path
+
+
+def _command_word(path: str) -> str:
+    text = _windows_short(str(path)).replace("\\", "/")
+    return f'"{text}"' if " " in text else text
+
+
+def hook_command(
+    script: Path,
+    system: str | None = None,
+    interpreter: str | None = None,
+    program: str = "",
+    home: Path | None = None,
+) -> str:
+    """The command a host stores to run the rogmem hook.
+
+    On Windows the registration also names the host and the home. A host dir without a dotfile
+    name (Hermes under %LOCALAPPDATA%) cannot be recognised from the script path.
+    """
+    if (system or platform.system()) != "Windows":
+        return str(script)
+    words = [_command_word(interpreter or _hook_interpreter()), _command_word(str(script))]
+    if program:
+        words.extend(["--program", program])
+    if home is not None:
+        words.extend(["--home", _command_word(str(home))])
+    return " ".join(words)
+
+
+def _is_rogmem_hook(command: object, script: Path) -> bool:
+    """An entry this installer wrote for this script, in any earlier shape."""
+    if not isinstance(command, str):
+        return False
+    text = command.replace("\\", "/").strip().strip("'\"")
+    target = str(script).replace("\\", "/")
+    if target in text:
+        return True
+    # A host dir moved (Hermes left ~/.hermes for %LOCALAPPDATA%): the same script name is the same hook.
+    return text.lower().endswith("/" + script.name.lower()) and "rogmem" in script.name.lower()
+
+
+def _merge_cursor_hooks(path: Path, command: str, script: Path | None = None) -> None:
     data: dict = {}
     if path.exists():
         try:
@@ -928,8 +1006,18 @@ def _merge_cursor_hooks(path: Path, command: str) -> None:
         rows = hooks.get(event)
         if not isinstance(rows, list):
             rows = []
+        if script is not None:
+            # An earlier shape of this same hook is replaced, not kept beside the new one.
+            rows = [
+                item
+                for item in rows
+                if not (isinstance(item, dict) and item.get("command") != command and _is_rogmem_hook(item.get("command"), script))
+            ]
         if not any(isinstance(item, dict) and item.get("command") == command for item in rows):
-            rows.append({"command": command, "timeout": 3})
+            rows.append({"command": command, "timeout": HOOK_TIMEOUT})
+        for item in rows:
+            if isinstance(item, dict) and item.get("command") == command:
+                item["timeout"] = HOOK_TIMEOUT
         hooks[event] = rows
     data["version"] = 1
     data["hooks"] = hooks
@@ -937,14 +1025,43 @@ def _merge_cursor_hooks(path: Path, command: str) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _yaml_scalar(text: str) -> str:
+    """A single-quoted YAML scalar. Backslashes stay literal; a double-quoted one reads `\\U` as an escape."""
+    return "'" + text.replace("'", "''") + "'"
+
+
 def _hook_lines(command: str) -> list[str]:
-    return [f'    - command: "{command}"', "      timeout: 3"]
+    return [f"    - command: {_yaml_scalar(command)}", f"      timeout: {HOOK_TIMEOUT}"]
 
 
-def _merge_hermes_hooks(path: Path, command: str) -> None:
+def _drop_hermes_hook_items(section: list[str], script: Path | None) -> list[str]:
+    """Remove list items under hooks that run this script, whatever quoting an earlier install used."""
+    if script is None:
+        return section
+    kept: list[str] = []
+    index = 0
+    while index < len(section):
+        line = section[index]
+        stripped = line.strip()
+        if stripped.startswith("- command:") and _is_rogmem_hook(stripped[len("- command:") :].strip(), script):
+            indent = len(line) - len(line.lstrip())
+            index += 1
+            while index < len(section):
+                follow = section[index]
+                if not follow.strip():
+                    break
+                follow_indent = len(follow) - len(follow.lstrip())
+                if follow_indent <= indent or follow.strip().startswith("- "):
+                    break
+                index += 1
+            continue
+        kept.append(line)
+        index += 1
+    return kept
+
+
+def _merge_hermes_hooks(path: Path, command: str, script: Path | None = None) -> None:
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if command in text:
-        return
     lines = text.splitlines()
     start = next((i for i, line in enumerate(lines) if line.strip() == "hooks:" and not line.startswith(" ")), None)
     events = ("pre_llm_call", "post_llm_call")
@@ -961,7 +1078,9 @@ def _merge_hermes_hooks(path: Path, command: str) -> None:
     end = start + 1
     while end < len(lines) and (not lines[end].strip() or lines[end].startswith(" ")):
         end += 1
-    section = lines[start + 1 : end]
+    section = _drop_hermes_hook_items(lines[start + 1 : end], script)
+    if script is None and _yaml_scalar(command) in "\n".join(section):
+        return
     rebuilt: list[str] = []
     seen: set[str] = set()
     index = 0
@@ -983,7 +1102,13 @@ def _merge_hermes_hooks(path: Path, command: str) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _merge_claude_hooks(path: Path, command: str, events: tuple[str, ...], version: int | None = None) -> None:
+def _merge_claude_hooks(
+    path: Path,
+    command: str,
+    events: tuple[str, ...],
+    version: int | None = None,
+    script: Path | None = None,
+) -> None:
     """Codex and WorkBuddy share this registry: event, then a list of command groups."""
     data: dict = {}
     if path.exists():
@@ -1000,19 +1125,40 @@ def _merge_claude_hooks(path: Path, command: str, events: tuple[str, ...], versi
         groups = hooks.get(event)
         if not isinstance(groups, list):
             groups = []
+        if script is not None:
+            # An earlier shape of this same hook is replaced, not kept beside the new one.
+            cleaned = []
+            for group in groups:
+                inner = group.get("hooks") if isinstance(group, dict) else None
+                if isinstance(inner, list):
+                    left = [
+                        item
+                        for item in inner
+                        if not (
+                            isinstance(item, dict)
+                            and item.get("command") != command
+                            and _is_rogmem_hook(item.get("command"), script)
+                        )
+                    ]
+                    if not left and inner:
+                        continue
+                    group = {**group, "hooks": left}
+                cleaned.append(group)
+            groups = cleaned
         present = False
         for group in groups:
             inner = group.get("hooks") if isinstance(group, dict) else None
-            if isinstance(inner, list) and any(
-                isinstance(item, dict) and item.get("command") == command for item in inner
-            ):
-                present = True
-                break
+            if not isinstance(inner, list):
+                continue
+            for item in inner:
+                if isinstance(item, dict) and item.get("command") == command:
+                    item["timeout"] = HOOK_TIMEOUT
+                    present = True
         if not present:
             groups.append(
                 {
                     "matcher": "",
-                    "hooks": [{"type": "command", "command": command, "timeout": 3}],
+                    "hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT}],
                 }
             )
         hooks[event] = groups
@@ -1141,39 +1287,42 @@ def install_host_hooks(home: Path, programs: list[str] | None = None, allow_real
         if program == "Cursor":
             script = home / ".cursor" / "hooks" / "rogmem.py"
             _install_hook_script(script)
-            _merge_cursor_hooks(home / ".cursor" / "hooks.json", str(script))
+            _merge_cursor_hooks(home / ".cursor" / "hooks.json", hook_command(script, program=program, home=home), script)
         elif program == "Trae":
             script = home / ".trae" / "hooks" / "rogmem.py"
             _install_hook_script(script)
             _merge_claude_hooks(
                 home / ".trae" / "hooks.json",
-                str(script),
+                hook_command(script, program=program, home=home),
                 ("SessionStart", "UserPromptSubmit", "Stop"),
                 version=1,
+                script=script,
             )
         elif program == "Hermes":
             script = hermes_home(home) / "agent-hooks" / "rogmem.py"
             _install_hook_script(script)
-            _merge_hermes_hooks(hermes_home(home) / "config.yaml", str(script))
+            _merge_hermes_hooks(hermes_home(home) / "config.yaml", hook_command(script, program=program, home=home), script)
         elif program == "Codex":
             script = home / ".codex" / "hooks" / "rogmem.py"
             _install_hook_script(script)
-            _merge_claude_hooks(home / ".codex" / "hooks.json", str(script), ("UserPromptSubmit", "Stop"))
+            _merge_claude_hooks(home / ".codex" / "hooks.json", hook_command(script, program=program, home=home), ("UserPromptSubmit", "Stop"), script=script)
         elif program == "WorkBuddy":
             script = home / ".workbuddy" / "hooks" / "rogmem.py"
             _install_hook_script(script)
             _merge_claude_hooks(
                 home / ".workbuddy" / "settings.json",
-                str(script),
+                hook_command(script, program=program, home=home),
                 ("SessionStart", "UserPromptSubmit", "Stop"),
+                script=script,
             )
         elif program == "CodeBuddy":
             script = home / ".codebuddy" / "hooks" / "rogmem.py"
             _install_hook_script(script)
             _merge_claude_hooks(
                 home / ".codebuddy" / "settings.json",
-                str(script),
+                hook_command(script, program=program, home=home),
                 ("SessionStart", "UserPromptSubmit", "Stop"),
+                script=script,
             )
         elif program == "DSH":
             _install_dsh_plugin(home)
@@ -1181,6 +1330,214 @@ def install_host_hooks(home: Path, programs: list[str] | None = None, allow_real
             continue
         written.append(program)
     return written
+
+
+# ---- Does the registered hook really run? -------------------------------------------------
+# A config file that names the hook is not a hook that runs. The check below executes the
+# exact string each host stored, through the same kind of runner the host uses, with a probe
+# event that the hook answers without touching markers, the outbox or the hub.
+
+
+def _registered_hook_commands_from_yaml(text: str) -> list[str]:
+    """Every `- command:` value in a Hermes config, unquoted the way YAML would."""
+    found: list[str] = []
+    for match in re.finditer(r"(?m)^\s*-\s*command:\s*(.+?)\s*$", text):
+        raw = match.group(1)
+        if len(raw) >= 2 and raw.startswith("'") and raw.endswith("'"):
+            raw = raw[1:-1].replace("''", "'")
+        elif len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+            raw = raw[1:-1]
+        if raw not in found:
+            found.append(raw)
+    return found
+
+
+def _registered_hook_commands(home: Path, program: str) -> list[str]:
+    """Commands this host will run for rogmem, read back from the host's own registry."""
+    found: list[str] = []
+
+    def take(value: object) -> None:
+        if isinstance(value, str) and "rogmem" in value.lower() and value not in found:
+            found.append(value)
+
+    paths = {
+        "Cursor": home / ".cursor" / "hooks.json",
+        "Trae": home / ".trae" / "hooks.json",
+        "Codex": home / ".codex" / "hooks.json",
+        "WorkBuddy": home / ".workbuddy" / "settings.json",
+        "CodeBuddy": home / ".codebuddy" / "settings.json",
+    }
+    if program == "Hermes":
+        path = hermes_home(home) / "config.yaml"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        for raw in _registered_hook_commands_from_yaml(text):
+            take(raw)
+        return found
+    path = paths.get(program)
+    if path is None:
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        return []
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return []
+    for rows in hooks.values():
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            take(row.get("command"))
+            for inner in row.get("hooks") if isinstance(row.get("hooks"), list) else []:
+                if isinstance(inner, dict):
+                    take(inner.get("command"))
+    return found
+
+
+def _git_bash() -> str:
+    """The Bash a Windows host hands its hook string to, when this machine has one."""
+    candidates = [os.environ.get("CODEBUDDY_CODE_GIT_BASH_PATH", "")]
+    root = Path.home() / ".workbuddy" / "binaries" / "PortableGit" / "versions"
+    if root.is_dir():
+        candidates.extend(str(item / "bin" / "bash.exe") for item in sorted(root.iterdir(), reverse=True))
+    candidates.extend([r"C:\Program Files\Git\bin\bash.exe", shutil.which("bash") or ""])
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and "system32" not in candidate.lower():
+            return candidate
+    return ""
+
+
+def _hook_runners(program: str, command: str, system: str | None = None) -> list[tuple[str, list[str] | str, bool]]:
+    """(name, args, shell) for each way a host may run this string. Every one must work."""
+    if (system or platform.system()) != "Windows":
+        return [("sh", ["/bin/sh", "-c", command], False)]
+    if program == "Hermes":
+        import shlex
+
+        return [("argv", shlex.split(command, posix=False), False)]
+    runners: list[tuple[str, list[str] | str, bool]] = [("cmd", command, True)]
+    bash = _git_bash()
+    if bash:
+        runners.append(("bash", [bash, "-c", command], False))
+    runners.append(("powershell", ["powershell", "-NoProfile", "-NonInteractive", "-Command", command], False))
+    return runners
+
+
+_WINDOWS_PROGRAM_SUFFIXES = {".exe", ".com", ".bat", ".cmd"}
+
+
+def _windows_not_a_program(command: str) -> bool:
+    """A first word Windows would hand to a file association, not start. Running it opens 「打开方式」."""
+    import shlex
+
+    try:
+        words = shlex.split(command, posix=False)
+    except ValueError:
+        return True
+    if not words:
+        return True
+    first = words[0].strip('"')
+    suffix = Path(first).suffix.lower()
+    return bool(suffix) and suffix not in _WINDOWS_PROGRAM_SUFFIXES
+
+
+def verify_hook_command(program: str, command: str, timeout: float = 10, system: str | None = None) -> dict:
+    """Run one registered command with the probe event. ok means every runner got the probe answer."""
+    import subprocess
+
+    if (system or platform.system()) == "Windows" and _windows_not_a_program(command):
+        # Not run on purpose: a script path as the program is what failed, and starting it
+        # would pop the 「打开方式」 dialog on the user's desktop instead of answering.
+        return {
+            "program": program,
+            "command": command,
+            "ok": False,
+            "runners": [{"runner": "static", "ok": False, "code": "not-a-program", "seconds": 0.0}],
+        }
+    payload = json.dumps({"hook_event_name": "rogmem_probe", "session_id": "rogmem-probe"})
+    tried = []
+    for name, args, shell in _hook_runners(program, command, system):
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                args,
+                input=payload.encode("utf-8"),
+                capture_output=True,
+                timeout=timeout,
+                shell=shell,
+                check=False,
+            )
+            out = proc.stdout.decode("utf-8", errors="replace").strip()
+            code = proc.returncode
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            out, code = "", type(exc).__name__
+        elapsed = round(time.monotonic() - started, 2)
+        probe = {}
+        try:
+            loaded = json.loads(out.splitlines()[-1]) if out else {}
+            probe = loaded.get("rogmem_probe") if isinstance(loaded, dict) else {}
+        except (ValueError, IndexError):
+            probe = {}
+        ok = isinstance(probe, dict) and bool(probe.get("ok")) and str(probe.get("program") or "") == program
+        tried.append({"runner": name, "ok": ok, "code": code, "seconds": elapsed})
+    return {
+        "program": program,
+        "command": command,
+        "ok": bool(tried) and all(item["ok"] for item in tried),
+        "runners": tried,
+    }
+
+
+def verify_host_hooks(home: Path, programs: list[str] | None = None) -> list[dict]:
+    """Every registered rogmem hook on this machine, executed for real. A host with none is not listed."""
+    rows = []
+    for program in chosen_hosts(home, programs):
+        if program == "DSH":
+            continue
+        for command in _registered_hook_commands(home, program):
+            rows.append(verify_hook_command(program, command))
+    return rows
+
+
+def hook_heartbeat(home: Path, program: str) -> dict:
+    """The last event this host really delivered to the hook, as the hook wrote it."""
+    path = home / ".rogmem" / "hook-core" / f"last-{program}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def workbuddy_mcp_trusted(home: Path) -> bool | None:
+    """WorkBuddy loads a user MCP server only after a person clicks 信任. None: not a WorkBuddy MCP setup.
+
+    The trust record is keyed by the server's config hash (for HTTP, the URL origin). Writing it
+    for the user would skip a consent step, so this only reads.
+    """
+    config = home / ".workbuddy" / "mcp.json"
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    server = (data.get("mcpServers") or {}).get("rogmem") if isinstance(data, dict) else None
+    if not isinstance(server, dict) or not server.get("url"):
+        return None
+    import hashlib
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(str(server.get("url")))
+    digest = hashlib.sha256(f"{parts.scheme}://{parts.netloc}".encode()).hexdigest()
+    try:
+        approvals = json.loads((home / ".workbuddy" / "mcp-approvals.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(approvals, dict):
+        return False
+    return any(str(key).startswith(digest + "::") and "rogmem" in str(key) for key in approvals)
 
 
 def refresh_host_bundle(home: Path, programs: list[str] | None = None, allow_real: bool = False) -> dict:
@@ -1430,6 +1787,14 @@ def _header_bytes(key: str, value: str) -> bytes:
         return text.encode("utf-8")
 
 
+# Methods the door may send down a second hop when the first one stays silent.
+_REPLAYABLE = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+class _Delivered(OSError):
+    """The hub already has this request. Another hop would run it a second time."""
+
+
 class _Proxy(BaseHTTPRequestHandler):
     target = 0
     home: Path | None = None
@@ -1600,20 +1965,30 @@ class _Proxy(BaseHTTPRequestHandler):
         upstream, host_header = self._dial(origin, target)
         # The remembered entrance may think before its first byte. A cached
         # shortcut has to show a byte inside the entrance budget, or it is
-        # the same as a hop that never connected.
-        upstream.settimeout(_ENTRANCE_TIMEOUT if cached else 120)
+        # the same as a hop that never connected. That budget only holds for a
+        # request that is safe to send twice: once a tool call has been handed
+        # to the hub, a slow answer is still its answer, and sending it again
+        # down the next hop doubles the work on a hub that is already slow.
+        replayable = self.command in _REPLAYABLE
+        upstream.settimeout(_ENTRANCE_TIMEOUT if cached and replayable else 120)
+        sent = False
         try:
             upstream.sendall(self._request_bytes(body, headers, host_header))
+            sent = True
             first = upstream.recv(65536)
-        except Exception:
+        except Exception as exc:
             upstream.close()
             if cached:
                 self._forget_cache(origin)
+            if sent and not replayable:
+                raise _Delivered(str(exc)) from exc
             raise
         if not first:
             upstream.close()
             if cached:
                 self._forget_cache(origin)
+            if not replayable:
+                raise _Delivered("hub closed without an answer")
             raise TimeoutError("silent hop")
         if cached:
             upstream.settimeout(120)
@@ -1637,12 +2012,18 @@ class _Proxy(BaseHTTPRequestHandler):
             try:
                 self._copy_hop(origin, target, cached, body, headers)
                 return
+            except _Delivered as exc:
+                self._fail(504, exc)
+                return
             except Exception as exc:  # noqa: BLE001
                 last = exc
         found = self._another_binding()
         if found:
             try:
                 self._copy_hop(found, 0, True, body, headers)
+                return
+            except _Delivered as exc:
+                self._fail(504, exc)
                 return
             except Exception as exc:  # noqa: BLE001
                 last = exc
