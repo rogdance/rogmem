@@ -8,26 +8,13 @@ RULES_REV = 2
 
 
 def _bundle_rev() -> str:
-    """What the host installs, as a content id.
+    """The rogmem plugin version. One version for everything the hub installs on a computer."""
+    from rogmem.plugin import version
 
-    Any change to the rule text or to the hook moves it, so 宿主管理 can offer a refresh
-    without anyone remembering to bump a number by hand. The wheel ships both files, so the
-    server and an up-to-date client compute the same id; a stale client computes its own.
-    """
-    import hashlib
-
-    digest = hashlib.sha256()
-    here = Path(__file__).resolve().parent
-    for name in ("host_rules.py", "host_hook.py"):
-        try:
-            digest.update(name.encode("utf-8"))
-            digest.update((here / name).read_bytes())
-        except OSError:
-            return str(RULES_REV)
-    return digest.hexdigest()[:12]
+    return version() or str(RULES_REV)
 
 
-# The host-side plugin version. Content-addressed on purpose: it moves by itself.
+# Kept under the old name for callers that still import it; same value as rogmem.plugin.version().
 HOST_BUNDLE_REV = _bundle_rev()
 MARKER_START = "<!-- rogmem-rule:start -->"
 MARKER_END = "<!-- rogmem-rule:end -->"

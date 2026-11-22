@@ -21,6 +21,30 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 PACKET_MARK = "【rogmem 历史包】"
+PLUGIN_HEADER = "X-Rogmem-Plugin"
+
+
+def _plugin_version_at(home: Path) -> str:
+    global _HOME_FOR_VERSION
+    _HOME_FOR_VERSION = home
+    return _plugin_version()
+
+
+def _plugin_version() -> str:
+    """The plugin this hook belongs to, from the manifest the installer wrote next to it.
+
+    The hook is copied into each host's own directory and cannot import the package, so the
+    installer leaves the version in ~/.rogmem/plugin.json and the hook reads it from there.
+    """
+    try:
+        home = _HOME_FOR_VERSION or Path.home()
+        data = json.loads((home / ".rogmem" / "plugin.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("version") or "").strip() if isinstance(data, dict) else ""
+
+
+_HOME_FOR_VERSION: Path | None = None
 
 _QUIET_SECONDS = 600
 _TIMEOUT = 2
@@ -385,6 +409,9 @@ def _mcp(url: str, token: str, device: str, name: str, arguments: dict, timeout:
     }
     if device:
         headers["X-Rogmem-Device"] = device
+    plugin = _plugin_version()
+    if plugin:
+        headers[PLUGIN_HEADER] = plugin
     return _post_json(
         url,
         {
@@ -830,6 +857,18 @@ def _note_run(home: Path, program: str, event: str, outcome: str) -> None:
     )
 
 
+def _plugin_notice(text: str) -> str:
+    """The hub's verdict on this plugin, when it says the plugin is behind."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return ""
+    verdict = data.get("plugin") if isinstance(data, dict) else None
+    if not isinstance(verdict, dict) or verdict.get("status") == "current":
+        return ""
+    return str(verdict.get("notice") or "").strip()
+
+
 def _opening_packet(home: Path, program: str, session_id: str, project: str) -> tuple[str, str]:
     ok_mark = _marker(home, program, session_id, "ok")
     down_mark = _marker(home, program, session_id, "down")
@@ -845,7 +884,10 @@ def _opening_packet(home: Path, program: str, session_id: str, project: str) -> 
     if text:
         _save_packet(home, program, project, text)
         _remember(ok_mark, "ok\n")
-        return f"{PACKET_MARK}\n{text}", "packet"
+        notice = _plugin_notice(text)
+        _remember(home / ".rogmem" / "hook-core" / "plugin-verdict.txt", (notice or "current") + "\n")
+        head = f"{PACKET_MARK}\n【rogmem 插件】{notice}\n" if notice else f"{PACKET_MARK}\n"
+        return f"{head}{text}", "packet"
     # A host whose key was taken away gets nothing from the cache either.
     at, cached = _cached_packet(home, program, project) if _enrolled(home, program) else ("", "")
     if cached:
@@ -871,10 +913,13 @@ def handle(payload: dict, *, home: Path, program: str) -> dict:
                 "program": program,
                 "enrolled": bool(known and _enrolled(home, program)),
                 "python": sys.version.split()[0],
+                "plugin": _plugin_version_at(home),
             }
         }
     if program not in _PROGRAMS:
         return {}
+    global _HOME_FOR_VERSION
+    _HOME_FOR_VERSION = home
     session_id = _session_id(payload)
     project = _session_project(home, program, session_id, payload)
     opening = event in {"sessionStart", "SessionStart", "pre_llm_call", "UserPromptSubmit"}

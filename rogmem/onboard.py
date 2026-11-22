@@ -82,20 +82,15 @@ def onboard_prompt(secret: str) -> str:
 
 
 def host_update_prompt() -> str:
-    """Refresh client and host-side plugin. Not a new admission: no ticket, no key.
-
-    This computer already has a door and a remembered identity, so it does not
-    need an entrance policy. Keeping it out of this prompt avoids a ticket mark
-    that no server step would fill.
-    """
+    """Update this computer's rogmem plugin. Not a new admission: no ticket, no key."""
     return (
-        "请把本机的宿主端插件更新到最新：先刷新本机客户端，再给本机所有已支持的宿主重写全局规则和 hook。\n"
+        "请把本机的 rogmem 插件更新到中枢的最新版本。插件包括：宿主钩子、全局规则、Hermes 记忆插件、DSH 插件、本机客户端和本机门口。\n"
         "这不是重新接入。不要新领钥匙，不要改已有钥匙或配置，不要动记忆数据，不要改端口或卷。\n\n"
-        f"本机门口 {DOOR} 已经记住这份中枢的身份 {HUB_MARK}。用它的 /host-bootstrap 刷新客户端，"
-        "不要克隆 git 仓库，不要登录 GitHub，也不要把浏览器会话写进文件或对话。\n"
-        "然后运行 python -m rogmem hosts update --confirm，把本机所有已发现且受支持的宿主的全局规则和 hook 更新到最新。\n"
-        "看不到要更新的宿主时，先运行 python -m rogmem hosts scan --dry-run 列一遍再更新。\n"
-        "规则写在宿主的全局位置，不写进某一个仓库；hook 覆盖同名旧文件；DSH 更新插件。已停用或已拒绝的宿主保持不动，告诉用户去宿主列表处理。\n"
-        "更新完成后回报每个宿主的结果，不要把任何钥匙或原文贴进对话。\n"
-        "不要删除 NAS 上的 rogmem 数据。"
+        f"本机门口 {DOOR} 已经记住这份中枢的身份 {HUB_MARK}。\n"
+        "1. 能运行 python -m rogmem 时，直接运行 python -m rogmem plugin update。它从本机门口取插件、装好、重写本机所有宿主，"
+        "再把每个宿主登记的钩子原样执行一遍，并重启本机门口。\n"
+        f"2. 运行不了时（太旧的客户端没有 plugin 子命令），先从 {DOOR}/host-bootstrap 下载安装器，用当前 Python 运行它刷新客户端，"
+        "再回到第 1 步。不要克隆 git 仓库，不要登录 GitHub，也不要把浏览器会话写进文件或对话。\n"
+        "3. 最后运行 python -m rogmem plugin status，回报插件版本、中枢版本和每个宿主的结果。已停用或已拒绝的宿主保持不动，告诉用户去宿主列表处理。\n"
+        "不要把任何钥匙或原文贴进对话。不要删除 NAS 上的 rogmem 数据。"
     )

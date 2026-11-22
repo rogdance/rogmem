@@ -26,8 +26,10 @@ _SEEDS = (
     "rogmem/__main__.py",
     "rogmem/cli.py",
     "rogmem/admission.py",
+    "rogmem/plugin.py",
     "installer/rogmem_installer.py",
 )
+_VERSION_REL = "rogmem/PLUGIN_VERSION"
 
 
 def package_root() -> Path:
@@ -62,7 +64,10 @@ def bake_bundle(root: Path | None = None, dest: Path | None = None) -> Path:
     base = root or package_root()
     target = dest or (base / "rogmem" / BAKED_NAME)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(_wheel(client_files(base)))
+    files = client_files(base)
+    target.write_bytes(_wheel(files))
+    # The image keeps no checkout to recompute this from, so it keeps the stamp.
+    (target.parent / "PLUGIN_VERSION").write_text(plugin_version_of(files) + "\n", encoding="utf-8")
     return target
 
 
@@ -244,10 +249,25 @@ def _add_payload(root: Path, rel: str, files: dict[str, bytes]) -> None:
         files[name] = child.read_bytes()
 
 
+def plugin_version_of(files: dict[str, bytes]) -> str:
+    """`<series>.<12 hex>` over exactly the files the plugin ships. Moves by itself on any change."""
+    from rogmem.plugin import SERIES
+
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        if name == _VERSION_REL or name.endswith(".test.js"):
+            continue
+        digest.update(name.encode("utf-8") + b"\0")
+        # Line endings are a checkout setting, not a change to the plugin.
+        digest.update(files[name].replace(b"\r\n", b"\n") + b"\0")
+    return f"{SERIES}.{digest.hexdigest()[:12]}"
+
+
 def _wheel(files: dict[str, bytes]) -> bytes:
     payload = dict(files)
     if "installer/__init__.py" not in payload:
         payload["installer/__init__.py"] = b"# package\n"
+    payload[_VERSION_REL] = (plugin_version_of(files) + "\n").encode()
     payload[f"{_DIST_INFO}/METADATA"] = (
         "Metadata-Version: 2.1\n"
         "Name: rogmem-host\n"

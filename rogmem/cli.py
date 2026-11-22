@@ -58,6 +58,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_home(verify)
     verify.add_argument("--program", action="append", dest="programs", help="只检查这些宿主，可重复")
 
+    plugin = sub.add_parser("plugin", help="rogmem 插件：看版本、从中枢更新（钩子、规则、Hermes 记忆、门口一起）")
+    plugin_sub = plugin.add_subparsers(dest="plugin_command")
+    plugin_status = plugin_sub.add_parser("status", help="本机插件版本、中枢版本、每个宿主的钩子是否真能跑")
+    _add_home(plugin_status)
+    plugin_status.add_argument("--no-verify", action="store_true", help="只比版本，不执行钩子")
+    plugin_update = plugin_sub.add_parser("update", help="从本机门口取中枢的插件，装到本机所有宿主并复核")
+    _add_home(plugin_update)
+    plugin_update.add_argument("--keep-door", action="store_true", help="不重启本机门口进程")
+
     history = sub.add_parser("history", help="历史会话预览 / 上传")
     history_sub = history.add_subparsers(dest="history_command")
     preview = history_sub.add_parser("preview", help="预览可导入条数；不上传")
@@ -865,6 +874,7 @@ def hosts_status(args: argparse.Namespace) -> int:
             device_id=identity["device_id"],
             device_name=identity["device_name"],
             bundle_rev=inst.installed_bundle_rev(home),
+            plugin_version=inst.installed_bundle_rev(home),
             hosts=inst.inspect_hosts(home),
         )
     )
@@ -1255,6 +1265,16 @@ def main(argv: list[str] | None = None) -> int:
         return channel_main(args)
     if command == "serve":
         return serve()
+    if command == "plugin":
+        from rogmem import plugin_cli
+
+        home = _home(args)
+        if args.plugin_command == "status":
+            return _emit(plugin_cli.status(home, verify=not args.no_verify))
+        if args.plugin_command == "update":
+            return _emit(plugin_cli.update(home, restart_door=not args.keep_door))
+        parser.parse_args(["plugin", "--help"])
+        return 2
     if command == "hosts":
         action = {
             "scan": hosts_scan,

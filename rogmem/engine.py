@@ -831,6 +831,10 @@ def connect(data: Path, scan: Path) -> None:
     agent_columns = {row[1] for row in con.execute("PRAGMA table_info(agents)")}
     if agent_columns and "capabilities" not in agent_columns:
         con.execute("ALTER TABLE agents ADD COLUMN capabilities TEXT NOT NULL DEFAULT ''")
+    if agent_columns and "plugin_version" not in agent_columns:
+        con.execute("ALTER TABLE agents ADD COLUMN plugin_version TEXT NOT NULL DEFAULT ''")
+    if agent_columns and "plugin_seen_at" not in agent_columns:
+        con.execute("ALTER TABLE agents ADD COLUMN plugin_seen_at TEXT")
     job_columns = {row[1] for row in con.execute("PRAGMA table_info(host_jobs)")}
     if job_columns and "lease_token" not in job_columns:
         con.execute("ALTER TABLE host_jobs ADD COLUMN lease_token TEXT")
@@ -1347,8 +1351,15 @@ def _remember_liveness() -> None:
         pass
 
 
+def _plugin_status(reported: str) -> str:
+    from rogmem import plugin
+
+    return plugin.compare(reported, plugin.version())
+
+
 def health_snapshot() -> dict:
     """Process liveness. No database, no thread pool, so a slow core cannot hide this answer."""
+    from rogmem import plugin
     from rogmem.version import product_version
 
     return {
@@ -1362,6 +1373,7 @@ def health_snapshot() -> dict:
         "distill_concurrency": _LIVE_CONCURRENCY or _concurrency_from_env(),
         "distill_paused": _LIVE_PAUSED,
         "distill_leased": 0,
+        "plugin": plugin.version(),
     }
 
 
@@ -14711,6 +14723,44 @@ def sweep_host_import_jobs(now: str | None = None) -> dict:
     return {"ok": True, "expired": int(expired), "released": int(released), "failed": int(failed)}
 
 
+_PLUGIN_SEEN: dict[str, str] = {}
+_PLUGIN_SEEN_LOCK = threading.Lock()
+
+
+def note_plugin_version(agent_id: str, reported: str) -> None:
+    """Remember the plugin version this host's last call carried.
+
+    The write happens only when the value changes, so a busy host costs nothing and a locked
+    database never turns into a failed call: this is bookkeeping, not a gate.
+    """
+    agent_id = (agent_id or "").strip()
+    reported = (reported or "").strip()[:40]
+    if not agent_id or not reported:
+        return
+    with _PLUGIN_SEEN_LOCK:
+        if _PLUGIN_SEEN.get(agent_id) == reported:
+            return
+    con = db()
+    try:
+        con.execute("PRAGMA busy_timeout=50")
+        try:
+            con.execute(
+                "UPDATE agents SET plugin_version=?, plugin_seen_at=? WHERE id=?",
+                (reported, utcnow(), agent_id),
+            )
+            con.commit()
+        finally:
+            con.execute("PRAGMA busy_timeout=5000")
+    except sqlite3.OperationalError:
+        try:
+            con.rollback()
+        except sqlite3.Error:
+            pass
+        return
+    with _PLUGIN_SEEN_LOCK:
+        _PLUGIN_SEEN[agent_id] = reported
+
+
 def set_agent_capabilities(*, agent_id: str, capabilities: str) -> dict:
     caps = (capabilities or "").strip()[:200]
     with LOCK:
@@ -15101,7 +15151,8 @@ def list_connected_hosts(
     stored = []
     for row in con.execute(
         """SELECT id, device_id, device_name, program, display_name, status, pubkey,
-                  created_at, connected_at, last_used, COALESCE(call_count, 0) AS call_count
+                  created_at, connected_at, last_used, COALESCE(call_count, 0) AS call_count,
+                  COALESCE(plugin_version, '') AS plugin_version, plugin_seen_at
            FROM agents
            WHERE status IN ('待放行', '待领取', '启用', '停用')
            ORDER BY device_name, program, id"""
@@ -15144,6 +15195,9 @@ def list_connected_hosts(
                 "session_count": sessions.get(item["id"], {}).get("sessions", 0),
                 "history_count": sessions.get(item["id"], {}).get("history", 0),
                 "call_count": int(item.get("call_count") or 0),
+                "plugin_version": item.get("plugin_version") or "",
+                "plugin_seen_at": item.get("plugin_seen_at") or "",
+                "plugin_status": _plugin_status(item.get("plugin_version") or ""),
             }
         )
     facets = {

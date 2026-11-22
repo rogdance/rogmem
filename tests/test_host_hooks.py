@@ -752,12 +752,13 @@ def test_refresh_host_bundle_rewrites_rules_and_hook(tmp_path):
     assert refresh_host_bundle(Path.home())["ok"] is False
 
 
-def test_host_bundle_rev_is_content_addressed():
+def test_host_bundle_rev_is_the_plugin_version():
+    from rogmem import plugin
     from rogmem.host_rules import HOST_BUNDLE_REV, _bundle_rev
 
-    assert HOST_BUNDLE_REV == _bundle_rev()
-    assert len(HOST_BUNDLE_REV) == 12
-    assert all(ch in "0123456789abcdef" for ch in HOST_BUNDLE_REV)
+    assert HOST_BUNDLE_REV == _bundle_rev() == plugin.version()
+    series, digest = HOST_BUNDLE_REV.split(".")
+    assert series == str(plugin.SERIES) and len(digest) == 12
 
 
 def test_hosts_update_command_rewrites_then_reports(tmp_path):

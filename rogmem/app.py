@@ -29,6 +29,9 @@ _GATE_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_pr
 _CORE_DEADLINE = 8
 _COOKIE = "rogmem_admin"
 CURRENT = contextvars.ContextVar("agent", default=None)
+# The plugin version the calling host sent. Empty means an old plugin, or a call that is not a hook.
+PLUGIN_REPORTED = contextvars.ContextVar("plugin_reported", default="")
+PLUGIN_HEADER = "X-Rogmem-Plugin"
 
 
 def _secret() -> bytes:
@@ -52,7 +55,7 @@ def _admin_ok(request: Request) -> bool:
 
     免密登录默认开启，首次进入不检查口令。用户在基础设置里设了密码，或关掉免密，
     管理写操作才检查口令。临时目录里的 ROGMEM_NO_PASSWORD=1 仍是测试口。
-    /healthz、/mcp、/host-bootstrap、/host-client.whl 不经过这里。
+    /healthz、/plugin.json、/mcp、/host-bootstrap、/host-client.whl 不经过这里。
     """
     if _password_bypass():
         return True
@@ -259,6 +262,14 @@ async def host_client_whl(_request: Request) -> Response:
 
     payload = await asyncio.to_thread(bundle_bytes)
     return _client_response(payload)
+
+
+@mcp.custom_route("/plugin.json", methods=["GET"])
+async def plugin_manifest(_request: Request) -> Response:
+    """The plugin version this hub serves. Public: it says nothing a host could not read from the wheel."""
+    from rogmem import plugin
+
+    return JSONResponse(plugin.hub_manifest(engine.health_snapshot().get("hub") or ""), headers={"Cache-Control": "no-store"})
 
 
 @mcp.custom_route("/host-bootstrap", methods=["GET"])
@@ -1672,7 +1683,37 @@ async def core(budget: int = 0, project: str = "", before: str = "") -> str:
     # 读取计数靠请求上下文里的 CURRENT。run_in_executor 不带这个上下文，
     # 所以计数改在工具这一层发出，走 to_thread：既拿到智能体，也不把写库压回事件循环。
     await asyncio.to_thread(_count_memory_read)
-    return result
+    return _with_plugin_verdict(result)
+
+
+def _with_plugin_verdict(result: str) -> str:
+    """Every packet says whether this host's plugin is the hub's. Behind → the agent tells the person.
+
+    Only a call that carries the plugin header gets a verdict: an MCP tool call made by the
+    agent itself carries none, and the hook's own report already rode on the opening call.
+    """
+    from rogmem import plugin
+
+    reported = PLUGIN_REPORTED.get()
+    agent = CURRENT.get()
+    if not reported or agent is None:
+        return result
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    latest = plugin.version()
+    status = plugin.compare(reported, latest)
+    payload["plugin"] = {
+        "installed": reported,
+        "latest": latest,
+        "status": status,
+        "update": plugin.UPDATE_COMMAND,
+        "notice": plugin.notice(status, reported, latest, str(agent["program"] or "")),
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -1895,6 +1936,15 @@ class BearerGate:
                     engine.note_viewer_peer(str(agent["device_id"] or ""), peer)
                 except Exception:
                     pass
+                reported = headers.get(PLUGIN_HEADER.lower(), "")
+                PLUGIN_REPORTED.set(reported)
+                if reported:
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            _GATE_POOL, engine.note_plugin_version, str(agent["id"]), reported
+                        )
+                    except Exception:
+                        pass
             if agent is None:
                 await JSONResponse({"error": "未授权"}, status_code=401)(scope, receive, send)
                 return

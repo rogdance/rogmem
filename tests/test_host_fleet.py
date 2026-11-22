@@ -310,7 +310,7 @@ def test_host_management_offers_a_plugin_update_prompt(tmp_path, monkeypatch):
     assert f"var bundleRev = {json.dumps(HOST_BUNDLE_REV)};" in page
     assert str(HOST_BUNDLE_REV) in page
     assert "rogmem-host-bundle-seen" in page
-    assert "python -m rogmem hosts update --confirm" in page
+    assert "python -m rogmem plugin update" in page
     # 更新提示不能作为 <p class='note'> 落在接入弹窗之前，保持既有版式约定
     assert "<p class='note'>" not in page.split('id="add-host-modal"', 1)[0]
 

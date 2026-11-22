@@ -2006,6 +2006,12 @@ tr:last-child td {{ border-bottom: 0; }}
 th {{ color: var(--text-muted); font-size: 13px; font-weight: 500; background: var(--surface-subtle); }}
 tr:hover td {{ background: var(--surface-hover); }}
 #host-fleet td.ops {{ white-space: nowrap; vertical-align: middle; }}
+#host-fleet td.plugin {{ white-space: nowrap; }}
+#host-fleet td.plugin code {{ font-size: 12px; opacity: .8; }}
+#host-fleet td.plugin .badge {{ display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 12px; }}
+#host-fleet td.plugin-current .badge {{ opacity: .7; }}
+#host-fleet td.plugin-outdated .badge, #host-fleet td.plugin-unreported .badge {{ background: var(--warning-bg); }}
+#host-fleet td.plugin-incompatible .badge {{ background: var(--danger-bg); color: var(--danger-text); }}
 #host-fleet .host-actions {{ display: inline-flex; align-items: center; gap: 8px; }}
 #host-fleet .job-status {{ display: block; max-width: 16em; margin-top: 2px; font-size: 12px; line-height: 1.45; white-space: normal; }}
 #host-fleet .job-status:empty {{ display: none; }}
@@ -5748,9 +5754,8 @@ _HOST_FLEET_SCRIPT = r"""
   }
   function markBundleSeen() {
     try { localStorage.setItem("rogmem-host-bundle-seen", String(bundleRev)); } catch (err) {}
-    if (updateNote) updateNote.hidden = true;
   }
-  if (updateNote && bundleSeen() !== String(bundleRev)) updateNote.hidden = false;
+  // The banner is decided on the server from what each host reported, not from this browser.
   if (updateButton && updateModal) {
     document.getElementById("update-hosts-close").onclick = function () { updateModal.hidden = true; };
     var updatePrompt = document.getElementById("update-hosts-prompt");
@@ -6079,12 +6084,14 @@ _HOST_COLUMNS = (
     "最近活跃",
     "累计录入会话数",
     "累计调用次数",
+    "插件版本",
     "待导入会话数",
     "操作",
 )
 
 
 _HOST_TIPS = {
+    "插件版本": "这台电脑上这个宿主最近一次调用时报上来的 rogmem 插件版本（钩子、规则、Hermes 记忆、本机门口是同一个版本）。和中枢不一致就是落后，点「更新宿主插件」把提示贴给那台电脑上的任意宿主。「未上报」是旧插件，或钩子在那台电脑上没跑起来。",
     "设备名": "按设备名筛选各台电脑上的宿主。列表里设备名写在智能体名中。当前电脑上的宿主，智能体名后面会标（本机），只用于显示，不会写进设备名。认不出当前电脑时，仍然全部列出，只是不加这个标识。",
     "接入状态": "未安装、已发现未接入、待确认、待授权、已接入；已经在列表里的显示待放行、待领取、启用或停用。确认之前不会写入。没领到密钥不算连上。申请授权后，在这一行通过授权。",
     "接入时间": "接入时间是该智能体第一次领取授权的时间。更早启用、当时没单独记下的，先显示申请时间。",
@@ -6100,6 +6107,30 @@ def _tip(label: str, tip: str = "") -> str:
     if not tip:
         return esc(label)
     return f"<span class='tip' title='{esc(tip)}'>{esc(label)}</span>"
+
+
+_PLUGIN_LABELS = {"current": "最新", "outdated": "落后", "incompatible": "须更新", "unreported": "未上报"}
+
+
+def _plugin_cell(row: dict) -> str:
+    """The plugin this host last reported, against the hub's. Only enabled hosts are judged."""
+    if row.get("status") != "启用":
+        return "<td>—</td>"
+    status = str(row.get("plugin_status") or "unreported")
+    label = _PLUGIN_LABELS.get(status, status)
+    reported = str(row.get("plugin_version") or "")
+    seen = str(row.get("plugin_seen_at") or "")
+    title = f" title='最近上报 {esc(seen)}'" if seen else ""
+    shown = f"<code>{esc(reported)}</code> " if reported else ""
+    return f"<td class='plugin plugin-{esc(status)}'{title}>{shown}<span class='badge'>{esc(label)}</span></td>"
+
+
+def plugin_fleet_summary(rows: list[dict]) -> dict:
+    """How many enabled hosts run the hub's plugin. Drives the banner, not a browser flag."""
+    enabled = [row for row in rows if row.get("status") == "启用"]
+    behind = [row for row in enabled if (row.get("plugin_status") or "unreported") != "current"]
+    devices = sorted({str(row.get("device_base") or row.get("device_name") or "") for row in behind} - {""})
+    return {"enabled": len(enabled), "behind": len(behind), "devices": devices}
 
 
 def _host_head() -> str:
@@ -6259,10 +6290,12 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
         else:
             imported = imported_by_program.get(program, int((report or {}).get("imported") or 0))
         fleet_rows.append(
-            "<tr data-device-id='{id}' data-device-name='{name}' data-program='{program}' data-imported='{imported}' data-local='{local}'>"
+            "<tr data-device-id='{id}' data-device-name='{name}' data-program='{program}' data-imported='{imported}' data-local='{local}' data-plugin='{plugin_status}'>"
             "<td class='agent-name' data-base='{agent}'>{agent}{mark}</td>"
             "{access}<td>{connected}</td><td>{active}</td>"
-            "<td>{sessions}</td><td>{calls}</td>{progress}<td class='ops'>{op}</td></tr>".format(
+            "<td>{sessions}</td><td>{calls}</td>{plugin}{progress}<td class='ops'>{op}</td></tr>".format(
+                plugin_status=esc(row.get("plugin_status") or ""),
+                plugin=_plugin_cell(row),
                 id=esc(row.get("device_id") or ""),
                 name=base,
                 program=esc(program),
@@ -6291,7 +6324,7 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
                 f"<td class='agent-name' data-base='{esc(program)}'>{esc(program)}</td>"
                 f"{_status_cell(str(report.get('access') or '—'), detail)}"
                 "<td>—</td>"
-                "<td>—</td><td>—</td><td>—</td>"
+                "<td>—</td><td>—</td><td>—</td><td>—</td>"
                 f"{_import_cell(report, imported)}"
                 f"<td class='ops'>{op}</td></tr>"
             )
@@ -6299,8 +6332,11 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
         fleet_rows.append(f"<tr><td class='empty' colspan='{len(_HOST_COLUMNS)}'>还没有接入的宿主。</td></tr>")
     viewer = "known" if fleet.get("viewer_known") else "unknown"
     from rogmem.engine import HOST_PROGRAMS, hub_id
-    from rogmem.host_rules import HOST_BUNDLE_REV
+    from rogmem.plugin import version as plugin_version
     from rogmem.onboard import GRANT_MARK, HUB_MARK, host_update_prompt, onboard_prompt
+
+    HOST_BUNDLE_REV = plugin_version()
+    summary = plugin_fleet_summary(fleet.get("rows") or [])
 
     hub = hub_id()
     prompt_json = json.dumps(onboard_prompt(GRANT_MARK).replace(HUB_MARK, hub), ensure_ascii=False)
@@ -6316,7 +6352,7 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
 <button type="button" id="update-hosts" class="quiet row-end">更新宿主插件</button>
 <button type="button" id="add-host">添加宿主</button>
 </form>
-<div class="note" id="update-hosts-note" hidden>宿主端插件有新版本（{HOST_BUNDLE_REV}）。点「更新宿主插件」，复制一段提示词贴给本机任意一个已安装的宿主，就能把本机所有已支持的宿主一起更新。</div>
+<div class="note" id="update-hosts-note"{'' if summary['behind'] else ' hidden'}>中枢的 rogmem 插件是 <code>{HOST_BUNDLE_REV}</code>。{summary['behind']} 个已启用宿主不是这个版本{('（' + '、'.join(esc(name) for name in summary['devices']) + '）') if summary['devices'] else ''}。点「更新宿主插件」，把提示贴给那台电脑上任意一个宿主；或在那台电脑上运行 <code>python -m rogmem plugin update</code>。</div>
 <div class="host-fleet-wrap" style="overflow-x:auto;width:100%;max-width:calc(100vw - 2rem);box-sizing:border-box;-webkit-overflow-scrolling:touch;"><table id="host-fleet" data-viewer="{viewer}" style="min-width:860px;"><tr>{_host_head()}</tr>{''.join(fleet_rows)}</table></div>
 <div id="add-host-modal" class="modal" hidden>
 <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="add-host-title">

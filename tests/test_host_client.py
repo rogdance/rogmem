@@ -110,9 +110,11 @@ def test_a_direct_hub_is_handed_to_the_login_session(tmp_path, monkeypatch):
         assert "http://hub.example" in text
         assert "Restart=on-failure" in text
     else:
-        text = (tmp_path / ".rogmem/channel-service.cmd").read_text(encoding="utf-8")
+        launcher = "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/rogmem-channel.vbs"
+        text = (tmp_path / launcher).read_text(encoding="utf-8")
         assert "--session" in text
         assert "http://hub.example" in text
+        assert "schtasks" not in text
     assert "rm_" not in text
     assert "cookie" not in text.lower()
 
@@ -134,7 +136,11 @@ def test_other_systems_keep_the_same_login_door(tmp_path):
     written = inst.write_session_unit(tmp_path, linux)
     assert written.name == "rogmem-channel.service"
     windows = inst.session_unit("Windows", "http://hub.example", r"C:\Python\python.exe", r"C:\work")
-    assert windows["kind"] == "task"
+    # The login session's Startup folder: no Task Scheduler (often blocked), no console window.
+    assert windows["kind"] == "startup"
+    assert windows["path"].endswith("Startup/rogmem-channel.vbs")
+    assert "schtasks" not in windows["text"]
+    assert ", 0, False" in windows["text"]
     assert "--session" in windows["text"]
     assert "http://hub.example" in windows["text"]
     assert "cookie" not in windows["text"].lower()

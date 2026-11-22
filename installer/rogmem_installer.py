@@ -1549,24 +1549,23 @@ def refresh_host_bundle(home: Path, programs: list[str] | None = None, allow_rea
     """
     if _real_user_home(Path(home)) and not allow_real:
         return {"ok": False, "refused": "real-home", "rev": 0, "programs": [], "rules": [], "hooks": []}
-    from rogmem.host_rules import HOST_BUNDLE_REV
+    from rogmem import plugin
 
     selected = chosen_hosts(home, programs)
     rules = install_global_rules(home, allow_real=True, programs=programs)
     hooks = install_host_hooks(home, programs=programs, allow_real=True)
+    if "Hermes" in selected and _hermes_memory_installed(home):
+        # The memory provider is part of the plugin: an update refreshes it in place.
+        _install_hermes_memory(home)
     try:
-        marker = Path(home) / ".rogmem" / "host-bundle.json"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(
-            json.dumps({"rev": HOST_BUNDLE_REV, "programs": selected}, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        plugin.record_installed(Path(home), selected, _hook_interpreter())
     except OSError:
         pass
     return {
         "ok": True,
         "refused": "",
-        "rev": HOST_BUNDLE_REV,
+        "rev": plugin.version(),
+        "version": plugin.version(),
         "programs": selected,
         "rules": rules,
         "hooks": hooks,
@@ -1574,14 +1573,14 @@ def refresh_host_bundle(home: Path, programs: list[str] | None = None, allow_rea
 
 
 def installed_bundle_rev(home: Path) -> str:
-    """The host-side plugin rev this computer last installed. Empty when it never refreshed."""
-    try:
-        loaded = json.loads((Path(home) / ".rogmem" / "host-bundle.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(loaded, dict):
-        return ""
-    return str(loaded.get("rev") or "")
+    """The plugin version this computer last installed. Empty when it never refreshed."""
+    from rogmem import plugin
+
+    return str(plugin.installed(Path(home)).get("version") or "")
+
+
+def _hermes_memory_installed(home: Path) -> bool:
+    return (hermes_home(home) / "plugins" / "rogmem" / "__init__.py").is_file()
 
 
 def onboard_prompt(secret: str) -> str:
@@ -1833,7 +1832,9 @@ class _Proxy(BaseHTTPRequestHandler):
     def _forward(self):
         path = self.path.split("?", 1)[0]
         if path == "/client/whoami":
-            self._send_json(viewer_identity(self.home))
+            from rogmem import plugin
+
+            self._send_json({**viewer_identity(self.home), "plugin": plugin.version()})
             return
         if path == "/client/hosts":
             self._send_json(cached_local_host_scan(self.home))
@@ -2136,8 +2137,34 @@ def session_unit(system: str, origin: str, executable: str, workdir: str, hub: s
         )
         return {"kind": "systemd", "path": ".config/systemd/user/rogmem-channel.service", "text": text}
     if system == "Windows":
-        script = "\r\n".join(["@echo off", " ".join(f'"{part}"' for part in command), ""])
-        return {"kind": "task", "name": "rogmem-channel", "path": ".rogmem/channel-service.cmd", "text": script}
+        # Windows: the login session's Startup folder, not the Task Scheduler. schtasks is
+        # blocked on many managed machines; a hidden launcher in Startup is per-user, needs no
+        # admin, survives reboots and opens no console window. pythonw keeps the door windowless.
+        exe = executable
+        windowless = Path(executable).with_name("pythonw.exe")
+        if windowless.is_file():
+            exe = str(windowless)
+        argv = [exe, *command[1:]]
+        line = " ".join(f'""{part}""' for part in argv)
+        script = "\r\n".join(
+            [
+                "' rogmem local door (127.0.0.1:18780). Written by the rogmem plugin. No credentials here.",
+                "Option Explicit",
+                "Dim sh",
+                'Set sh = CreateObject("WScript.Shell")',
+                f'sh.CurrentDirectory = "{workdir}"',
+                f'sh.Run "{line}", 0, False',
+                "",
+            ]
+        )
+        return {
+            "kind": "startup",
+            "name": "rogmem-channel",
+            "path": "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/rogmem-channel.vbs",
+            "text": script,
+            "argv": argv,
+            "workdir": workdir,
+        }
     return {"kind": ""}
 
 
@@ -2145,7 +2172,7 @@ def write_session_unit(home: Path, unit: dict) -> Path:
     root = Path(home)
     if unit.get("kind") == "launchd":
         return write_session_service(root, unit["plist"])
-    if unit.get("kind") in {"systemd", "task"}:
+    if unit.get("kind") in {"systemd", "task", "startup"}:
         path = root / unit["path"]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(unit["text"], encoding="utf-8")
@@ -2194,6 +2221,8 @@ def _session_holding(unit: dict) -> bool:
             text=True,
         )
         return result.returncode == 0 and "Running" in result.stdout
+    if unit.get("kind") == "startup":
+        return bool(probe_origin(f"http://127.0.0.1:{FIXED_FORWARD_PORT}", "").get("ok"))
     return False
 
 
@@ -2213,6 +2242,22 @@ def start_session_unit(unit: dict, path: Path) -> bool:
             ).returncode
             == 0
         )
+    elif unit.get("kind") == "startup":
+        # This login: start the same argv the Startup launcher runs at the next one, detached.
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            subprocess.Popen(
+                unit["argv"],
+                cwd=unit.get("workdir") or None,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+                close_fds=True,
+            )
+            spawned = True
+        except OSError:
+            spawned = False
     elif unit.get("kind") == "task":
         task = str(path)
         if " " in task:
@@ -3164,8 +3209,11 @@ def _install_hermes_memory(home: Path, url: str = "", token: str = "", device_id
     """
     source = Path(__file__).resolve().parents[1] / "rogmem" / "hermes_memory.py"
     plugin_text = source.read_text(encoding="utf-8")
+    from rogmem import plugin
+
     manifest = (
-        "name: rogmem\nversion: 1.0.0\ndescription: ROGMEM memory for Hermes\nprotocol_version: 1\nruntime: hermes_memory_provider\n"
+        f"name: rogmem\nversion: {plugin.version() or '1.0.0'}\ndescription: ROGMEM memory for Hermes\n"
+        "protocol_version: 1\nruntime: hermes_memory_provider\n"
     )
     root = hermes_home(home)
     _retire_other_memory_accounts(root)

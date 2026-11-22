@@ -24,6 +24,15 @@ except ImportError:  # running inside the rogmem repo, or before Hermes imports 
         pass
 
 
+def _plugin_version() -> str:
+    """The rogmem plugin this provider was installed with. Copied into Hermes, so read from the manifest."""
+    try:
+        data = json.loads((Path.home() / ".rogmem" / "plugin.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("version") or "").strip() if isinstance(data, dict) else ""
+
+
 def stable_seq(session_id: str, role: str, text: str) -> int:
     """Same utterance, same seq, wherever it is read from."""
     digest = hashlib.sha256(f"{session_id}\n{role}\n{text}".encode()).digest()
@@ -612,6 +621,9 @@ class RogmemMemoryProvider(MemoryProvider):
         }
         if device:
             headers["X-Rogmem-Device"] = device
+        plugin = _plugin_version()
+        if plugin:
+            headers["X-Rogmem-Plugin"] = plugin
         return _post_json(
             f"{url}/mcp",
             {
