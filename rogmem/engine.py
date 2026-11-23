@@ -28,7 +28,7 @@ from pathlib import Path
 import jieba
 import numpy as np
 
-from rogmem import crypto
+from rogmem import crypto, document_view
 from rogmem.cost import bind_source, charging
 from rogmem.exchange import (
     Exchange,
@@ -13847,7 +13847,15 @@ def source_detail(source_id: str) -> dict | None:
         mate = dict(other) if other else None
     source = _with_host_names(row)
     source["_cited"] = cited_crystals(source_id)
-    source["_retained"] = _uncovered_sentences(row["body"] or "", [item.get("quote") or "" for item in statements])
+    body = row["body"] or ""
+    # 整本书进来时不做全文 O(句数 × 引文数) 对账：一眼看得出的结论不值得
+    # 把请求线程和事件循环一起按住。体量预算统一由 document_view 管。
+    scan_body = body if len(body) <= document_view.DETAIL_SCAN_LIMIT else ""
+    source["_detail_truncated"] = bool(body) and not bool(scan_body)
+    source["_retained"] = (
+        _uncovered_sentences(scan_body, [item.get("quote") or "" for item in statements])
+        if scan_body else []
+    )
     chunks = [
         dict(item)
         for item in db().execute(
@@ -13856,10 +13864,13 @@ def source_detail(source_id: str) -> dict | None:
         )
     ]
     source["_uncovered_chunks"] = [item for item in chunks if not item["cited"]]
-    source["_fate"] = _source_fate(
-        row["body"] or "",
-        statements,
-        row["status"] in {ST_CRYSTAL, ST_NO_CRYSTAL, "已蒸馏", "已萃取", "覆盖完成"},
+    source["_fate"] = (
+        _source_fate(
+            scan_body,
+            statements,
+            row["status"] in {ST_CRYSTAL, ST_NO_CRYSTAL, "已蒸馏", "已萃取", "覆盖完成"},
+        )
+        if scan_body else []
     )
     source["_origin"] = resolve_source_origin(source_id)
     cost = distill_cost_for(source_id, turn_id=str(source.get("turn_id") or ""))

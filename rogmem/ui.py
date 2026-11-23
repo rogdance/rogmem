@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
-from rogmem import file_preview
+from rogmem import document_view, file_preview
 from rogmem.device_identity import display_device_name
 from rogmem.progress import LAMP_WORD as _LAMP_WORD
 from rogmem.progress import flow_states, processing_filters, stage_note as _stage_note, vector_state
@@ -4645,7 +4645,9 @@ def source_detail(row: dict, statements: list[dict], mate: dict | None, origin: 
         return f"<a class='{'on' if part == name else ''}' href='{href}'>{label}</a>"
 
     if part == "preview":
-        switched = file_preview.preview_body(row["id"], str(row.get("filename") or ""))
+        switched = file_preview.preview_body(
+            row["id"], str(row.get("filename") or ""), int(row.get("_file_size") or 0)
+        )
     elif part == "text":
         switched = _marked_body(row, statements)
     else:
@@ -5634,16 +5636,24 @@ def _revision_item(crystal_id: str, item: dict, index: int = 0, name: str = "") 
 
 def _marked_body(row: dict, statements: list[dict]) -> str:
     body = row.get("body") or ""
+    limit = document_view.TEXT_RENDER_LIMIT
+    truncated = len(body) > limit
+    shown = body[:limit] if truncated else body
     cite = row.get("_cite") or ""
     quote = ""
     for item in statements:
         if item.get("id") == cite:
             quote = item.get("quote") or ""
             break
-    if not cite or not quote or quote not in body:
-        return f"<pre class='src-body'>{esc(body)}</pre>"
-    pre, _, post = body.partition(quote)
-    return f"<pre class='src-body'>{esc(pre)}<mark id='cite-{esc(cite)}'>{esc(quote)}</mark>{esc(post)}</pre>"
+    note = (
+        "<p class='note'>这份材料正文超过 " + str(limit)
+        + " 字符，文本解析只显示开头，避免整本载入拖垮页面；完整内容请用「文件预览」按片查看，或下载原文件。</p>"
+        if truncated else ""
+    )
+    if not cite or not quote or quote not in shown:
+        return f"<pre class='src-body'>{esc(shown)}</pre>" + note
+    pre, _, post = shown.partition(quote)
+    return f"<pre class='src-body'>{esc(pre)}<mark id='cite-{esc(cite)}'>{esc(quote)}</mark>{esc(post)}</pre>" + note
 
 
 def _origin_links_html(item: dict) -> str:

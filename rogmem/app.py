@@ -20,7 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from rogmem import auth, cost, engine, file_preview, rate_limit, ui
+from rogmem import auth, cost, document_view, engine, file_preview, rate_limit, ui
 from rogmem.version import product_version
 
 mcp = FastMCP("rogmem", stateless_http=True, json_response=True, host="0.0.0.0")
@@ -671,47 +671,64 @@ async def admin_source(request: Request) -> Response:
     denied = _guard(request)
     if denied:
         return denied
-    detail = engine.source_detail(request.path_params["sid"])
+    sid = request.path_params["sid"]
+    # 详情页要读全文、算覆盖与命运；放进工作线程，慢材料不能按住事件循环。
+    detail = await asyncio.to_thread(engine.source_detail, sid)
     if not detail:
         return HTMLResponse("没有这条", status_code=404)
     origin = request.query_params.get("from", "")
     source = detail["source"]
     source["_part"] = request.query_params.get("part", "")
     source["_cite"] = request.query_params.get("cite", "")
+    source["_file_size"] = await asyncio.to_thread(_source_file_size, sid)
     return HTMLResponse(ui.source_detail(source, detail["statements"], detail["mate"], origin))
+
+
+def _source_file_path(sid: str) -> Path | None:
+    """把 source id 解析到扫描目录里的原件。只认文件资料与白名单后缀。"""
+    row = engine.db().execute(
+        "SELECT kind, filename FROM sources WHERE id=?", (sid,)
+    ).fetchone()
+    if row is None or (row["kind"] or "") != "file":
+        return None
+    filename = Path(str(row["filename"] or "")).name
+    if not filename or file_preview.suffix_of(filename) not in engine.accepted_suffixes():
+        return None
+    root = engine.active_scan()
+    if root is None:
+        return None
+    base = root.resolve()
+    target = (base / filename).resolve()
+    if not target.is_relative_to(base) or not target.is_file():
+        return None
+    return target
+
+
+def _source_file_size(sid: str) -> int:
+    target = _source_file_path(sid)
+    try:
+        return target.stat().st_size if target else 0
+    except OSError:
+        return 0
 
 
 @mcp.custom_route("/admin/api/sources/{sid}/file", methods=["GET"])
 async def source_file_bytes(request: Request) -> Response:
-    """文件资料的原始字节。预览、新窗口打开、下载共用这一处。
-
-    原件留在扫描目录里，库里只存文件名。只认 kinds=file 且后缀在白名单内的
-    记录，并把拼接后的路径钉在扫描目录内，避免借文件名读别处的文件。
-    """
+    """文件资料的原始字节。预览、新窗口打开、下载共用这一处。"""
     denied = _guard(request)
     if denied:
         return denied
     sid = str(request.path_params.get("sid") or "")
 
     def read() -> tuple[str, bytes, str] | None:
-        row = engine.db().execute(
-            "SELECT kind, filename FROM sources WHERE id=?", (sid,)
-        ).fetchone()
-        if row is None or (row["kind"] or "") != "file":
+        target = _source_file_path(sid)
+        if target is None or target.stat().st_size > engine.DOCUMENT_MAX_BYTES:
             return None
-        filename = Path(str(row["filename"] or "")).name
-        if not filename or file_preview.suffix_of(filename) not in engine.accepted_suffixes():
-            return None
-        root = engine.active_scan()
-        if root is None:
-            return None
-        base = root.resolve()
-        target = (base / filename).resolve()
-        if not target.is_relative_to(base) or not target.is_file():
-            return None
-        if target.stat().st_size > engine.DOCUMENT_MAX_BYTES:
-            return None
-        return filename, target.read_bytes(), file_preview.mime_for(filename)
+        media = file_preview.mime_for(target.name)
+        if media.startswith("text/") and "charset=" in media:
+            # 原件可能是 GBK：只改 charset 声明，不改字节，下载仍是原始文件。
+            media = media.split(";", 1)[0] + "; charset=" + document_view.sniff_encoding(target)
+        return target.name, target.read_bytes(), media
 
     found = await asyncio.to_thread(read)
     if found is None:
@@ -724,6 +741,30 @@ async def source_file_bytes(request: Request) -> Response:
         "Cache-Control": "private, no-store",
     }
     return Response(data, media_type=media, headers=headers)
+
+
+@mcp.custom_route("/admin/api/sources/{sid}/text-window", methods=["GET"])
+async def source_text_window(request: Request) -> Response:
+    """大文件按片读取：一次只把一片读进内存并发给浏览器。"""
+    denied = _guard(request)
+    if denied:
+        return denied
+    sid = str(request.path_params.get("sid") or "")
+    offset = request.query_params.get("offset", "0")
+    limit = request.query_params.get("limit", str(document_view.WINDOW_BYTES))
+
+    def read() -> dict | None:
+        target = _source_file_path(sid)
+        if target is None or target.stat().st_size > engine.DOCUMENT_MAX_BYTES:
+            return None
+        if file_preview.suffix_of(target.name) not in document_view.TEXT_SUFFIXES:
+            return None
+        return document_view.read_window(target, offset, limit)
+
+    found = await asyncio.to_thread(read)
+    if found is None:
+        return JSONResponse({"error": "找不到这份文件的原件"}, status_code=404)
+    return JSONResponse(found)
 
 
 @mcp.custom_route("/admin/api/crystals/nav", methods=["GET"])
