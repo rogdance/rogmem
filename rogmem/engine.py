@@ -604,10 +604,15 @@ def host_scan_reconciliation() -> dict[tuple[str, str], int]:
     而本机 importable 数的是原始行。拿行数减身份数，会把同源重复行永远算成待导入。
     这里返回与 importable 同口径的核销行数，让两边可以相减。没有完成作业时返回空，
     调用方退回账本口径，升级前的老设备不会被放大数字。
+
+    租约过期重试时，客户端会把整份历史从头再传一遍，计数器因此累加两轮甚至三轮；
+    不归一化的话核销行数会翻倍，之后新增的会话很久都不会被算成待导入。按认领次数
+    attempts 归一化，得到的才是「这一轮扫描了多少原始行」。归一化后偏小也不要紧，
+    前端还会和账本身份数取最大值，不会把已经核销的条目算回去。
     """
     out: dict[tuple[str, str], int] = {}
     for row in db().execute(
-        """SELECT device_id, program, posted, duplicates, refused
+        """SELECT device_id, program, posted, duplicates, refused, attempts
              FROM host_jobs
             WHERE status='completed' AND kind='history_import'
             ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC"""
@@ -615,11 +620,13 @@ def host_scan_reconciliation() -> dict[tuple[str, str], int]:
         key = (str(row["device_id"] or ""), str(row["program"] or ""))
         if key in out:
             continue
-        out[key] = (
+        rows = (
             int(row["posted"] or 0)
             + int(row["duplicates"] or 0)
             + int(row["refused"] or 0)
         )
+        attempts = max(1, int(row["attempts"] or 1))
+        out[key] = round(rows / attempts)
     return out
 
 

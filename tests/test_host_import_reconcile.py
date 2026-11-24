@@ -368,3 +368,30 @@ def test_reconciled_contract_is_rendered_and_refreshed(tmp_path, monkeypatch):
     assert ">2<" in ui._import_cell({"importable": 7}, 3, confirmed=3, refused=0, reconciled=5)
     assert ">0<" in ui._import_cell({"importable": 5}, 3, confirmed=2, refused=1, reconciled=5)
     assert ">7<" in ui._import_cell({"importable": 10}, 3, reconciled=None)
+
+
+def test_retried_job_does_not_inflate_reconciled(tmp_path, monkeypatch):
+    """租约重试把整份历史再传一遍，计数器翻倍；归一化后才能看见之后新增的会话。"""
+    engine = _open(tmp_path, monkeypatch)
+    agent = _agent(engine, "dev-retry", "WorkBuddy")
+    base = _turns("retry", 4)
+    turns = base + [dict(base[0])]  # 5 行原文，4 个身份
+    _report(engine, "WorkBuddy", 5)
+    _run_job(engine, agent, "WorkBuddy", turns, "retry-1")
+    assert _row(engine, "dev-retry")["confirmed"] == 4
+    assert engine.host_scan_reconciliation()[("dev-retry", "WorkBuddy")] == 5
+
+    # 模拟租约过期重试：同一作业把整份历史上传了两轮，计数器累加，attempts=2。
+    con = engine.db()
+    con.execute(
+        """UPDATE host_jobs
+              SET posted=posted*2, duplicates=duplicates*2,
+                  refused=refused*2, attempts=2"""
+    )
+    con.commit()
+    assert engine.host_scan_reconciliation()[("dev-retry", "WorkBuddy")] == 5
+    assert ">0<" in _pending_span(engine, "dev-retry")
+
+    # 之后新扫到 3 行：不能因为翻倍的旧计数把它们吞掉。
+    _report(engine, "WorkBuddy", 8)
+    assert ">3<" in _pending_span(engine, "dev-retry")
