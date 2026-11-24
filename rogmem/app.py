@@ -938,6 +938,9 @@ async def hosts_progress(request: Request) -> Response:
                     "device_id": row.get("device_id") or "",
                     "program": row.get("program") or "",
                     "imported": int(row.get("history_count") or 0),
+                    # None = 这台设备还没有对账账本，前端退回旧口径；有账本时按身份对账。
+                    "confirmed": row.get("confirmed"),
+                    "refused": int(row.get("refused") or 0),
                 }
                 for row in fleet.get("rows") or []
             ]

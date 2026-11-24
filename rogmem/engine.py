@@ -545,6 +545,54 @@ def _keep_instant(con: sqlite3.Connection, table: str, clock: str, dest: str) ->
     )
 
 
+def _backfill_host_import_receipts(con: sqlite3.Connection) -> None:
+    """升级老库一次：把中枢里已存在的 sources 认成「已确认在库」。
+
+    只在账本完全为空时跑；重复启动不重写、不改 sources、不删任何记忆。
+    没有这一步，升级当天的「待导入会话数」会从原来的残数突然跳成本机全量扫描数。
+    device_id / program 都取不到来源时跳过，不制造无法对上宿主的行。
+    """
+    try:
+        if con.execute("SELECT 1 FROM host_import_receipts LIMIT 1").fetchone():
+            return
+        # 启动期的写也走 LOCK，别给事务守卫添一条 unlocked_write。
+        with LOCK:
+            con.execute(
+                f"""INSERT OR IGNORE INTO host_import_receipts
+                       (device_id, program, idem, outcome, source_id, job_id, seen_at)
+                   SELECT s.device_id, a.program,
+                          s.idempotency_key, 'stored', s.id, '', COALESCE(s.ingested_at, '')
+                   FROM sources s
+                   JOIN agents a ON a.id = s.agent_id
+                   WHERE IFNULL(s.idempotency_key, '') != ''
+                     AND IFNULL(s.device_id, '') != ''
+                     AND IFNULL(a.program, '') != ''
+                     AND a.program IN ({','.join('?' for _ in HOST_PROGRAMS)})""",
+                tuple(HOST_PROGRAMS),
+            )
+            con.commit()
+    except sqlite3.Error:
+        # 账本建不起来也不能拖垮启动；UI 会退回旧的减法口径。
+        return
+
+
+def host_receipt_summary() -> dict[tuple[str, str], dict[str, int]]:
+    """按 (device_id, program) 汇总终态条数。没有账本行时不返回该键。"""
+    out: dict[tuple[str, str], dict[str, int]] = {}
+    for row in db().execute(
+        """SELECT device_id, program,
+                  SUM(CASE WHEN outcome IN ('stored','duplicate') THEN 1 ELSE 0 END) AS confirmed,
+                  SUM(CASE WHEN outcome = 'refused' THEN 1 ELSE 0 END) AS refused
+           FROM host_import_receipts
+           GROUP BY device_id, program"""
+    ):
+        out[(str(row["device_id"] or ""), str(row["program"] or ""))] = {
+            "confirmed": int(row["confirmed"] or 0),
+            "refused": int(row["refused"] or 0),
+        }
+    return out
+
+
 def connect(data: Path, scan: Path) -> None:
     global _DB, _DATA, _SCAN
     from rogmem.runtime_files import assert_runtime_files
@@ -557,6 +605,7 @@ def connect(data: Path, scan: Path) -> None:
     con = _open_connection(data / "rogmem.sqlite")
     schema = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
     con.executescript(schema)
+    _backfill_host_import_receipts(con)
     # 读文件的线程只活在这一个进程里。进程一停，还在「解析中」的行就是孤儿，
     # 重新排回「排队中」，下一次启动把它们接着读完。
     con.execute("UPDATE sources SET status=? WHERE status=?", (ST_QUEUED, ST_PARSING))
@@ -2530,31 +2579,45 @@ def submit_text(
     return {"ok": True, "id": source_id, "duplicate": False}
 
 
+def _history_idem(session_id: str, seq: int, body: str) -> str:
+    """一条历史会话的身份。accepted 与 refused 共用同一套算法，才能放进同一本账。"""
+    return f"{session_id}:{seq}:{hashlib.sha256((body or '').encode()).hexdigest()}"
+
+
 def _prepare_history_jobs(
     turns: list[dict], program: str, device_name: str | None
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, list[str]]:
     """解析并哈希。不切块、不嵌入。切块留给已经在跑的向量补齐。
-    返回 (待插入 jobs, 已拒绝条数)。被 ingest_history / ingest_history_for_job 共用。
+
+    返回 (待插入 jobs, 已拒绝条数, 被拒收条目的幂等键)。
+    被拒收的条目同样是终态，也必须进对账账本，否则会被永远算作「待导入」。
+    被 ingest_history / ingest_history_for_job 共用。
     """
     from rogmem.memory_defense import DefenseAction
 
     jobs: list[dict] = []
     refused = 0
+    refused_keys: list[str] = []
     for turn in turns or []:
         role = turn.get("role")
         event_at = str(turn.get("event_at") or "")
         cleaned = strip_recall(str(turn.get("text") or ""))
+        session_id = str(turn.get("session_id") or program)
+        turn_id = str(turn.get("turn_id") or session_id)
+        try:
+            seq = int(turn.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
         if role not in {"user", "assistant"} or not event_at or cleaned is None:
             refused += 1
+            refused_keys.append(_history_idem(session_id, seq, cleaned or ""))
             continue
         body, decision, blocked = _screen_ingest_body(cleaned)
         if blocked:
             refused += 1
+            refused_keys.append(_history_idem(session_id, seq, body or ""))
             continue
         kind = "user" if role == "user" else "agent"
-        session_id = str(turn.get("session_id") or program)
-        turn_id = str(turn.get("turn_id") or session_id)
-        seq = int(turn.get("seq") or 0)
         content_hash = hashlib.sha256((body or "").encode()).hexdigest()
         jobs.append({
             "kind": kind,
@@ -2564,7 +2627,7 @@ def _prepare_history_jobs(
             "event_at": event_at,
             "event_basis": _stored_basis(str(turn.get("event_basis") or "")),
             "label": resolve_device_name(turn.get("device_name") or device_name),
-            "idem": f"{session_id}:{seq}:{content_hash}",
+            "idem": _history_idem(session_id, seq, body or ""),
             "content_hash": content_hash,
             "cleaned": body,
             "project": str(turn.get("project") or "").strip(),
@@ -2576,7 +2639,53 @@ def _prepare_history_jobs(
             else None,
             "redacted": 1 if decision.action is DefenseAction.REDACT else 0,
         })
-    return order_history_newest_first(jobs), refused
+    return order_history_newest_first(jobs), refused, refused_keys
+
+
+def _record_host_receipts(
+    con: sqlite3.Connection,
+    *,
+    device_id: str,
+    program: str,
+    jobs: list[dict],
+    imported: list[dict],
+    refused_keys: list[str],
+    job_id: str,
+    now: str,
+) -> None:
+    """把这一批每条会话的终态写进对账账本。调用方与 sources 写入同一个事务。
+
+    stored / duplicate 都是「已确认在库」，refused 是「已确认无法导入」。
+    同一条键只记一次；只允许 refused 升级为 stored/duplicate，不允许反向降级。
+    """
+    if not device_id or not program:
+        return
+    rows = []
+    for job, item in zip(jobs, imported):
+        outcome = "duplicate" if item.get("duplicate") else "stored"
+        rows.append((device_id, program, str(job.get("idem") or ""), outcome,
+                     str(item.get("id") or ""), job_id, now))
+    for key in refused_keys:
+        rows.append((device_id, program, str(key), "refused", "", job_id, now))
+    if not rows:
+        return
+    con.executemany(
+        """INSERT OR IGNORE INTO host_import_receipts
+               (device_id, program, idem, outcome, source_id, job_id, seen_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        rows,
+    )
+    # 内容或防线策略变了时，以前被拒收的条目这次可能成功入库；只升级，不降级。
+    con.executemany(
+        """UPDATE host_import_receipts
+              SET outcome=?, source_id=?, job_id=?, seen_at=?
+            WHERE device_id=? AND program=? AND idem=? AND outcome='refused'""",
+        [
+            (outcome, source_id, job_id, now, device_id, program, idem)
+            for device_id, program, idem, outcome, source_id, job_id, now in rows
+            if outcome in {"stored", "duplicate"}
+        ],
+    )
 
 
 def _claim_unassigned_source(con, source_id: str, host) -> None:
@@ -2690,7 +2799,7 @@ def ingest_history(turns: list[dict], program: str = "历史导入", device_name
     （sources 表的 UNIQUE 幂等），不另加 helper 里的 dup_count 以免双计。
     """
     history_lane = lane_for(kind="user", origin=ORIGIN_HISTORY)
-    jobs, refused = _prepare_history_jobs(turns, program, device_name)
+    jobs, refused, _refused_keys = _prepare_history_jobs(turns, program, device_name)
     with LOCK:
         con = db()
         now = utcnow()
@@ -15315,7 +15424,7 @@ def ingest_history_for_job(
     + 计数共同记录审计。
     """
     history_lane = lane_for(kind="user", origin=ORIGIN_HISTORY)
-    jobs_prepared, prep_refused = _prepare_history_jobs(turns, program, device_name)
+    jobs_prepared, prep_refused, refused_keys = _prepare_history_jobs(turns, program, device_name)
     with LOCK:
         con = db()
         row = con.execute("SELECT * FROM host_jobs WHERE id=?", (job_id,)).fetchone()
@@ -15351,6 +15460,18 @@ def ingest_history_for_job(
                 now=now_iso,
                 bound_host=bound,
                 settle=False,
+            )
+            # 与 sources / host_jobs 计数同一事务：这批每条会话的终态一起落账。
+            # 之后「待导入会话数」按身份对账，不再把判重或被拒收的条目算成没导入。
+            _record_host_receipts(
+                con,
+                device_id=str(bound["device_id"] or "") if bound else "",
+                program=str(program or ""),
+                jobs=jobs_prepared,
+                imported=imported,
+                refused_keys=refused_keys,
+                job_id=job_id,
+                now=now_iso,
             )
             new_posted = sum(1 for item in imported if not item.get("duplicate"))
             new_dups = sum(1 for item in imported if item.get("duplicate"))
@@ -15863,9 +15984,13 @@ def list_connected_hosts(
             item["code"] = ""
         stored.append(item)
     sessions = _session_counts(con, stored)
+    receipts = host_receipt_summary()
     local_ids, viewer_known = _local_device_ids(stored, viewer_device_id, viewer_device_name)
     prepared = []
     for item in stored:
+        receipt = receipts.get((str(item.get("device_id") or ""), str(item.get("program") or "")))
+        item["confirmed"] = receipt["confirmed"] if receipt else None
+        item["refused"] = receipt["refused"] if receipt else 0
         local = item["device_id"] in local_ids
         base = display_device_name(item["device_name"])
         raw_connected = (item.get("connected_at") or "").strip()
@@ -15892,6 +16017,8 @@ def list_connected_hosts(
                 "last_used": item.get("last_used") or "",
                 "session_count": sessions.get(item["id"], {}).get("sessions", 0),
                 "history_count": sessions.get(item["id"], {}).get("history", 0),
+                "confirmed": item.get("confirmed"),
+                "refused": int(item.get("refused") or 0),
                 "call_count": int(item.get("call_count") or 0),
                 "plugin_version": item.get("plugin_version") or "",
                 "plugin_seen_at": item.get("plugin_seen_at") or "",

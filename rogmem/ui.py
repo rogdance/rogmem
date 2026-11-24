@@ -5846,10 +5846,19 @@ _HOST_FLEET_SCRIPT = r"""
         var cell = row.querySelector(".import-progress .scan-pending");
         if (!cell) return;
         var imported = Number(row.getAttribute("data-imported") || "0");
+        var confirmedAttr = row.getAttribute("data-confirmed");
+        var refused = Number(row.getAttribute("data-refused") || "0");
         var total = Number(item.importable);
         if (!isFinite(imported) || imported < 0) imported = 0;
+        if (!isFinite(refused) || refused < 0) refused = 0;
         if (!isFinite(total)) return;
-        var pending = total - imported;
+        // 按身份对账：已在库（含判重）+ 确认无法导入，都是终态，不再算进待导入。
+        var done = imported;
+        if (confirmedAttr !== null && confirmedAttr !== "") {
+          var confirmed = Number(confirmedAttr);
+          if (isFinite(confirmed) && confirmed >= 0) done = confirmed + refused;
+        }
+        var pending = total - done;
         cell.textContent = String(pending > 0 ? pending : 0);
       });
     });
@@ -6007,7 +6016,15 @@ _HOST_FLEET_SCRIPT = r"""
       if (statusCell.getAttribute("data-note") === "fail" && !active.length) return;
       var parts = [];
       if (active.length) parts.push("在途 " + active.length);
-      if (latest && latest.status === "completed") parts.push("完成 posted=" + latest.posted);
+      if (latest && latest.status === "completed") {
+        // posted=0 + 全量判重是正常终态，不该看起来像「什么都没做」。
+        var posted = Math.max(0, Number(latest.posted || 0));
+        var dupes = Math.max(0, Number(latest.duplicates || 0));
+        var skipped = Math.max(0, Number(latest.refused || 0));
+        var done = "完成 已确认 " + (posted + dupes) + " 条（新增 " + posted + " · 已在库 " + dupes + "）";
+        if (skipped) done += " · 跳过 " + skipped;
+        parts.push(done);
+      }
       if (latest && latest.status === "failed") parts.push("失败 " + (latest.last_error_class || "unknown"));
       if (latest && latest.status === "cancelled") parts.push("取消");
       if (latest && latest.status === "expired") parts.push("已过期（目标未在线）");
@@ -6090,6 +6107,11 @@ _HOST_FLEET_SCRIPT = r"""
           if (id && row.getAttribute("data-device-id") !== id) return;
           if (item.imported === undefined || item.imported === null) return;
           row.setAttribute("data-imported", String(item.imported));
+          // 有对账账本时按身份算；没有账本（升级前老数据）时保留旧减法口径。
+          if (item.confirmed !== undefined && item.confirmed !== null) {
+            row.setAttribute("data-confirmed", String(item.confirmed));
+            row.setAttribute("data-refused", String(item.refused || 0));
+          }
         });
       });
     }).catch(function () {});
@@ -6145,7 +6167,7 @@ _HOST_TIPS = {
     "最近活跃": "最近一次带着授权和记忆中枢通信的时间。",
     "累计录入会话数": "累计录入会话数把该智能体的输入和输出各算 1 条，从已有记录累加；文件和宿主记忆不算。",
     "累计调用次数": "累计调用次数只计成功读取记忆的次数：核心记忆、检索、读章节、读原文，用来看它对记忆的依赖。提交会话和内部萃取不计。",
-    "待导入会话数": "这台电脑上已经扫到、还没有进入记忆中枢的历史会话条数。输入和输出各算 1 条。本地存量减去已经导入的，所以这个数会变少。还没扫到时显示 —；都导入完了显示 0。页面开着时会向本机通道重新要这个数。",
+    "待导入会话数": "这台电脑上已经扫到、还没有进入记忆中枢的历史会话条数。输入和输出各算 1 条。按每条会话的身份对账：本机扫到的条数，减去中枢已确认在库的（含重复导入时判重的）和已确认无法导入的（跳过条），结果小于 0 时显示 0。已在库或被跳过的都是终态，重复点击导入不会再把它们算回待导入。还没扫到时显示 —；都导入完了显示 0。页面开着时会向本机通道重新要这个数。",
     "操作": "用来通过授权、停止授权，或让已经启用的宿主导入历史。启用中可以停止授权，停用后再通过仍用原来的密钥。待放行点通过授权后等待领取，没领到密钥不算连上。",
 }
 
@@ -6216,20 +6238,39 @@ def _scan_buttons(report: dict | None) -> str:
     return " ".join(parts)
 
 
-def _import_cell(report: dict | None, imported: int = 0) -> str:
+def _import_cell(
+    report: dict | None,
+    imported: int = 0,
+    confirmed: int | None = None,
+    refused: int = 0,
+) -> str:
     """待导入列。两件事分开展示，不互相覆盖（评审 PR #116 §6）：
     - 本机扫描到的「还未导入」量（由 JS pullLocal 刷新进 .scan-pending 子节点）。
     - 作业在途/完成/失败状态（由 JS pullJobs 刷新进 .job-status 子节点）。
+
+    confirmed 不为 None 时按导入对账账本算：本机总量 − 已确认在库 − 已确认无法导入。
+    confirmed 为 None 表示这台设备还没有账本（升级前的老数据），退回旧的减法口径。
     """
     total = (report or {}).get("importable") if report else None
     try:
-        pending = max(int(total) - int(imported or 0), 0) if total not in (None, "") else None
+        if total in (None, ""):
+            pending = None
+        elif confirmed is None:
+            pending = max(int(total) - int(imported or 0), 0)
+        else:
+            pending = max(int(total) - int(confirmed or 0) - int(refused or 0), 0)
     except (TypeError, ValueError):
         pending = None
     pending_str = "—" if pending is None else str(pending)
+    skipped = int(refused or 0)
+    skipped_html = (
+        f"<span class='scan-skipped muted' title='这 {skipped} 条已确认无法导入，不计入待导入'>跳过 {skipped}</span>"
+        if skipped > 0 else ""
+    )
     return (
         "<td class='import-progress'>"
         f"<span class='scan-pending' title='本机扫到但还没入库的条数'>{pending_str}</span>"
+        f"{skipped_html}"
         "<span class='job-status muted' aria-live='polite' title='这一行最近一次导入历史的进度'></span>"
         "</td>"
     )
@@ -6339,8 +6380,11 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
             imported = int(row.get("history_count") or 0)
         else:
             imported = imported_by_program.get(program, int((report or {}).get("imported") or 0))
+        confirmed = row.get("confirmed")
+        refused = int(row.get("refused") or 0)
+        confirmed_attr = "" if confirmed is None else esc(int(confirmed))
         fleet_rows.append(
-            "<tr data-device-id='{id}' data-device-name='{name}' data-program='{program}' data-imported='{imported}' data-local='{local}' data-plugin='{plugin_status}'>"
+            "<tr data-device-id='{id}' data-device-name='{name}' data-program='{program}' data-imported='{imported}' data-confirmed='{confirmed}' data-refused='{refused}' data-local='{local}' data-plugin='{plugin_status}'>"
             "<td class='agent-name' data-base='{agent}'>{agent}{mark}</td>"
             "{access}<td>{connected}</td><td>{active}</td>"
             "<td>{sessions}</td><td>{calls}</td>{plugin}{progress}<td class='ops'>{op}</td></tr>".format(
@@ -6350,6 +6394,8 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
                 name=base,
                 program=esc(program),
                 imported=imported,
+                confirmed=confirmed_attr,
+                refused=refused,
                 local="1" if row.get("local") else "0",
                 mark=mark,
                 agent=agent,
@@ -6358,7 +6404,7 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
                 active=_host_stamp(row.get("last_used") or ""),
                 sessions=esc(row.get("session_count") or 0),
                 calls=esc(row.get("call_count") or 0),
-                progress=_import_cell(report, imported),
+                progress=_import_cell(report, imported, confirmed=confirmed, refused=refused),
                 op=op,
             )
         )

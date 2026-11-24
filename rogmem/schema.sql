@@ -343,6 +343,24 @@ CREATE INDEX IF NOT EXISTS host_jobs_attempts ON host_jobs(status, max_attempts)
 -- 再 CREATE UNIQUE INDEX IF NOT EXISTS），避免 schema.sql executescript 阶段
 -- 老库启动即 IntegrityError。
 
+-- 导入对账账本：以幂等键（session:seq:content_hash）为单位记一台电脑一个宿主的终态。
+-- 「待导入会话数」不再用「本机扫描总数 − 中枢累计录入数」这种跨口径的减法，
+-- 而是用「本机扫描总数 − 已确认在库 − 已确认无法导入」。
+-- stored / duplicate 都算「已确认在库」，refused 算「已确认无法导入」；三者都是终态，
+-- 重复点击导入不会把它们又算回待导入。同一条键只记一次，跨设备互不串账。
+CREATE TABLE IF NOT EXISTS host_import_receipts (
+  device_id TEXT NOT NULL,
+  program TEXT NOT NULL,
+  idem TEXT NOT NULL,
+  outcome TEXT NOT NULL,          -- stored | duplicate | refused
+  source_id TEXT,
+  job_id TEXT NOT NULL DEFAULT '',
+  seen_at TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (device_id, program, idem)
+);
+CREATE INDEX IF NOT EXISTS host_import_receipts_by_host
+  ON host_import_receipts(device_id, program, outcome);
+
 CREATE TABLE IF NOT EXISTS enroll_grants (
   id TEXT PRIMARY KEY,
   secret_hash TEXT NOT NULL UNIQUE,
