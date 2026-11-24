@@ -5848,15 +5848,21 @@ _HOST_FLEET_SCRIPT = r"""
         var imported = Number(row.getAttribute("data-imported") || "0");
         var confirmedAttr = row.getAttribute("data-confirmed");
         var refused = Number(row.getAttribute("data-refused") || "0");
+        var reconciledAttr = row.getAttribute("data-reconciled");
         var total = Number(item.importable);
         if (!isFinite(imported) || imported < 0) imported = 0;
         if (!isFinite(refused) || refused < 0) refused = 0;
         if (!isFinite(total)) return;
-        // 按身份对账：已在库（含判重）+ 确认无法导入，都是终态，不再算进待导入。
+        // 三种核销证据取最大值：已入库数、按身份记的终态账本、完成作业核销的原始行数。
+        // 只有 reconciled 与 total 同为「行」口径，能核销掉历史里的同源重复行。
         var done = imported;
         if (confirmedAttr !== null && confirmedAttr !== "") {
           var confirmed = Number(confirmedAttr);
-          if (isFinite(confirmed) && confirmed >= 0) done = confirmed + refused;
+          if (isFinite(confirmed) && confirmed >= 0) done = Math.max(done, confirmed + refused);
+        }
+        if (reconciledAttr !== null && reconciledAttr !== "") {
+          var reconciled = Number(reconciledAttr);
+          if (isFinite(reconciled) && reconciled >= 0) done = Math.max(done, reconciled);
         }
         var pending = total - done;
         cell.textContent = String(pending > 0 ? pending : 0);
@@ -6112,6 +6118,9 @@ _HOST_FLEET_SCRIPT = r"""
             row.setAttribute("data-confirmed", String(item.confirmed));
             row.setAttribute("data-refused", String(item.refused || 0));
           }
+          if (item.reconciled !== undefined && item.reconciled !== null) {
+            row.setAttribute("data-reconciled", String(item.reconciled));
+          }
         });
       });
     }).catch(function () {});
@@ -6167,7 +6176,7 @@ _HOST_TIPS = {
     "最近活跃": "最近一次带着授权和记忆中枢通信的时间。",
     "累计录入会话数": "累计录入会话数把该智能体的输入和输出各算 1 条，从已有记录累加；文件和宿主记忆不算。",
     "累计调用次数": "累计调用次数只计成功读取记忆的次数：核心记忆、检索、读章节、读原文，用来看它对记忆的依赖。提交会话和内部萃取不计。",
-    "待导入会话数": "这台电脑上已经扫到、还没有进入记忆中枢的历史会话条数。输入和输出各算 1 条。按每条会话的身份对账：本机扫到的条数，减去中枢已确认在库的（含重复导入时判重的）和已确认无法导入的（跳过条），结果小于 0 时显示 0。已在库或被跳过的都是终态，重复点击导入不会再把它们算回待导入。还没扫到时显示 —；都导入完了显示 0。页面开着时会向本机通道重新要这个数。",
+    "待导入会话数": "这台电脑上已经扫到、还没有进入记忆中枢的历史会话条数，输入和输出各算 1 条。用本机扫到的「原始行数」减去已经核销的「原始行数」：最近一次完成的导入作业里，新增入库、判重已在库、确认无法导入的都算核销，因此同一条原文在历史里出现两次也不会被永远算成待导入。没有完成过作业时退回按会话身份对账（已在库含判重、跳过条都是终态）。结果小于 0 时显示 0；还没扫到时显示 —。页面开着时会向本机通道重新要这个数。",
     "操作": "用来通过授权、停止授权，或让已经启用的宿主导入历史。启用中可以停止授权，停用后再通过仍用原来的密钥。待放行点通过授权后等待领取，没领到密钥不算连上。",
 }
 
@@ -6243,22 +6252,32 @@ def _import_cell(
     imported: int = 0,
     confirmed: int | None = None,
     refused: int = 0,
+    reconciled: int | None = None,
 ) -> str:
     """待导入列。两件事分开展示，不互相覆盖（评审 PR #116 §6）：
     - 本机扫描到的「还未导入」量（由 JS pullLocal 刷新进 .scan-pending 子节点）。
     - 作业在途/完成/失败状态（由 JS pullJobs 刷新进 .job-status 子节点）。
 
-    confirmed 不为 None 时按导入对账账本算：本机总量 − 已确认在库 − 已确认无法导入。
-    confirmed 为 None 表示这台设备还没有账本（升级前的老数据），退回旧的减法口径。
+    已核销量取三者的最大值，每一种都是同一件事的独立证据，取大不取和：
+    - imported：本宿主已入库条数（最老的减法口径）；
+    - confirmed + refused：按会话身份记的终态账本（含判重与拒收）；
+    - reconciled：最近一次完成作业核销的原始扫描行数，与 importable 同为「行」口径。
+
+    账本按身份去重，而 importable 数的是原始行；同一条原文在历史里出现两次时，
+    只有 reconciled 能把这两行一起核销掉，否则会永远留下清不掉的残数。
+    三者都没有时（升级前的老数据）退回 imported，不把数字突然放大。
     """
     total = (report or {}).get("importable") if report else None
     try:
         if total in (None, ""):
             pending = None
-        elif confirmed is None:
-            pending = max(int(total) - int(imported or 0), 0)
         else:
-            pending = max(int(total) - int(confirmed or 0) - int(refused or 0), 0)
+            done = max(int(imported or 0), 0)
+            if confirmed is not None:
+                done = max(done, int(confirmed or 0) + int(refused or 0))
+            if reconciled is not None:
+                done = max(done, int(reconciled or 0))
+            pending = max(int(total) - done, 0)
     except (TypeError, ValueError):
         pending = None
     pending_str = "—" if pending is None else str(pending)
@@ -6382,9 +6401,11 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
             imported = imported_by_program.get(program, int((report or {}).get("imported") or 0))
         confirmed = row.get("confirmed")
         refused = int(row.get("refused") or 0)
+        reconciled = row.get("reconciled")
         confirmed_attr = "" if confirmed is None else esc(int(confirmed))
+        reconciled_attr = "" if reconciled is None else esc(int(reconciled))
         fleet_rows.append(
-            "<tr data-device-id='{id}' data-device-name='{name}' data-program='{program}' data-imported='{imported}' data-confirmed='{confirmed}' data-refused='{refused}' data-local='{local}' data-plugin='{plugin_status}'>"
+            "<tr data-device-id='{id}' data-device-name='{name}' data-program='{program}' data-imported='{imported}' data-confirmed='{confirmed}' data-refused='{refused}' data-reconciled='{reconciled}' data-local='{local}' data-plugin='{plugin_status}'>"
             "<td class='agent-name' data-base='{agent}'>{agent}{mark}</td>"
             "{access}<td>{connected}</td><td>{active}</td>"
             "<td>{sessions}</td><td>{calls}</td>{plugin}{progress}<td class='ops'>{op}</td></tr>".format(
@@ -6396,6 +6417,7 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
                 imported=imported,
                 confirmed=confirmed_attr,
                 refused=refused,
+                reconciled=reconciled_attr,
                 local="1" if row.get("local") else "0",
                 mark=mark,
                 agent=agent,
@@ -6404,7 +6426,10 @@ def hosts_page(rows: list[dict], fleet: dict | None = None, filters: dict | None
                 active=_host_stamp(row.get("last_used") or ""),
                 sessions=esc(row.get("session_count") or 0),
                 calls=esc(row.get("call_count") or 0),
-                progress=_import_cell(report, imported, confirmed=confirmed, refused=refused),
+                progress=_import_cell(
+                    report, imported, confirmed=confirmed, refused=refused,
+                    reconciled=reconciled,
+                ),
                 op=op,
             )
         )

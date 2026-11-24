@@ -941,6 +941,9 @@ async def hosts_progress(request: Request) -> Response:
                     # None = 这台设备还没有对账账本，前端退回旧口径；有账本时按身份对账。
                     "confirmed": row.get("confirmed"),
                     "refused": int(row.get("refused") or 0),
+                    # 最近一次完成作业核销的「原始扫描行数」，与 importable 同口径。
+                    # None = 还没有完成过作业，前端仍按账本身份数算。
+                    "reconciled": row.get("reconciled"),
                 }
                 for row in fleet.get("rows") or []
             ]

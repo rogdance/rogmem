@@ -257,3 +257,114 @@ def test_page_and_js_contract_use_the_reconciliation_basis(tmp_path, monkeypatch
     assert ">2<" in ui._import_cell({"importable": 10}, 3, confirmed=5, refused=3)
     assert ">0<" in ui._import_cell({"importable": 10}, 3, confirmed=10, refused=0)
     assert "跳过 3" in ui._import_cell({"importable": 10}, 3, confirmed=5, refused=3)
+
+
+# ---------------------------------------------------------------------------
+# 第二层：本机 importable 数的是「原始行」，账本按「会话身份」去重。
+# 同一条原文在历史里出现两次时，账本只能记 1 个身份，于是永远留下清不掉的残数。
+# 完成作业的 posted+duplicates+refused 才是同一口径的原始行数。
+# ---------------------------------------------------------------------------
+
+def _report(engine, program: str, importable: int) -> None:
+    engine.report_hosts([{
+        "program": program, "found": True, "access": "已接入",
+        "health": "正常", "detail": "", "importable": importable,
+    }])
+
+
+def test_repeated_identical_rows_no_longer_stay_pending(tmp_path, monkeypatch):
+    """历史里同一条原文出现两次：账本记 3 个身份，作业核销 5 行，待导入必须为 0。"""
+    engine = _open(tmp_path, monkeypatch)
+    agent = _agent(engine, "dev-dup", "Hermes")
+    base = _turns("dup", 3)
+    turns = base + [dict(base[0]), dict(base[1])]  # 5 行原文，只有 3 个身份
+    _report(engine, "Hermes", 5)
+
+    first = _run_job(engine, agent, "Hermes", turns, "dup-1")
+    assert first["posted"] == 3 and first["duplicates"] == 2
+    row = _row(engine, "dev-dup")
+    assert row["confirmed"] == 3        # 账本按身份去重，永远到不了 5
+    assert row["reconciled"] == 5       # 作业按原始行核销
+    assert ">0<" in _pending_span(engine, "dev-dup")
+
+    # 反复点击：全量判重，残数不能回来。
+    second = _run_job(engine, agent, "Hermes", turns, "dup-2")
+    assert second["posted"] == 0 and second["duplicates"] == 5
+    assert _row(engine, "dev-dup")["reconciled"] == 5
+    assert ">0<" in _pending_span(engine, "dev-dup")
+
+
+def test_pending_only_counts_rows_added_since_last_job(tmp_path, monkeypatch):
+    """作业核销的是当时的扫描快照；之后新增的历史只显示新增的那几行。"""
+    engine = _open(tmp_path, monkeypatch)
+    agent = _agent(engine, "dev-grow", "WorkBuddy")
+    _report(engine, "WorkBuddy", 4)
+    _run_job(engine, agent, "WorkBuddy", _turns("grow", 4), "grow-1")
+    assert _row(engine, "dev-grow")["reconciled"] == 4
+    assert ">0<" in _pending_span(engine, "dev-grow")
+
+    _report(engine, "WorkBuddy", 7)
+    assert ">3<" in _pending_span(engine, "dev-grow")
+
+    _run_job(engine, agent, "WorkBuddy", _turns("grow", 7), "grow-2")
+    assert _row(engine, "dev-grow")["reconciled"] == 7
+    assert ">0<" in _pending_span(engine, "dev-grow")
+
+
+def test_no_completed_job_falls_back_to_ledger(tmp_path, monkeypatch):
+    """没完成过作业的设备不虚构 reconciled，继续用身份账本，数字不放大。"""
+    engine = _open(tmp_path, monkeypatch)
+    agent = _agent(engine, "dev-nojob", "Cursor")
+    _report(engine, "Cursor", 4)
+    assert engine.host_scan_reconciliation() == {}
+    assert _row(engine, "dev-nojob")["reconciled"] is None
+
+    created = engine.create_host_import_job(
+        agent_id=agent, program="Cursor", request_id="nojob-1"
+    )
+    assert created["ok"]
+    claimed = engine.claim_host_import_jobs(agent_id=agent)
+    assert claimed
+    engine.ingest_history_for_job(
+        agent_id=agent, job_id=claimed[0]["id"],
+        lease_token=claimed[0]["lease_token"], program="Cursor",
+        turns=_turns("nojob", 4),
+    )
+    # 作业还在 running，没有终态，reconciled 仍缺席，账本口径照常工作。
+    assert engine.host_scan_reconciliation() == {}
+    row = _row(engine, "dev-nojob")
+    assert row["reconciled"] is None and row["confirmed"] == 4
+    assert ">0<" in _pending_span(engine, "dev-nojob")
+
+    engine.ack_host_import_job(
+        agent_id=agent, job_id=claimed[0]["id"],
+        lease_token=claimed[0]["lease_token"], status="completed",
+    )
+    assert engine.host_scan_reconciliation()[("dev-nojob", "Cursor")] == 4
+
+
+def test_reconciled_contract_is_rendered_and_refreshed(tmp_path, monkeypatch):
+    """服务端渲染、进度接口前端写回、浏览器本地刷新必须都认 reconciled。"""
+    from rogmem import ui
+
+    engine = _open(tmp_path, monkeypatch)
+    agent = _agent(engine, "dev-contract", "Hermes")
+    base = _turns("c", 3)
+    _report(engine, "Hermes", 5)
+    _run_job(engine, agent, "Hermes", base + [dict(base[0]), dict(base[1])], "c-1")
+
+    page = ui.hosts_page(
+        engine.list_hosts(),
+        engine.list_connected_hosts(viewer_device_id="dev-contract"),
+        {},
+    )
+    row = page.split("data-device-id='dev-contract'", 1)[1].split("</tr>", 1)[0]
+    assert "data-reconciled='5'" in row
+    assert "reconciledAttr" in page and "item.reconciled" in page
+    assert ">0<" in _pending_span(engine, "dev-contract")
+
+    # 三种证据取最大值，不叠加、不重复减 refused。
+    assert ">0<" in ui._import_cell({"importable": 5}, 3, confirmed=3, refused=0, reconciled=5)
+    assert ">2<" in ui._import_cell({"importable": 7}, 3, confirmed=3, refused=0, reconciled=5)
+    assert ">0<" in ui._import_cell({"importable": 5}, 3, confirmed=2, refused=1, reconciled=5)
+    assert ">7<" in ui._import_cell({"importable": 10}, 3, reconciled=None)

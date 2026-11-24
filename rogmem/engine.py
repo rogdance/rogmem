@@ -593,6 +593,36 @@ def host_receipt_summary() -> dict[tuple[str, str], dict[str, int]]:
     return out
 
 
+def host_scan_reconciliation() -> dict[tuple[str, str], int]:
+    """最近一次完成的导入作业，实际核销了多少条「原始扫描行」。
+
+    posted + duplicates + refused 就是客户端这一轮送上来的全部行数：新增入库的、
+    被 idempotency_key 判重的、确认无法导入的，都算已经核销。作业跨多个批次累加，
+    所以这个数字天然按「行」计数。
+
+    host_import_receipts 的账本按会话身份去重（同一条原文在历史里出现两次只记一条），
+    而本机 importable 数的是原始行。拿行数减身份数，会把同源重复行永远算成待导入。
+    这里返回与 importable 同口径的核销行数，让两边可以相减。没有完成作业时返回空，
+    调用方退回账本口径，升级前的老设备不会被放大数字。
+    """
+    out: dict[tuple[str, str], int] = {}
+    for row in db().execute(
+        """SELECT device_id, program, posted, duplicates, refused
+             FROM host_jobs
+            WHERE status='completed' AND kind='history_import'
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC"""
+    ):
+        key = (str(row["device_id"] or ""), str(row["program"] or ""))
+        if key in out:
+            continue
+        out[key] = (
+            int(row["posted"] or 0)
+            + int(row["duplicates"] or 0)
+            + int(row["refused"] or 0)
+        )
+    return out
+
+
 def connect(data: Path, scan: Path) -> None:
     global _DB, _DATA, _SCAN
     from rogmem.runtime_files import assert_runtime_files
@@ -15985,12 +16015,15 @@ def list_connected_hosts(
         stored.append(item)
     sessions = _session_counts(con, stored)
     receipts = host_receipt_summary()
+    reconciled = host_scan_reconciliation()
     local_ids, viewer_known = _local_device_ids(stored, viewer_device_id, viewer_device_name)
     prepared = []
     for item in stored:
-        receipt = receipts.get((str(item.get("device_id") or ""), str(item.get("program") or "")))
+        key = (str(item.get("device_id") or ""), str(item.get("program") or ""))
+        receipt = receipts.get(key)
         item["confirmed"] = receipt["confirmed"] if receipt else None
         item["refused"] = receipt["refused"] if receipt else 0
+        item["reconciled"] = reconciled.get(key)
         local = item["device_id"] in local_ids
         base = display_device_name(item["device_name"])
         raw_connected = (item.get("connected_at") or "").strip()
@@ -16019,6 +16052,7 @@ def list_connected_hosts(
                 "history_count": sessions.get(item["id"], {}).get("history", 0),
                 "confirmed": item.get("confirmed"),
                 "refused": int(item.get("refused") or 0),
+                "reconciled": item.get("reconciled"),
                 "call_count": int(item.get("call_count") or 0),
                 "plugin_version": item.get("plugin_version") or "",
                 "plugin_seen_at": item.get("plugin_seen_at") or "",
