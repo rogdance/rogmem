@@ -20,11 +20,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request
 
+from rogmem import win_console
 from rogmem.hermes_memory import stable_seq, work_repository
 
 FIXED_FORWARD_PORT = 18780
 # A relay can accept the socket and still take a moment to answer. Discovery has to outlast that.
 _ENTRANCE_TIMEOUT = 2
+
+# An unreachable hub used to re-read the machine's whole listen table on every
+# request. On Windows each read starts netstat, a console program; under the
+# default terminal that flashes a window. Keep one short-lived snapshot.
+_NETSTAT_TTL = 5.0
+_netstat_snapshot: tuple[float, str] | None = None
+_netstat_lock = threading.Lock()
+
+# The second half of that churn is the port probing done by find_binding().
+# Reuse the whole discovery for a short gap when the hub keeps failing.
+_BINDING_TTL = 2.0
+_binding_snapshot: tuple[float, str] | None = None
+_binding_lock = threading.Lock()
 
 
 def find_rogmem(start: int = 10000, end: int = 10050) -> int | None:
@@ -200,7 +214,7 @@ def _ports_from_listen_table(text: str) -> set[int]:
     return ports
 
 
-def _netstat_text() -> str:
+def _netstat_text(*, force: bool = False) -> str:
     """Read the listen table without assuming the OS speaks UTF-8.
 
     A Chinese Windows ``netstat`` emits the local code page (cp936/GBK). Asking
@@ -208,13 +222,23 @@ def _netstat_text() -> str:
     reader thread and silently yields no stdout — which makes every local-door
     fallback look like there is no listener at all. Decode bytes ourselves and
     tolerate undecodable bytes: the table we parse is ASCII regardless.
+
+    The table changes slowly, so a short-lived snapshot is reused instead of
+    spawning a fresh console process for every failed upstream hop.
     """
+    global _netstat_snapshot
     import locale
     import subprocess
 
-    command = ["netstat", "-an", "-p", "tcp"] if platform.system() == "Windows" else ["netstat", "-an"]
+    now = time.monotonic()
+    with _netstat_lock:
+        cached = _netstat_snapshot
+        if not force and cached and now - cached[0] < _NETSTAT_TTL:
+            return cached[1]
+
+    command = ["netstat", "-an", "-p", "tcp"] if win_console.is_windows() else ["netstat", "-an"]
     try:
-        result = subprocess.run(command, check=False, capture_output=True, timeout=3)
+        result = win_console.silent_run(command, timeout=3)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     raw = result.stdout or b""
@@ -222,7 +246,7 @@ def _netstat_text() -> str:
         return ""
     # On Windows netstat writes the system ANSI code page, not the interpreter
     # locale. Python may report UTF-8 even when the bytes are cp936/GBK.
-    if platform.system() == "Windows":
+    if win_console.is_windows():
         encoding = "mbcs"
     else:
         try:
@@ -230,9 +254,12 @@ def _netstat_text() -> str:
         except Exception:
             encoding = "utf-8"
     try:
-        return raw.decode(encoding, errors="replace")
+        text = raw.decode(encoding, errors="replace")
     except LookupError:
-        return raw.decode("utf-8", errors="replace")
+        text = raw.decode("utf-8", errors="replace")
+    with _netstat_lock:
+        _netstat_snapshot = (now, text)
+    return text
 
 
 def listening_ports() -> list[int]:
@@ -1922,9 +1949,18 @@ class _Proxy(BaseHTTPRequestHandler):
 
     def _another_binding(self) -> str:
         """A local listener that is this same hub. It does not replace the entrance."""
+        global _binding_snapshot
         identity = (getattr(self, "hub", "") or "").strip()
         if not identity:
             return ""
+        now = time.monotonic()
+        with _binding_lock:
+            cached = _binding_snapshot
+            if cached and now - cached[0] < _BINDING_TTL:
+                return cached[1]
+            # Claim this window before scanning, so concurrent requests do not
+            # each launch their own round of port probes.
+            _binding_snapshot = (now, "")
         own = 0
         server = getattr(self, "server", None)
         if server is not None:
@@ -1933,9 +1969,13 @@ class _Proxy(BaseHTTPRequestHandler):
             except (TypeError, ValueError, OSError):
                 own = 0
         try:
-            return find_binding(identity, allow_door=False, skip={own}) or ""
+            found = find_binding(identity, allow_door=False, skip={own}) or ""
         except Exception:
-            return ""
+            found = ""
+        with _binding_lock:
+            if _binding_snapshot and _binding_snapshot[0] == now:
+                _binding_snapshot = (now, found)
+        return found
 
     def _open_upstream(self):
         """Dial this hub. A binding that once answered is a cache; a failed dial leaves the entrance in place."""

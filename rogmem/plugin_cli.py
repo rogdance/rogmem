@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
+from rogmem import win_console
+
 DOOR = "http://127.0.0.1:18780"
 
 
@@ -283,14 +285,14 @@ def _door_plugin() -> str:
 def _door_pid() -> int:
     """The process listening on 18780, if this machine can tell."""
     try:
-        if os.name == "nt":
-            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True).stdout.decode("ascii", "replace")
+        if win_console.is_windows():
+            out = win_console.silent_run(["netstat", "-ano", "-p", "TCP"]).stdout.decode("ascii", "replace")
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) >= 5 and parts[1].endswith(":18780") and parts[3].upper() == "LISTENING":
                     return int(parts[4])
         else:
-            out = subprocess.run(["lsof", "-tiTCP:18780", "-sTCP:LISTEN"], capture_output=True, text=True).stdout
+            out = win_console.silent_run(["lsof", "-tiTCP:18780", "-sTCP:LISTEN"], text=True).stdout
             return int(out.split()[0]) if out.strip() else 0
     except (OSError, ValueError, IndexError):
         return 0
